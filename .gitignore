@@ -1,0 +1,46 @@
+# Windows and editor files
+Thumbs.db
+Desktop.ini
+.DS_Store
+.vs/
+.idea/
+*.user
+*.suo
+
+# .NET build output
+bin/
+obj/
+AppPackages/
+BundleArtifacts/
+TestResults/
+*.pfx
+
+# Node.js build output
+node_modules/
+dist/
+coverage/
+.turbo/
+.pnpm-store/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+credentials/
+
+# Runtime data and backups
+data/
+uploads/
+storage/
+backups/
+
+# Logs and temporary files
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+*.bak

@@ -1,0 +1,231 @@
+第二关卡报告
+
+确定日期：2026-08-08
+
+一、Windows 客户端技术栈
+
+- C# + .NET 10 LTS。
+- WinUI 3 + Windows App SDK，采用 MVVM 分层。
+- 通过 Windows GlobalSystemMediaTransportControlsSession 读取并控制系统媒体，QQ 音乐作为首个验证播放器。
+- 使用 MSIX 打包；v0.1 优先采用自包含发布，降低个人安装时的运行库配置成本。
+
+二、VPS 后端技术栈
+
+- 目标环境：fuxia-vps。
+- 只读检查结果：Debian 13、2 vCPU、约 2 GB RAM、34 GB 系统盘，约 31 GB 磁盘可用。
+- 服务器已有 Node.js、Python 和 Git；未发现 Docker、PostgreSQL、Nginx 或 Caddy。
+- 现有服务采用 systemd 与 Cloudflare Tunnel，并主要监听服务器本机回环端口。
+- 后端采用 Node.js 24 LTS + TypeScript，使用 Fastify 构建 App API。
+- 使用官方 MCP TypeScript SDK v1.x，通过 Streamable HTTP 提供远程 MCP；在 v2 正式稳定前不采用预发布版本。
+- v0.1 采用模块化单体：App API、MCP、身份权限、审核与业务逻辑在同一服务内分模块实现，共享一套领域层和数据库。
+- 沿用服务器现有部署习惯：创建独立 systemd 服务、只监听新的 127.0.0.1 端口，再通过 Cloudflare Tunnel 暴露 HTTPS。
+- 新服务不得占用或修改现有服务端口，不得影响服务器上已经运行的服务。
+- v0.1 不引入 Docker，避免在约 2 GB 内存的 VPS 上增加常驻开销和运维层级。
+
+三、数据库方案
+
+- PostgreSQL 17，使用 Debian 13 官方软件包版本。
+- 数据库仅允许服务器本机连接，不直接暴露公网端口。
+- 使用 Drizzle ORM + SQL Migration 管理结构变更；正式数据迁移必须保留可追踪版本。
+- 项目、任务、报告、审核版本、Study Session、AI 身份与 Audit Log 存入 PostgreSQL。
+- 素材文件保存在独立文件目录，PostgreSQL 保存素材元数据、关联关系和校验信息；后续需要时再迁移到对象存储。
+
+四、代码仓库结构
+
+- v0.1 使用单一 Git 仓库，Windows 客户端与 VPS 服务同库维护。
+
+仓库结构：
+
+/
+├─ apps/
+│  ├─ windows/          # C#、WinUI 3、Windows 媒体模块
+│  └─ server/           # TypeScript、App API、MCP 与后台任务
+├─ packages/
+│  └─ contracts/        # OpenAPI、JSON Schema 与跨端数据契约
+├─ tests/
+│  ├─ integration/      # API、MCP、权限与数据库集成测试
+│  └─ e2e/              # 项目路线和 Study Session 完整流程
+├─ infra/
+│  ├─ systemd/          # 新服务部署模板
+│  └─ cloudflare/       # Tunnel 路由说明，不保存密钥
+├─ docs/                # 项目计划、架构、决策与运维文档
+├─ scripts/             # 本地开发、迁移、备份与检查脚本
+└─ README.md
+
+- apps/server 内继续按 domain、application、infrastructure、api、mcp 分层，避免 API 与 MCP 各自实现一套业务规则。
+- 仓库中不保存生产密钥、数据库密码、Tunnel 凭据或本机配置文件。
+
+五、决定结果
+
+- Windows 客户端技术栈：已确定。
+- VPS 后端技术栈：已确定。
+- 数据库方案：已确定。
+- 代码仓库结构：已确定。
+
+六、VPS 检查说明
+
+本次仅通过 SSH 执行只读检查。没有安装软件、修改配置、创建文件、占用端口、重启服务或改动服务器上正在运行的内容。
+
+七、开发分支规则
+
+v0.1 采用轻量 Git Flow，以 develop 作为日常集成分支，以短期工作分支承载具体修改。
+
+长期分支：
+
+- main：正式、可发布、经过用户确认的版本。
+- develop：日常开发与集成基线；一般开发工作从该分支开始并合并回该分支。
+
+短期分支命名：
+
+- feat/<范围>-<内容>：新增功能。
+- fix/<范围>-<内容>：缺陷修复。
+- docs/<内容>：文档修改。
+- chore/<内容>：构建、依赖、脚本和维护工作。
+- spike/<内容>：需要验证但尚未确定采用的技术实验。
+- release/<版本号>：发布前冻结、验收和版本整理。
+- hotfix/<内容>：正式版本的紧急修复。
+
+范围示例：windows、server、mcp、database、study、media、assets、review。
+
+开发流程：
+
+1. 正式开发从最新 develop 创建一个目标明确的短期分支。
+2. 一个分支只处理一个主题，避免把不相关修改混在一起。
+3. 多个 AI 不共同直接修改同一个工作分支；每个 AI 使用自己的短期分支，工作归属通过提交作者和工作报告记录。
+4. 工作分支完成后先同步最新 develop，解决冲突并运行对应测试。
+5. 通过 Pull Request 合并回 develop；涉及权限、审核、数据迁移或安全的修改必须由用户确认。
+6. 默认使用 squash merge，让 develop 上每项工作保留一个清晰提交；需要保留迁移历史时可以使用普通 merge。
+7. 合并后删除短期分支，禁止长期堆积无人维护的功能分支。
+8. 禁止 force push 到 develop；个人短期分支只有在尚未共享且不会覆盖他人工作时才允许整理历史。
+9. 提交信息采用 Conventional Commits，例如 feat(server): add study session API。
+10. 任何密钥、Token、数据库密码、Tunnel 凭据、生产配置和用户隐私数据都不得提交到任何分支。
+
+发布流程：
+
+develop
+→ 创建 release/v0.1.0
+→ 只进行验收修复、文档整理和版本号更新
+→ 全部验收通过
+→ 用户确认
+→ 合并到 main
+→ 创建 v0.1.0 tag
+→ 将发布修复同步回 develop
+
+紧急修复流程：
+
+main
+→ 创建 hotfix/<内容>
+→ 完成最小修复与测试
+→ 用户确认
+→ 合并到 main 并创建补丁版本 tag
+→ 同步回 develop
+
+八、正式 main 分支规则
+
+- main 始终代表当前正式版本，任何时刻都应当能够构建和打包。
+- 禁止直接向 main 推送代码，所有修改必须通过 Pull Request 合并。
+- main 只接受 release/* 或 hotfix/* 分支；普通 feat/*、fix/*、docs/* 和 AI 工作分支不得直接合入 main。
+- 合并 main 前必须满足：构建通过、自动测试通过、数据库 Migration 已审查、没有提交密钥、发布说明已更新。
+- 涉及正式主进度、权限规则、AI 身份、审核流程、数据库破坏性迁移或生产部署的修改，必须经过用户最终确认。
+- AI 可以准备代码、测试结果、工作报告和 Pull Request，但不能自行批准或合并到 main。
+- main 禁止 force push，禁止删除，建议启用分支保护与必需检查。
+- 每次正式发布都创建不可移动的语义化版本标签，例如 v0.1.0、v0.1.1。
+- main 上已经发布的提交不得改写历史；发现问题时使用新的修复提交和新版本标签。
+- v0.1 阶段至少保留一份可恢复的安装包、对应源码标签、数据库备份和服务器配置备份。
+
+九、完整系统架构图
+
+总体架构：
+
+┌──────────────────────────────────────────────────────────────┐
+│                     Windows 客户端                           │
+│                                                              │
+│  WinUI 3 界面                                                │
+│  ├─ 项目总览 / 关卡地图 / AI 任务树 / 审核中心               │
+│  ├─ 素材库                                                   │
+│  ├─ 自习室 / Study Session / 历史与报告                      │
+│  ├─ AI Connections / Settings / MCP Doctor                   │
+│  └─ MVVM 状态与应用服务                                      │
+│                                                              │
+│  Windows 本地能力                                            │
+│  ├─ GlobalSystemMediaTransportControlsSession                │
+│  ├─ QQ 音乐状态：歌曲、歌手、进度、封面、播放/暂停           │
+│  ├─ 播放、暂停、上一首、下一首                               │
+│  └─ Windows 安全凭据存储                                     │
+└───────────────────────────┬──────────────────────────────────┘
+                            │ HTTPS App API
+                            ▼
+┌──────────────────────────────────────────────────────────────┐
+│                 Cloudflare Tunnel / HTTPS                    │
+│       公网域名 → Tunnel → VPS 新的 127.0.0.1 独立端口         │
+└───────────────────────────┬──────────────────────────────────┘
+                            ▼
+┌──────────────────────────────────────────────────────────────┐
+│                 fuxia-vps · Debian 13                        │
+│              systemd 管理的 Node.js 服务                     │
+│                                                              │
+│  传输入口                                                    │
+│  ├─ App REST API                                             │
+│  ├─ MCP Streamable HTTP                                      │
+│  └─ healthz / readyz / 版本与诊断                            │
+│                         │                                    │
+│                         ▼                                    │
+│  认证、AI Actor 身份、权限检查与审核门                       │
+│                         │                                    │
+│                         ▼                                    │
+│  共享应用层与领域层                                          │
+│  ├─ Project / ProjectStage / 主任务                          │
+│  ├─ AI Task / AI Member / 工作报告                           │
+│  ├─ StageUpdateRequest / Review / 审核历史                    │
+│  ├─ Asset / 素材关联                                         │
+│  ├─ StudySession / Summary / StudyReport                     │
+│  ├─ Blocker / Decision / History                             │
+│  ├─ Settings                                                 │
+│  └─ AuditLog                                                 │
+│                         │                                    │
+│             ┌───────────┴───────────┐                        │
+│             ▼                       ▼                        │
+│  PostgreSQL 17                独立素材文件目录                │
+│  ├─ 业务与关联数据            ├─ 图片、文档、设计稿          │
+│  ├─ 权限与身份                ├─ 文件校验信息回写数据库      │
+│  ├─ 报告与审核版本            └─ 纳入备份                    │
+│  └─ Audit Log                                               │
+└──────────────────────────────────────────────────────────────┘
+             ▲                                ▲
+             │ MCP over HTTPS                 │ 审核请求/结果
+             │                                │
+┌────────────┴─────────────────┐    ┌─────────┴────────────────┐
+│ AI 客户端与常驻项目 AI       │    │ 独立审核模型             │
+│ ├─ OpenAI / xiaomiao         │    │ ├─ 读取任务要求与审核包  │
+│ ├─ Claude / xiaoke           │    │ ├─ 生成独立审核报告      │
+│ ├─ 预留 xiaoqing             │    │ └─ 不负责执行原任务      │
+│ └─ 其他临时 AI               │    └──────────────────────────┘
+└──────────────────────────────┘
+
+关键数据流：
+
+1. 用户在 Windows 客户端操作项目与自习室，通过 HTTPS App API 访问后端。
+2. OpenAI、Claude 和其他 AI 通过远程 MCP 读取项目数据，并以各自 AI Actor 身份写入自己的任务和报告。
+3. App API 与 MCP 共用同一套业务规则、权限检查和数据库，不各自维护重复进度。
+4. AI 完成任务后只能创建审核包或主进度更新申请，不能直接修改正式主进度。
+5. 审核模型生成独立审核报告；最终批准、拒绝或要求补充由用户控制。
+6. Windows 音乐读取和控制只发生在本机；需要保存的 Session 音乐快照再通过 App API 写入后端。
+7. PostgreSQL 保存结构化数据、关联关系和历史；大文件保存到独立素材目录，数据库保存元数据与校验信息。
+8. 所有关键写操作生成 Audit Log，原始工作报告、审核报告和每次重新提交的历史版本均不可互相覆盖。
+
+架构边界与安全规则：
+
+- PostgreSQL 不暴露公网端口。
+- Node.js 服务只监听 VPS 新的本机回环端口。
+- 公网访问统一通过 Cloudflare Tunnel 和 HTTPS。
+- Windows 敏感 Key 使用系统安全凭据存储；服务器密钥不进入 Git 或日志。
+- MCP 每次写操作都校验 Actor 身份、权限和资源归属。
+- 正式主进度必须经过审核流程和用户最终确认。
+- 新服务与现有 VPS 服务使用独立端口、独立 systemd 单元、独立工作目录和独立日志标识。
+
+十、本轮决定结果
+
+- Git 仓库：已由用户确认建立。
+- 开发分支规则：已确定。
+- 正式 main 分支规则：已确定。
+- 完整系统架构图：已完成。
