@@ -6,6 +6,7 @@ Desktop.ini
 .idea/
 *.user
 *.suo
+.vscode-test
 
 # .NET build output
 bin/
@@ -15,12 +16,80 @@ BundleArtifacts/
 TestResults/
 *.pfx
 
-# Node.js build output
+# Logs and diagnostic reports
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+data/
+uploads/
+storage/
+backups/
+
+# Node.js dependencies and build output
 node_modules/
+jspm_packages/
+bower_components/
+web_modules/
 dist/
+out/
 coverage/
+*.lcov
+.nyc_output/
+lib-cov/
+build/Release/
 .turbo/
 .pnpm-store/
+*.tsbuildinfo
+
+# Package manager and tool caches
+.npm/
+.eslintcache
+.stylelintcache
+.node_repl_history
+*.tgz
+.yarn-integrity
+.lock-wscript
+.grunt/
+.cache/
+.parcel-cache/
+
+# Framework build output
+.next/
+.nuxt/
+.output/
+.svelte-kit/
+.docusaurus/
+.serverless/
+.fusebox/
+.dynamodb/
+.firebase/
+.tern-port
+.vite/
+.vuepress/dist/
+.temp/
+**/.vitepress/dist/
+**/.vitepress/cache/
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+
+# Yarn modern releases
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
 
 # Local environment and secrets
 .env
@@ -31,15 +100,7 @@ coverage/
 secrets/
 credentials/
 
-# Runtime data and backups
-data/
-uploads/
-storage/
-backups/
-
-# Logs and temporary files
-*.log
-logs/
+# Temporary files
 tmp/
 temp/
 *.tmp
