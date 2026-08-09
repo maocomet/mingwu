@@ -1,8 +1,9 @@
 /**
- * ProjectStage / 主进度树数据契约，供 Windows 客户端与 VPS 服务端共用。
+ * ProjectStage / 关卡数据契约，供 Windows 客户端与 VPS 服务端共用。
+ * 主进度树（ProgressTree / ProgressTreeStage）定义在 project-task.ts。
  * 线上字段使用 camelCase；第六关落 PostgreSQL 时再映射为 snake_case 列名。
  */
-import { projectJsonSchema, UUID_PATTERN, type Project } from './project.js';
+import { UUID_PATTERN } from './project.js';
 
 export const PROJECT_STAGE_STATUSES = [
   'locked',
@@ -39,12 +40,6 @@ export interface CreateStageInput {
   /** 可选；不提供时由服务端按同项目最大 position + 1 自动分配。 */
   position?: number;
   completionCriteria?: string | null;
-}
-
-/** 主进度树：项目 + 按 position 升序排列的关卡列表。 */
-export interface ProgressTree {
-  project: Project;
-  stages: ProjectStage[];
 }
 
 export const projectIdParamsSchema = {
@@ -91,15 +86,5 @@ export const stageJsonSchema = {
     version: { type: 'integer', minimum: 1 },
     createdAt: { type: 'string' },
     updatedAt: { type: 'string' },
-  },
-} as const;
-
-export const progressTreeJsonSchema = {
-  type: 'object',
-  required: ['project', 'stages'],
-  additionalProperties: false,
-  properties: {
-    project: projectJsonSchema,
-    stages: { type: 'array', items: stageJsonSchema },
   },
 } as const;

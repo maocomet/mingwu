@@ -2,12 +2,14 @@ import Fastify, { type FastifyError, type FastifyInstance } from 'fastify';
 import type { AppConfig } from './config.js';
 import type { ProjectService } from './application/project/project-service.js';
 import type { StageService } from './application/stage/stage-service.js';
+import type { ProjectTaskService } from './application/project-task/project-task-service.js';
 import {
   healthRoutes,
   type ReadinessCheck,
 } from './api/routes/health.js';
 import { projectRoutes } from './api/routes/projects.js';
 import { stageRoutes } from './api/routes/stages.js';
+import { taskRoutes } from './api/routes/tasks.js';
 import {
   ProjectConflictError,
   ProjectIdempotencyConflictError,
@@ -18,11 +20,20 @@ import {
   StageNotFoundError,
   StagePositionConflictError,
 } from './domain/stage/errors.js';
+import {
+  ProjectTaskIdempotencyConflictError,
+  ProjectTaskNotFoundError,
+  ProjectTaskParentNotFoundError,
+  ProjectTaskPositionConflictError,
+  ProjectTaskScopeConflictError,
+  ProjectTaskTreeCorruptionError,
+} from './domain/project-task/errors.js';
 
 export interface AppDeps {
   config: AppConfig;
   projectService: ProjectService;
   stageService: StageService;
+  taskService: ProjectTaskService;
   readinessChecks?: ReadinessCheck[];
   /** readyz 单项检查超时毫秒数，默认 2000，测试可注入小值。 */
   readyzTimeoutMs?: number;
@@ -60,6 +71,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   });
   app.register(projectRoutes, { prefix: '/api/v1', projectService: deps.projectService });
   app.register(stageRoutes, { prefix: '/api/v1', stageService: deps.stageService });
+  app.register(taskRoutes, { prefix: '/api/v1', taskService: deps.taskService });
 
   app.setErrorHandler((error: FastifyError, request, reply) => {
     if (error instanceof ProjectNotFoundError) {
@@ -91,6 +103,39 @@ export function buildApp(deps: AppDeps): FastifyInstance {
       return reply.status(409).send({
         error: 'stage_idempotency_conflict',
         message: error.message,
+      });
+    }
+    if (error instanceof ProjectTaskNotFoundError) {
+      return reply.status(404).send({ error: 'project_task_not_found', message: error.message });
+    }
+    if (error instanceof ProjectTaskParentNotFoundError) {
+      return reply.status(404).send({ error: 'parent_task_not_found', message: error.message });
+    }
+    if (error instanceof ProjectTaskScopeConflictError) {
+      return reply.status(409).send({
+        error: 'project_task_scope_conflict',
+        message: error.message,
+      });
+    }
+    if (error instanceof ProjectTaskPositionConflictError) {
+      return reply.status(409).send({
+        error: 'project_task_position_conflict',
+        message: error.message,
+      });
+    }
+    if (error instanceof ProjectTaskIdempotencyConflictError) {
+      return reply.status(409).send({
+        error: 'project_task_idempotency_conflict',
+        message: error.message,
+      });
+    }
+    // 任务树数据完整性错误属于服务端数据问题（孤儿父引用 / 自引用 / 循环），
+    // 返回 500 与受控错误码；细节只进服务日志，不把内部任务/关卡 id 放进响应。
+    if (error instanceof ProjectTaskTreeCorruptionError) {
+      request.log.error({ err: error }, 'project task tree corruption detected');
+      return reply.status(500).send({
+        error: 'project_task_tree_corrupt',
+        message: 'project task tree is inconsistent',
       });
     }
     if (error.validation) {

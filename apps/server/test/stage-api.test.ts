@@ -5,8 +5,8 @@ import { makeServices, uuid } from './helpers.js';
 
 function setup() {
   const config = loadConfig({ NODE_ENV: 'test' });
-  const { projectService, stageService } = makeServices();
-  const app = buildApp({ config, projectService, stageService });
+  const { projectService, stageService, taskService } = makeServices();
+  const app = buildApp({ config, projectService, stageService, taskService });
   return { app, projectService };
 }
 
@@ -148,48 +148,6 @@ describe('Stage API', () => {
     const res = await app.inject({ method: 'GET', url: `/api/v1/stages/${uuid()}` });
     expect(res.statusCode).toBe(404);
     expect(res.json().error).toBe('stage_not_found');
-  });
-
-  it('builds a progress tree with the project and stages sorted by position', async () => {
-    const { app } = setup();
-    const projectId = await createProject(app);
-    await app.inject({
-      method: 'POST',
-      url: `/api/v1/projects/${projectId}/stages`,
-      payload: { id: uuid(), name: 'B' },
-    });
-    await app.inject({
-      method: 'POST',
-      url: `/api/v1/projects/${projectId}/stages`,
-      payload: { id: uuid(), name: 'A' },
-    });
-    const res = await app.inject({
-      method: 'GET',
-      url: `/api/v1/projects/${projectId}/progress-tree`,
-    });
-    expect(res.statusCode).toBe(200);
-    const body = res.json();
-    expect(body.project.id).toBe(projectId);
-    expect(body.stages.map((s: { name: string }) => s.name)).toEqual(['B', 'A']);
-  });
-
-  it('returns 404 for the progress tree of an unknown project', async () => {
-    const { app } = setup();
-    const res = await app.inject({
-      method: 'GET',
-      url: `/api/v1/projects/${uuid()}/progress-tree`,
-    });
-    expect(res.statusCode).toBe(404);
-    expect(res.json().error).toBe('project_not_found');
-  });
-
-  it('rejects a malformed projectId in the URL', async () => {
-    const { app } = setup();
-    const res = await app.inject({
-      method: 'GET',
-      url: '/api/v1/projects/not-a-uuid/progress-tree',
-    });
-    expect(res.statusCode).toBe(400);
   });
 
   it('concurrent POST with the same stage id and content: one 201, rest 200', async () => {

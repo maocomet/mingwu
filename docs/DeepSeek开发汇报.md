@@ -497,3 +497,233 @@
 下一批由小喵单独安排 ProjectTask 支撑模型与完整主进度树，不开始关卡修改和状态流转。
 
 **检查点 #2 已关闭。**
+
+---
+
+## 检查点 #3 · 2026-08-09
+
+**本批次目标**
+
+按小喵在"返修验收结果 #2"中的安排，建立第二关报告已确定的 ProjectTask 支撑模型，完成完整"获取主进度树"：实现 ProjectTask 契约、内存仓储与服务层；支持在指定关卡下创建正式任务、通过 parentTaskId 创建分任务；验证 projectId / stageId / parentTaskId 归属一致、禁止跨项目或跨关卡挂载；同一父级下按 position 排序并处理唯一性、幂等与并发创建；把 ProgressTree 扩展为"project + stages[]，每个 stage 携带自身资料与 ProjectTaskNode 任务/分任务树"；补充分层测试。按猫猫要求，本批不实现任务完成、审核流程、AI Task、修改关卡或状态流转。
+
+**候选完成的计划项目原文**（仅候选完成，未打勾）
+
+- `- [ ] 获取主进度树`
+
+**实际完成内容**
+
+1. 建立 `packages/contracts/src/project-task.ts`：`ProjectTask` 类型（id / projectId / stageId / parentTaskId / title / description / completionCriteria / status / position / assignedActorId / version / createdAt / updatedAt / completedAt / archivedAt）、`CreateProjectTaskInput`、`ProjectTaskNode`（带 children 的递归节点）、`ProgressTreeStage`（stage 全字段 + tasks 树）、`ProgressTree`（project + stages）、`PROJECT_TASK_STATUSES` 六个状态，以及任务参数 / 创建体 / 任务 JSON / 递归节点 / 进度树 JSON 的严格 Schema；`index.ts` 追加导出；`stage.ts` 中原 `ProgressTree` / `progressTreeJsonSchema` 移出并在头注释指向 `project-task.ts`。
+2. 建立 ProjectTask 领域层：`ProjectTaskRepository`（findById / listByStage / createIfAbsent）、错误类型（`ProjectTaskNotFoundError`、`ProjectTaskParentNotFoundError`、`ProjectTaskScopeConflictError`、`ProjectTaskPositionConflictError`、`ProjectTaskIdempotencyConflictError`）。
+3. 实现 `InMemoryProjectTaskRepository`：id 唯一性 + 同父级 `(stage_id, parent_task_id, position)` 唯一性均在仓储级同步块内原子检查（`parentTaskId` 为 null 时归一化为 `'__root__'`，主任务与分任务各自独立计位）。
+4. 实现 `ProjectTaskService`：
+   - 创建任务：校验关卡存在（不存在 → 404 `stage_not_found`）且属于该项目（否则 → 409 `project_task_scope_conflict`）；`parentTaskId` 存在时校验父任务存在（否则 → 404 `parent_task_not_found`）且父任务与子任务同项目、同关卡（否则 → 409 `project_task_scope_conflict`，禁止跨项目/跨关卡挂载）。
+   - position：显式提供 → 一次性冲突检测（同父级占用 → 409 `project_task_position_conflict`）；未提供 → 服务层有界重试（`AUTO_POSITION_RETRY_LIMIT = 50`，按同父级最大 position + 1 分配），复用第二关返修确立的并发安全模式。
+   - 幂等：`createIfAbsent` 命中既有 id 时比较 projectId / stageId / parentTaskId 归属与语义字段（title / description / completionCriteria / assignedActorId / 显式 position），一致 → 返回既有任务（200），不一致 → 409 `project_task_idempotency_conflict`；自动分配的 position 不参与语义比较。
+   - 获取任务：未知 id → 404 `project_task_not_found`。
+   - 获取主进度树：校验项目存在（否则 → 404 `project_not_found`），按 position 升序返回关卡，每个关卡用 `buildTaskTree` 把该关卡任务构造成递归节点树，并在每一层按 position 稳定排序。
+5. 实现 HTTP 路由 `apps/server/src/api/routes/tasks.ts`：`POST /api/v1/projects/:projectId/stages/:stageId/tasks`（201/200）、`GET /api/v1/tasks/:id`、`GET /api/v1/projects/:projectId/progress-tree`，JSON Schema 严格校验（未知字段、非法 UUID 400）。
+6. `app.ts`：`AppDeps` 新增必填 `taskService`，注册 taskRoutes，新增任务错误映射（404 `project_task_not_found` / `parent_task_not_found`，409 `project_task_scope_conflict` / `project_task_position_conflict` / `project_task_idempotency_conflict`）；`index.ts` 装配 `InMemoryProjectTaskRepository` 并共享 stage / project 仓储。
+
+**新增、修改和删除的文件清单**
+
+新增：
+- `packages/contracts/src/project-task.ts`
+- `apps/server/src/domain/project-task/errors.ts`、`repository.ts`
+- `apps/server/src/infrastructure/repositories/in-memory-project-task-repository.ts`
+- `apps/server/src/application/project-task/project-task-service.ts`
+- `apps/server/src/api/routes/tasks.ts`
+- `apps/server/test/project-task-repository.test.ts`、`project-task-service.test.ts`、`project-task-api.test.ts`
+
+修改：
+- `packages/contracts/src/index.ts`（追加 `export * from './project-task.js'`）
+- `packages/contracts/src/stage.ts`（移除 `ProgressTree` / `progressTreeJsonSchema`，收窄导入）
+- `apps/server/src/application/stage/stage-service.ts`（移除 `getProgressTree`，进度树职责移交 ProjectTaskService）
+- `apps/server/src/api/routes/stages.ts`（移除 progress-tree 路由）
+- `apps/server/src/app.ts`（`AppDeps` 新增 `taskService`、注册 taskRoutes、任务错误映射）
+- `apps/server/src/index.ts`（装配 ProjectTask 仓储与服务）
+- `apps/server/test/helpers.ts`（`makeServices` 共享三个仓储；新增 `makeTask`）
+- `apps/server/test/health.test.ts`、`project-api.test.ts`、`stage-api.test.ts`、`stage-service.test.ts`（setup 注入 taskService；progress-tree 用例移入 task 测试）
+
+删除：无。
+
+**关键设计决定及其依据**
+
+1. 主进度树构造职责由 `StageService` 移交 `ProjectTaskService`：进度树现在必须包含任务树，只有同时持有 Stage 仓储与 Project 仓储的 ProjectTaskService 才能完成归属校验与树构造；Stage 层不再依赖任务概念。
+2. 父任务归属校验严于第二关报告原文（"parent 必须指向同项目 ProjectTask"）：按猫猫要求升级为"同项目 + 同关卡"，禁止跨项目或跨关卡挂载，`ProjectTaskScopeConflictError` 覆盖父任务与关卡归属两类冲突，向客户端返回稳定错误码。
+3. 任务 position 唯一域 = 同一 stage + 同一父级：主任务（`parentTaskId` null）与各分任务子树各自独立计位，与"同一父级下按 position 排序"的数据模型一致；第六关对应 PostgreSQL `UNIQUE (stage_id, parent_task_id, position)`。
+4. 递归任务节点 Schema 采用 `$id: 'projectTaskNode'` + `$ref: 'projectTaskNode#'` 自引用，而非 `$defs` 锚点引用：Fastify 会把路由响应 Schema 交给 fast-json-stringify 统一编译，嵌套子 Schema 内的 `#/$defs/...` 会相对根文档解析而找不到锚点（实测报 `Cannot find reference`）；`$id` 自锚定使递归 Schema 独立自洽，既可在进度树中内嵌使用，也可在未来任务详情端点中单独复用。
+5. 任务自动 position 复用"服务层有界重试"：与第二关返修验收的关卡模式同构，显式 position 仍一次性 409；20 并发验收覆盖。
+6. 幂等语义比较含归属校验：同 id 复用于不同项目/关卡/父级一律视为语义不一致（409），防止幂等键串数据。
+7. `buildTaskTree` 以"父任务不在集合内则视为根"兜底孤儿节点，避免脏数据导致树构造崩溃；每层按 position 稳定排序，children 在树查询时构造。
+
+**执行过的测试或检查、命令与真实结果**
+
+- `npm run typecheck`：通过（contracts 与 server 均 `tsc --noEmit` 通过，0 错误）。
+- `npm test`（vitest run）：**125 passed / 125**，10 个测试文件全过；其中新增 49 个用例（仓储 9、服务 21、API 19），既有 76 个用例无回归。
+- 真实冒烟测试（单进程内启动服务监听 127.0.0.1:8790，Node fetch 直连 HTTP）：
+  - 项目 → 关卡（乱序 position）→ 主任务 + 分任务 + 孙任务（乱序创建）：全部 201；
+  - `GET progress-tree`：关卡按 position 排序（关卡A、关卡B）；主任务排序（主A、主B）；B 的 children 排序（子1、子2）；子2 的 children（孙）——递归排序正确；
+  - 幂等重试同 id 同内容：200；
+  - 跨关卡挂载父任务：409 `project_task_scope_conflict`；
+  - 同父级显式 position 冲突：409 `project_task_position_conflict`；
+  - 同 id 不同内容：409 `project_task_idempotency_conflict`；
+  - 空关卡：tasks 为 `[]`；`GET /api/v1/tasks/:id`：200；未知项目进度树：404 `project_not_found`；
+  - 冒烟后 `app.close()`，端口 8790 已释放（`netstat` 确认无监听）。
+
+**未完成内容、已知问题和风险**
+
+- 任务完成、审核流程、AI Task、修改关卡、设置关卡状态按猫猫安排仍未实现，留待后续批次。
+- "获取主进度树"仍保持未打勾，仅为候选完成项，待小喵验收后由小喵在计划文档中打勾。
+- 自动 position 有界重试上限 50 在极端并发（>50 个无 position 创建同时到达）下可能耗尽并返回 409；第三关原型与单人场景不会触达，第六关 PostgreSQL 落地时由唯一约束竞争兜底并评估是否改为数据库级分配。
+- 递归 Schema 使用 `$id` 自引用：若未来多个路由同时内嵌同一 `projectTaskNodeJsonSchema`，需确认各 fast-json-stringify 编译上下文互不冲突（当前仅进度树一处使用，已实测可正常编译与序列化）。
+- 工作区新增未跟踪目录 `ui素材mingwu/`：非本批次产物、非本人创建，按协作规则未读取、未修改、未清理，交由小喵判断归属。
+- PostgreSQL、身份认证、AuditLog、生产构建仍按计划归第六关。
+
+**是否涉及数据库、身份权限、密钥、外部服务或破坏性变化**
+
+- 数据库：未新增/修改任何 Migration（仍为内存仓储，无 DB）。
+- 身份权限：未改动；`assignedActorId` 仅为可选字段，真实 AI 身份仍由服务端 AuthContext 解析（第六关）。
+- 密钥：无。
+- 外部服务：未操作 VPS / Cloudflare / GitHub；冒烟测试服务已停止、端口已释放。
+- 破坏性变化：无；`docs/project-plan-v0.1.md`、两份关卡报告、`CLAUDE.md`、`infra/` 均保留原样；`ui素材mingwu/` 未触碰。
+
+**建议下一批任务**
+
+在小喵验收"获取主进度树"后，可选：实现"修改关卡"与"设置关卡状态"；或先做 ProjectTask 的任务完成/审核流转；再排"获取项目当前状态"与"获取项目历史记录"。由小喵确定顺序。
+
+**等待小喵审核。**
+
+---
+
+## 小喵审核结果 #3 · 2026-08-09
+
+**结论：需要一次小范围返修，暂不勾选“获取主进度树”。**
+
+小喵已独立复核本批契约、仓储、服务、路由与测试，并真实执行：
+
+- `npm.cmd run typecheck`：通过；
+- `npm.cmd test`：10 个测试文件、**125/125** 通过；
+- 正常数据下的多层任务树、逐层 position 排序、项目/关卡/父任务归属校验、幂等冲突、显式 position 冲突及 20 并发自动分配，整体实现正确。
+
+### 必须返修：主进度树不能静默改写或丢失异常层级
+
+当前 `buildTaskTree` 有两种静默错误：
+
+1. 任务声明了非空 `parentTaskId`，但该父任务不在同一关卡集合内时，当前代码会把这个孤儿任务直接放进 `roots`，把分任务伪装成主任务；
+2. 数据若形成父子循环，循环中的节点不会成为 root，最终会从返回的进度树中全部消失，接口仍返回 200，调用方无法知道数据不完整。
+
+创建服务目前能够阻止正常请求制造这些数据，但第六关接入数据库、迁移、导入或后续增加“修改父任务”后，脏数据仍可能出现。“完整主进度树”不能在这种情况下悄悄改变数据含义或漏掉任务。
+
+返修要求：
+
+- 组树前校验每个非空父引用都存在于同一关卡的任务集合；
+- 检测自引用与任意长度的父子循环，并确认最终访问到的节点数等于输入任务数；
+- 发现孤儿或循环时抛出专用、可控的数据完整性错误，由 HTTP 层返回稳定且不泄露内部数据的错误码（500 合理），不要提升为 root、不要静默丢弃；
+- 增加服务层测试覆盖孤儿父引用、自引用/两节点循环，至少证明异常会被明确报告且不会返回伪造的不完整树；
+- 修正 PostgreSQL 约束说明：普通 `UNIQUE (stage_id, parent_task_id, position)` 对 `parent_task_id IS NULL` 的根任务不能保证唯一；第六关应使用 PostgreSQL 15+ 的 `NULLS NOT DISTINCT`，或根任务/子任务的部分唯一索引（也可使用可靠的表达式唯一索引）。本批只需改正注释和汇报，不需要提前做数据库迁移。
+
+返修范围仅限上述数据完整性与说明修正。`assignedActorId` 的真实 Actor 存在性和身份绑定仍按计划留到身份模型/持久化批次，不阻塞本次。
+
+计划文档保持 `- [ ] 获取主进度树`；不提交、不推送。返修完成后请追加“检查点 #3 返修”并再次暂停，交由小喵复验。
+
+---
+
+## 检查点 #3 返修 · 2026-08-09
+
+**本批次目标**
+
+按"小喵审核结果 #3"完成小范围返修，仅限两项数据完整性修正与一项说明修正：组树前校验孤儿父引用、自引用与任意长度父子循环，发现即抛专用、可控的数据完整性错误，HTTP 层返回稳定且不泄露内部数据的 500 错误码，不把分任务提升为 root、不静默丢弃循环节点；补充服务层与 API 层测试；改正第六关 PostgreSQL 约束说明（`parent_task_id IS NULL` 的根任务需 `NULLS NOT DISTINCT` 或部分/表达式唯一索引）。
+
+**候选完成的计划项目原文**（维持现状，未打勾）
+
+- `- [ ] 获取主进度树`
+
+**实际完成内容**
+
+1. 新增 `ProjectTaskTreeCorruptionError`（`reason: 'orphan_parent' | 'self_reference' | 'cycle'`，携带 stageId / taskId 供服务端日志诊断）：
+   - 孤儿父引用：`parentTaskId` 非空但不在同一关卡任务集合内 → `orphan_parent`；
+   - 自引用：`parentTaskId === id` → `self_reference`；
+   - 任意长度父子循环：沿 parent 链上溯，路径上再次出现已访问节点 → `cycle`（自引用在第 1 步排除，此处覆盖两节点/多节点环）；
+   - 不变量兜底：组树后确认最终访问到的节点数等于输入任务数，防止未来改动让节点静默丢失而返回不完整树。
+2. 重写 `buildTaskTree(stageId, tasks)`：先做第 1～2 步完整性检测，再组装父子关系，最后递归按 position 稳定排序；任何异常立即抛出，不把孤儿提升为 root、不丢弃循环节点。
+3. `app.ts` 错误映射：`ProjectTaskTreeCorruptionError` → **500** `project_task_tree_corrupt`，响应仅含受控错误码与通用文案 `project task tree is inconsistent`，不返回内部任务/关卡 id；完整错误对象只进服务端日志。
+4. 修正 PostgreSQL 约束说明（三处源码注释，`domain/project-task/errors.ts`、`domain/project-task/repository.ts`、`infrastructure/repositories/in-memory-project-task-repository.ts`）：普通 `UNIQUE (stage_id, parent_task_id, position)` 把 NULL 视为互不相等，无法约束根任务（`parent_task_id IS NULL`）的 position 去重；第六关应使用 PostgreSQL 15+ `UNIQUE NULLS NOT DISTINCT`，或对根任务/子任务分别建立部分唯一索引（或可靠的表达式唯一索引）。本批只改正注释，不做数据库迁移。
+5. 测试：`helpers.ts` 的 `makeServices()` 额外返回 `taskRepository`（同一实例），供测试直接向仓储注入脏数据、绕过创建服务的归属校验；新增服务层 3 个用例 + API 层 1 个用例。
+
+**新增、修改和删除的文件清单**
+
+新增：无。
+
+修改：
+- `apps/server/src/domain/project-task/errors.ts`（新增 `ProjectTaskTreeCorruptionError`；修正 position 唯一约束的 PostgreSQL 说明）
+- `apps/server/src/application/project-task/project-task-service.ts`（`buildTaskTree` 重写为带完整性校验并接收 stageId）
+- `apps/server/src/app.ts`（新增 500 错误映射 `project_task_tree_corrupt`）
+- `apps/server/src/domain/project-task/repository.ts`、`apps/server/src/infrastructure/repositories/in-memory-project-task-repository.ts`（修正约束说明）
+- `apps/server/test/helpers.ts`（`makeServices` 返回 `taskRepository`）
+- `apps/server/test/project-task-service.test.ts`（新增孤儿、自引用、两节点循环 3 个用例）
+- `apps/server/test/project-task-api.test.ts`（新增 500 稳定错误码 + 不泄露内部 id 的用例）
+
+删除：无。
+
+**关键设计决定及其依据**
+
+1. 完整性校验放在组树函数最前，且错误类型专门化：校验不依赖"创建服务是否拦截"——第六关接入数据库、迁移、导入或未来增加"修改父任务"后脏数据仍可能出现，"完整主进度树"不能悄悄改写数据含义或漏掉任务。
+2. 孤儿与循环分开报告原因（`orphan_parent` / `self_reference` / `cycle`）：便于小喵或客户端定位脏数据来源；HTTP 层统一映射为 500 `project_task_tree_corrupt`，对外只暴露稳定错误码与通用文案，符合"不泄露内部数据"要求，内部细节只进服务日志。
+3. 环检测沿 parent 链上溯而非"从 root 出发 DFS 判可达"：任意循环必然不与任何 root 相连（单父模型下每个节点只有一个 parentTaskId），从 root 出发的 DFS 会漏掉孤立环；parent 链上溯能精确报告环中节点，配合"访问节点数 == 输入任务数"的不变量兜底双保险。
+4. 400/404/409 语义保持不动：数据完整性是服务端数据问题，不是客户端请求错误，故用 500 而非 4xx；与 readyz 的"受控错误码、不泄露内部异常"原则一致。
+5. 测试通过 `taskRepository` 直接注入脏数据：创建服务本会拦截这些数据，只有绕过服务层才能复现第六关可能出现的脏数据场景，证明"读路径也能发现并报告"。
+
+**执行过的测试或检查、命令与真实结果**
+
+- `npm run typecheck`（@mingwu/server）：通过（`tsc --noEmit`，0 错误）。
+- `npm test`（vitest run）：**129 passed / 129**，10 个测试文件全过；其中本返修新增 4 个用例（服务层孤儿 / 自引用 / 两节点循环，API 层 500 映射 + 不泄露），既有 125 个用例无回归。
+- 真实冒烟测试（单进程内启动服务监听 127.0.0.1:8790，Node fetch 直连 HTTP）：
+  - 正常数据（项目 + 关卡 + 任务）`GET progress-tree` → 200，任务树正常；
+  - 向仓储注入孤儿父引用后 `GET progress-tree` → 500 `project_task_tree_corrupt`，响应体不含被污染的孤儿任务 id；
+  - 向仓储注入两节点父子循环后 `GET progress-tree` → 500 `project_task_tree_corrupt`；
+  - 冒烟后 `app.close()`，端口 8790 已释放（`netstat` 确认无监听）。
+
+**未完成内容、已知问题和风险**
+
+- 任务完成、审核流程、AI Task、修改关卡、设置关卡状态仍未实现，留待后续批次。
+- "获取主进度树"保持未打勾，仅为候选完成项，待小喵复验后由小喵在计划文档中打勾。
+- 环检测为逐节点沿 parent 链上溯（最坏 O(n²)）：第三关原型与单人数据规模无影响；第六关落库后如需大规模树可在数据库层以递归 CTE 或物化层级字段优化，不属于本批范围。
+- `assignedActorId` 的真实 Actor 存在性与身份绑定按小喵要求仍留到身份模型/持久化批次，不阻塞本次。
+- 工作区未跟踪目录 `ui素材mingwu/` 维持原状未触碰。
+- PostgreSQL、身份认证、AuditLog、生产构建仍按计划归第六关；根任务 position 唯一性需以 `NULLS NOT DISTINCT` 或部分/表达式唯一索引落地。
+
+**是否涉及数据库、身份权限、密钥、外部服务或破坏性变化**
+
+- 数据库：未新增/修改任何 Migration（仍为内存仓储，无 DB；仅改正第六关约束说明）。
+- 身份权限：未改动。
+- 密钥：无。
+- 外部服务：未操作 VPS / Cloudflare / GitHub；冒烟测试服务已停止、端口已释放。
+- 破坏性变化：无；`docs/project-plan-v0.1.md`、两份关卡报告、`CLAUDE.md`、`infra/`、`ui素材mingwu/` 均保留原样。
+
+**建议下一批任务**
+
+在小喵复验本返修并验收"获取主进度树"后，可选：实现"修改关卡"与"设置关卡状态"；或先做 ProjectTask 的任务完成/审核流转；再排"获取项目当前状态"与"获取项目历史记录"。由小喵确定顺序。
+
+**等待小喵审核。**
+
+---
+
+## 小喵返修验收结果 #3 · 2026-08-09
+
+**结论：返修通过，检查点 #3 关闭。**
+
+小喵已复核数据完整性错误、组树算法、HTTP 错误映射、测试注入方式及 PostgreSQL 约束说明，并独立执行：
+
+- `npm.cmd run typecheck`：通过；
+- `npm.cmd test`：10 个测试文件、**129/129** 通过；
+- `git diff --check`：通过，仅有 Windows 行尾提示，无空白错误。
+
+验收确认：正常任务树仍完整返回并逐层排序；孤儿父引用、自引用与两节点循环都会被明确识别，不会被提升为 root 或静默丢弃；HTTP 层统一返回 500 `project_task_tree_corrupt` 与通用文案，响应不包含内部任务或关卡 id；第六关 PostgreSQL 根任务 position 唯一约束说明已修正。
+
+已由小喵在 `docs/project-plan-v0.1.md` 勾选：
+
+- `获取主进度树`
+
+`assignedActorId` 的真实 Actor 存在性与身份绑定继续留在身份模型/持久化批次，不影响本次验收。
+
+**检查点 #3 已关闭。**

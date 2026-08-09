@@ -1,7 +1,6 @@
 import type { CreateStageInput } from '@mingwu/contracts';
 import {
   createStageBodySchema,
-  progressTreeJsonSchema,
   projectIdParamsSchema,
   stageJsonSchema,
   stageParamsSchema,
@@ -43,20 +42,6 @@ export const stageRoutes: FastifyPluginAsync<{ stageService: StageService }> = a
     async (request) => {
       const { id } = request.params as { id: string };
       return stageService.getStage(id);
-    },
-  );
-
-  app.get(
-    '/projects/:projectId/progress-tree',
-    {
-      schema: {
-        params: projectIdParamsSchema,
-        response: { 200: progressTreeJsonSchema },
-      },
-    },
-    async (request) => {
-      const { projectId } = request.params as { projectId: string };
-      return stageService.getProgressTree(projectId);
     },
   );
 };

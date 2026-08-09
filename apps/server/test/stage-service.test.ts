@@ -138,21 +138,4 @@ describe('StageService', () => {
     const { stageService } = makeServices();
     await expect(stageService.getStage(uuid())).rejects.toBeInstanceOf(StageNotFoundError);
   });
-
-  it('builds a progress tree with the project and stages sorted by position', async () => {
-    const { projectService, stageService } = makeServices();
-    const projectId = await createProject(projectService);
-    await stageService.createStage(projectId, { id: uuid(), name: 'B' });
-    await stageService.createStage(projectId, { id: uuid(), name: 'A' });
-    const tree = await stageService.getProgressTree(projectId);
-    expect(tree.project.id).toBe(projectId);
-    expect(tree.stages.map((s) => s.name)).toEqual(['B', 'A']);
-  });
-
-  it('throws ProjectNotFoundError for an unknown project in the progress tree', async () => {
-    const { stageService } = makeServices();
-    await expect(stageService.getProgressTree(uuid())).rejects.toBeInstanceOf(
-      ProjectNotFoundError,
-    );
-  });
 });

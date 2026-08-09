@@ -1,6 +1,5 @@
 import type {
   CreateStageInput,
-  ProgressTree,
   ProjectStage,
 } from '@mingwu/contracts';
 import { ProjectNotFoundError } from '../../domain/project/errors.js';
@@ -86,16 +85,6 @@ export class StageService {
       throw new StageNotFoundError(id);
     }
     return stage;
-  }
-
-  /** 主进度树：项目基础信息 + 按 position 升序的关卡列表。 */
-  async getProgressTree(projectId: string): Promise<ProgressTree> {
-    const project = await this.projectRepository.findById(projectId);
-    if (!project) {
-      throw new ProjectNotFoundError(projectId);
-    }
-    const stages = await this.repository.listByProject(projectId);
-    return { project, stages };
   }
 
   private buildStage(projectId: string, input: CreateStageInput, position: number): ProjectStage {
