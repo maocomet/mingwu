@@ -78,76 +78,76 @@ Windows App
 
 ### VPS 与域名
 
-- [ ] 确定使用哪台 VPS
-- [ ] 确定使用现有域名的哪个子域名
-- [ ] 创建 DNS 解析
-- [ ] 配置 HTTPS
-- [ ] 配置反向代理
-- [ ] 确定 MCP endpoint
-- [ ] 确定 App API endpoint
-- [ ] 配置 VPS 防火墙
-- [ ] 配置服务开机自启
-- [ ] 设计服务健康检查接口
-- [ ] 设计数据库备份方案
+- [x] 确定使用哪台 VPS
+- [x] 确定使用现有域名的哪个子域名
+- [x] 创建 DNS 解析
+- [x] 配置 HTTPS
+- [x] 配置反向代理
+- [x] 确定 MCP endpoint
+- [x] 确定 App API endpoint
+- [x] 配置 VPS 防火墙
+- [x] 配置服务开机自启
+- [x] 设计服务健康检查接口
+- [x] 设计数据库备份方案
 
 ### AI 身份
 
-- [ ] 建立统一 AI Actor 模型
-- [ ] 建立 xiaomiao 身份
-- [ ] 建立 xiaoke 身份
-- [ ] 预留 xiaoqing
-- [ ] 预留其他 AI
-- [ ] 确定每个 AI 如何证明自己的身份
-- [ ] 防止 AI 伪装成另一个 AI
+- [x] 建立统一 AI Actor 模型
+- [x] 建立 xiaomiao 身份
+- [x] 建立 xiaoke 身份
+- [x] 预留 xiaoqing
+- [x] 预留其他 AI
+- [x] 确定每个 AI 如何证明自己的身份
+- [x] 防止 AI 伪装成另一个 AI
 
 ### 权限系统
 
-- [ ] 用户拥有最高项目权限
-- [ ] AI 可以读取项目主进度
-- [ ] AI 可以修改自己的任务
-- [ ] AI 不可以直接修改其他 AI 的任务
-- [ ] AI 可以写自己的项目汇报
-- [ ] AI 可以写自己的自习报告
-- [ ] AI 可以申请修改项目主进度
-- [ ] AI 不可以绕过审核直接更新主进度
-- [ ] 用户可以批准申请
-- [ ] 用户可以拒绝申请
-- [ ] 用户可以要求补充
-- [ ] 记录每一次关键修改由谁完成
+- [x] 用户拥有最高项目权限
+- [x] AI 可以读取项目主进度
+- [x] AI 可以修改自己的任务
+- [x] AI 不可以直接修改其他 AI 的任务
+- [x] AI 可以写自己的项目汇报
+- [x] AI 可以写自己的自习报告
+- [x] AI 可以申请修改项目主进度
+- [x] AI 不可以绕过审核直接更新主进度
+- [x] 用户可以批准申请
+- [x] 用户可以拒绝申请
+- [x] 用户可以要求补充
+- [x] 记录每一次关键修改由谁完成
 
 ### 数据模型
 
-- [ ] 设计 Project
-- [ ] 设计 ProjectStage
-- [ ] 设计 StageReport
-- [ ] 设计 StageUpdateRequest
-- [ ] 设计 AITask
-- [ ] 设计 AIActor
-- [ ] 设计 Asset
-- [ ] 设计 StudySession
-- [ ] 设计 StudyReport
-- [ ] 设计用户自己的 Study Summary
-- [ ] 设计当前音乐状态数据
-- [ ] 决定是否记录自习期间歌曲历史
-- [ ] 设计 AuditLog
-- [ ] 设计 Settings
-- [ ] 设计数据库版本迁移机制
+- [x] 设计 Project
+- [x] 设计 ProjectStage
+- [x] 设计 StageReport
+- [x] 设计 StageUpdateRequest
+- [x] 设计 AITask
+- [x] 设计 AIActor
+- [x] 设计 Asset
+- [x] 设计 StudySession
+- [x] 设计 StudyReport
+- [x] 设计用户自己的 Study Summary
+- [x] 设计当前音乐状态数据
+- [x] 决定是否记录自习期间歌曲历史
+- [x] 设计 AuditLog
+- [x] 设计 Settings
+- [x] 设计数据库版本迁移机制
 
 ### 密钥与配置
 
-- [ ] 设计 AI Connections 设置结构
-- [ ] OpenAI 配置拥有独立入口
-- [ ] Claude 配置拥有独立入口
-- [ ] 预留其他 AI 配置入口
-- [ ] 确定 OpenAI 最终连接方案
-- [ ] 确定 Claude Remote MCP 连接方案
-- [ ] Key 不允许明文进入 Git
-- [ ] Key 不允许出现在日志中
-- [ ] Windows 客户端安全存储敏感 Key
-- [ ] UI 中敏感 Key 默认隐藏
-- [ ] 支持修改 Key
-- [ ] 支持删除 Key
-- [ ] 支持连接测试
+- [x] 设计 AI Connections 设置结构
+- [x] OpenAI 配置拥有独立入口
+- [x] Claude 配置拥有独立入口
+- [x] 预留其他 AI 配置入口
+- [x] 确定 OpenAI 最终连接方案
+- [x] 确定 Claude Remote MCP 连接方案
+- [x] Key 不允许明文进入 Git
+- [x] Key 不允许出现在日志中
+- [x] Windows 客户端安全存储敏感 Key
+- [x] UI 中敏感 Key 默认隐藏
+- [x] 支持修改 Key
+- [x] 支持删除 Key
+- [x] 支持连接测试
 
 ### 关卡完成条件
 
@@ -159,9 +159,9 @@ Windows App
 
 ### Project API
 
-- [ ] 创建项目
-- [ ] 获取项目
-- [ ] 修改项目基础信息
+- [x] 创建项目
+- [x] 获取项目
+- [x] 修改项目基础信息
 - [ ] 获取主进度树
 - [ ] 获取关卡详情
 - [ ] 获取项目当前状态
@@ -260,9 +260,9 @@ Windows App
 
 ### MCP Doctor
 
-- [ ] healthz
-- [ ] readyz
-- [ ] 返回服务器版本
+- [x] healthz
+- [x] readyz
+- [x] 返回服务器版本
 - [ ] 检查数据库
 - [ ] 检查 MCP
 - [ ] 检查 AI 身份

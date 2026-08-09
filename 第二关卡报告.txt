@@ -229,3 +229,808 @@ main
 - 开发分支规则：已确定。
 - 正式 main 分支规则：已确定。
 - 完整系统架构图：已完成。
+
+十一、域名与 DNS 方案
+
+- 正式子域名：mingwu.maomao.im。
+- maomao.im 的公开 NS 已确认由 Cloudflare 托管。
+- mingwu.maomao.im 已通过 Cloudflare Tunnel Public Hostname 创建代理 DNS 记录。
+- fuxia-vps 上的 cloudflared 使用 Dashboard 托管的 Token 模式，服务处于运行状态。
+- DNS 推荐通过 Cloudflare Dashboard 的 Tunnel Public Hostname 创建，不直接解析到 VPS 公网 IP。
+- Public Hostname：mingwu.maomao.im。
+- Service：http://127.0.0.1:8790，作为新后端独占的本机监听地址。
+- Cloudflare 会自动创建代理的 CNAME，目标为对应 Tunnel 的 <UUID>.cfargotunnel.com。
+- 不修改现有 Tunnel 服务、不占用现有端口、不重启 cloudflared。
+- Public Hostname 已创建；后端上线前返回 502 属于预期状态。
+
+十二、正式服务地址
+
+- Cloudflare Public Hostname：mingwu.maomao.im。
+- VPS 本地监听地址：http://127.0.0.1:8790。
+- App API 基础地址：https://mingwu.maomao.im/api/v1。
+- Remote MCP endpoint：https://mingwu.maomao.im/mcp。
+- 存活检查：https://mingwu.maomao.im/healthz。
+- 就绪检查：https://mingwu.maomao.im/readyz。
+- 以上 API、MCP 和健康检查路径由同一个 Node.js 模块化单体服务提供。
+
+十三、DNS 与 HTTPS 验证结果
+
+- 2026-08-08 已从公网访问 mingwu.maomao.im 和 /healthz。
+- 请求成功到达 Cloudflare，并通过 HTTPS 返回 Cloudflare 响应头。
+- 当前响应为 502 Bad Gateway，原因是后端尚未在 127.0.0.1:8790 启动，属于预期状态。
+- DNS 解析、HTTPS 和 Tunnel 反向代理已生效。
+- 后端上线后应依次验证 /healthz、/readyz、/api/v1 和 /mcp。
+
+十四、VPS 防火墙规则
+
+- 使用 Debian 13 已安装的 nftables，不新增 UFW 或其他防火墙体系。
+- 入站默认拒绝，转发默认拒绝，出站默认允许。
+- 允许本机回环连接，保证 Node.js、PostgreSQL 和 cloudflared 可以通过 127.0.0.1 通信。
+- 允许 established、related 状态的返回流量，保证 Cloudflare Tunnel 等现有出站连接正常工作。
+- 允许 IPv4 ICMP 与 IPv6 ICMP，保留必要的网络诊断和 IPv6 邻居发现能力。
+- 公网仅允许 TCP 22 SSH。
+- 8790 不开放公网，只允许 Node.js 绑定 127.0.0.1，并由 Cloudflare Tunnel 访问。
+- 规则模板保存在 infra/nftables/nftables.conf。
+
+十五、Mingwu 服务开机自启
+
+- 新增独立 systemd 单元 mingwu.service，不修改任何现有服务单元。
+- 使用独立系统用户和用户组 mingwu，不使用 root 运行应用。
+- 服务固定监听 127.0.0.1:8790。
+- 服务代码入口为 /opt/mingwu/current/apps/server/dist/index.js。
+- 环境变量文件为 /etc/mingwu/mingwu.env；该文件不进入 Git。
+- 可写目录仅限 /var/lib/mingwu、/var/log/mingwu 和 systemd 创建的运行目录。
+- 服务异常退出时等待 5 秒自动重启。
+- 只有代码入口文件存在时服务才会启动；后端尚未部署时开机自动跳过，不产生失败服务。
+- systemd 模板保存在 infra/systemd/mingwu.service。
+
+十六、服务健康检查接口设计
+
+GET /healthz：
+
+- 用途：判断 Node.js 进程是否存活。
+- 不检查数据库或外部依赖，避免依赖短暂故障导致进程被错误重启。
+- 正常返回 HTTP 200。
+- 响应字段：status、service、version、time。
+- 正常响应示例：{"status":"ok","service":"mingwu-server","version":"0.1.0","time":"<UTC ISO 8601>"}。
+
+GET /readyz：
+
+- 用途：判断服务是否可以正常接收 App API 和 MCP 请求。
+- 检查 PostgreSQL 连接、数据库 Migration 状态、素材目录可写性、MCP 初始化状态。
+- 全部通过时返回 HTTP 200，status 为 ready。
+- 任一必要检查失败时返回 HTTP 503，status 为 not_ready。
+- 响应包含 checks 对象，只显示 database、migrations、asset_storage、mcp 的 ok 或 error 状态，不返回密码、连接串、路径细节或错误堆栈。
+
+共同规则：
+
+- 同时支持 GET 和 HEAD。
+- 不要求用户登录或 AI Actor 身份，但只返回最小诊断信息。
+- Content-Type 为 application/json; charset=utf-8。
+- Cache-Control 为 no-store。
+- 单次检查最长 2 秒；超时按失败处理。
+- 不在响应中返回密钥、数据库地址、内部异常、文件系统详情或其他敏感信息。
+- healthz 和 readyz 不写入业务 Audit Log，避免健康探测产生大量无用记录。
+- MCP Doctor 读取这两个接口，并结合服务器版本显示绿色、黄色或红色状态。
+
+十七、实际配置结果
+
+- 2026-08-08 已在 fuxia-vps 加载并启用 nftables。
+- 原始空规则配置已备份为 /etc/nftables.conf.before-mingwu-20260808。
+- 已通过新 SSH 连接验证 TCP 22 可用。
+- cloudflared.service、fuxia-test.service 和 matcha-diary.service 在配置前后均保持 active，未被重启或修改。
+- 已创建 mingwu 专用系统用户、用户组和独立目录。
+- mingwu.service 已安装并设置为 enabled。
+- 当前 mingwu.service 状态为 inactive/dead，ConditionResult=no；原因是后端入口尚未部署，符合预期。
+- 当前 127.0.0.1:8790 未被占用。
+- 后端入口部署完成后，可启动 mingwu.service 并验证 healthz 与 readyz；不需要再次修改开机自启设置。
+
+十八、数据库与项目数据备份方案
+
+备份目标：
+
+- 防止 VPS 硬盘损坏、数据库故障、错误操作、错误 Migration 或版本发布导致项目数据永久丢失。
+- 恢复点目标（RPO）：通常情况下最多丢失 24 小时数据。
+- 恢复时间目标（RTO）：发生故障后目标在 2 小时内恢复核心服务。
+
+备份对象：
+
+- PostgreSQL 17 数据库，包括业务数据、AI Actor、任务、报告、审核历史、Study Session、Settings 和 Audit Log。
+- 素材文件目录 /var/lib/mingwu/assets。
+- Mingwu 的 systemd、nftables、部署说明和非敏感服务器配置。
+- 数据库角色与必要的数据库结构信息。
+- 生产密钥、数据库密码和 Tunnel 凭据不进入普通项目备份；如需备份，必须单独加密并限制访问。
+- node_modules、构建缓存、日志和可从 Git 重新生成的代码不进入数据备份。
+
+备份方式：
+
+- PostgreSQL 使用 pg_dump 的自定义格式生成逻辑备份，便于校验和选择性恢复。
+- 素材目录单独生成压缩归档，并与数据库备份使用同一个批次 ID 和时间戳。
+- 每个备份批次生成 SHA-256 校验值，恢复前必须先校验文件完整性。
+- 备份脚本失败时返回非零状态并记录不含敏感信息的错误日志。
+
+备份频率：
+
+- 每天自动执行一次数据库和素材备份。
+- 正式版本发布前额外执行一次备份。
+- 执行数据库 Migration 前额外执行一次备份。
+- 进行可能批量修改或删除数据的高风险操作前手动执行一次备份。
+
+保留周期：
+
+- 每日备份保留最近 7 天。
+- 每周保留一个备份，保留最近 4 周。
+- 正式版本发布时的备份与对应 Git tag 一起长期保留。
+- 删除过期备份前，必须确认至少存在一份有效异地副本。
+
+存储位置：
+
+- VPS 本地保存短期备份，使用 Mingwu 专用备份目录并限制文件权限。
+- 每次成功备份后，将加密副本复制到 VPS 以外的独立存储位置。
+- 只有 VPS 本地副本不算完整备份，因为 VPS 磁盘故障会同时损坏业务数据与本地备份。
+- 异地存储服务和具体凭据在实施自动备份前另行确定，凭据不得进入 Git。
+
+安全规则：
+
+- 备份文件默认仅允许 root 或专用备份账号读取。
+- 离开 VPS 的备份必须先加密。
+- 加密密钥与备份文件分开保存。
+- 备份文件名和日志不得包含数据库密码、Token 或其他密钥。
+- Audit Log 与历史审核记录包含在数据库备份中，不得因清理备份而修改正式业务数据。
+
+恢复流程：
+
+1. 确认目标恢复时间点和对应备份批次。
+2. 下载数据库备份、素材归档和校验文件。
+3. 校验 SHA-256，确认备份没有损坏。
+4. 在隔离的临时数据库中恢复 PostgreSQL 备份。
+5. 检查 Migration 版本、核心数据数量、AI 身份、审核历史和 Audit Log。
+6. 恢复对应批次的素材文件，并检查数据库中的素材关联。
+7. 通过 healthz、readyz 和核心业务查询完成验收。
+8. 经用户确认后，才允许替换正式数据库或正式素材目录。
+9. 记录恢复原因、恢复批次、操作时间、验证结果和执行者。
+
+恢复测试：
+
+- 每月至少进行一次隔离恢复测试，不直接覆盖生产数据库。
+- 每次修改备份脚本、数据库版本或素材目录结构后，必须重新执行恢复测试。
+- 只有备份任务成功、异地副本存在、校验通过并且能够实际恢复，才视为备份系统正常。
+
+阶段划分：
+
+- 第二关完成备份方案设计。
+- 第六关配置自动备份任务并执行首次恢复测试。
+- 第八关保存 v0.1 数据库初始备份和服务器配置备份。
+
+十九、权限系统规则
+
+用户权限：
+
+- 用户拥有项目最高权限和正式主进度的最终决定权。
+- 用户可以创建和维护项目基础、主任务、关卡、素材与 Study Session。
+- 用户可以批准、拒绝或要求补充 AI 提交的主进度更新申请。
+- 用户自己的 Study Summary 由用户最终确认；AI 只能生成可编辑草稿，不能冒充用户直接确认。
+
+AI 通用权限：
+
+- AI 可以读取项目基础、项目主进度、与其工作相关的项目资料和只读上下文。
+- AI 可以创建、修改、完成自己的任务和子任务，并记录备注、进度、阻塞状态和工作报告。
+- AI 不可以修改或删除其他 AI 的任务、报告和身份信息。
+- AI 可以写入自己的项目工作报告和 Study Session 学习报告。
+- 同一个 AI 可以向同一个 Study Session 追加多份报告；新报告不得覆盖旧报告。
+- AI 可以提交主任务或关卡更新申请，但不能直接修改正式主进度。
+- AI 不可以批准自己的申请，也不可以冒充用户批准申请。
+
+审核与主进度：
+
+- 完成者提交任务后生成审核包，包含工作报告、素材、测试结果和其他验证证据。
+- 审核模型生成独立审核报告，结果为通过、要求补充或不通过。
+- 审核模型不执行被审核任务，也不能替代用户完成正式主进度确认。
+- 只有用户批准后，任务或关卡才能进入正式完成状态并更新主地图。
+- 重新提交审核时创建新版本，原始报告、审核报告和历次审核记录永久保留、互不覆盖。
+
+关键操作记录：
+
+- 主任务状态变化、AI 任务状态变化、报告提交、审核提交与结果、素材修改、阻塞变化、项目基础重大修改和项目决策均记录执行者与时间。
+- 每次关键写操作写入 Audit Log，至少记录 Actor、操作类型、目标资源、时间、结果和关联请求。
+- 任何 Actor 都不能修改或删除已确认的历史审计记录。
+
+二十、数据库迁移与密钥安全决定
+
+数据库迁移：
+
+- 使用 Drizzle ORM + SQL Migration 管理 PostgreSQL 结构变更。
+- 每个 Migration 使用唯一、有序且可追踪的版本标识，并随代码进入 Git。
+- 已执行的 Migration 不直接改写；需要修正时创建新的 Migration。
+- 生产 Migration 执行前必须备份数据库，执行后检查 readyz、Migration 版本和核心数据。
+- Migration 失败时停止发布，不允许应用在未知数据库结构上继续运行。
+
+密钥进入 Git 的防护：
+
+- `.gitignore` 已忽略 .env、.env.*、*.pem、*.key、secrets/ 和 credentials/，仅允许提交不含真实值的 .env.example。
+- 提交前执行密钥扫描；发现真实 Key、Token、密码或私钥时禁止提交和推送。
+- 如果密钥曾进入 Git 历史，必须立即撤销并轮换，不能只删除当前文件。
+
+Windows 敏感信息存储：
+
+- Windows 客户端使用 Windows 系统安全凭据存储保存 OpenAI、Claude 和其他敏感 Key。
+- 敏感 Key 不写入普通 Settings 文件、项目数据库、日志或错误报告。
+- UI 只显示掩码，不回显完整 Key；读取 Key 的代码限制在连接服务内部。
+
+二十一、统一 AI Actor 身份模型
+
+设计目标：
+
+- 所有正式 AI、临时 AI 和审核模型统一使用 AIActor 表示。
+- 项目、任务、报告、审核与 Study Session 只关联稳定的 Actor ID，不直接依赖显示名称或模型名称。
+- AI 提供方、使用模型和显示名称可以变化，但 Actor 身份代码一旦创建不得随意改变。
+
+AIActor 核心字段：
+
+- id：UUID，数据库内部主键。
+- actor_code：全局唯一且不可变的身份代码，例如 xiaomiao。
+- display_name：界面显示名称，例如小喵。
+- provider：提供方标识，例如 openai、anthropic、other。
+- actor_type：resident_ai、temporary_ai、reviewer 三种基础类型。
+- permission_profile：该 Actor 使用的权限配置标识。
+- status：active、disabled。
+- created_at：创建时间。
+- updated_at：最后更新时间。
+- last_authenticated_at：最近一次成功认证时间。
+- metadata：可选扩展信息；不得存放明文密钥。
+
+身份与具体模型的关系：
+
+- Actor 表示项目成员身份，不等同于某个具体模型版本。
+- 更换模型时保留同一个 Actor ID，历史任务和报告仍归属于原 Actor。
+- 如果需要让两个独立 AI 实例拥有不同权限，必须建立两个不同 Actor，不能共用一个身份。
+
+二十二、预设与扩展身份
+
+xiaomiao：
+
+- actor_code：xiaomiao。
+- display_name：小喵。
+- provider：openai。
+- actor_type：resident_ai。
+- 默认权限：读取项目主进度，维护自己的任务，提交自己的项目报告和学习报告，提交主进度更新申请。
+- 禁止权限：修改其他 AI 的任务或报告、直接批准主进度、冒充用户或审核模型。
+
+xiaoke：
+
+- actor_code：xiaoke。
+- display_name：小克。
+- provider：anthropic。
+- actor_type：resident_ai。
+- 默认权限与 xiaomiao 使用同一常驻 AI 权限模板，但身份、凭据、任务和报告完全独立。
+
+xiaoqing：
+
+- 预留 actor_code：xiaoqing。
+- 初始状态不要求创建有效凭据或建立连接。
+- 正式启用时再确定 provider、权限配置与认证凭据。
+
+其他 AI：
+
+- 系统不把可用身份写死为 xiaomiao、xiaoke、xiaoqing 三种枚举。
+- 用户可以新增其他常驻 AI、临时 AI 和审核模型。
+- 新 Actor 必须拥有唯一 actor_code，并明确 provider、actor_type、permission_profile 和 status。
+- 临时 AI 可以不建立长期任务树，但仍必须使用独立 Actor 身份留下工作记录。
+- 审核模型使用 reviewer 类型，不能同时作为被审核任务的执行身份。
+
+二十三、AI 身份证明与凭据模型
+
+AIActorCredential 与 AIActor 分开保存，一个 Actor 可以在凭据轮换期间拥有多条凭据记录。
+
+AIActorCredential 核心字段：
+
+- id：UUID。
+- actor_id：关联的 AIActor。
+- credential_type：认证凭据类型；v0.1 的远程 MCP 使用 OAuth 2.1 Bearer Token，服务端只保存安全哈希、指纹或安全存储引用，不保存可回显的明文 Token。
+- credential_fingerprint：用于运维识别的不可逆指纹，不显示完整凭据。
+- secret_hash：仅在使用本地不透明凭据时保存安全哈希，不保存明文。
+- status：active、revoked、expired。
+- expires_at：可选过期时间。
+- created_at：创建时间。
+- last_used_at：最近一次成功使用时间。
+- revoked_at：撤销时间。
+
+身份证明流程：
+
+1. AI 调用远程 MCP 时提交自己的独立认证凭据。
+2. 服务端认证中间件校验凭据真实性、有效期和撤销状态。
+3. 服务端根据认证结果查找唯一 AIActor，并生成只读 AuthContext。
+4. AuthContext 至少包含 actor_id、actor_code、actor_type 和 permission_profile。
+5. 后续 MCP Tool 和 App API 只使用 AuthContext 判断身份与权限。
+6. 创建任务、报告、审核申请和 Audit Log 时，actor_id 由服务端从 AuthContext 自动写入。
+7. 请求完成后更新凭据 last_used_at，并记录必要的安全审计信息。
+
+二十四、防止 AI 身份伪装
+
+- xiaomiao、xiaoke 和其他 Actor 必须使用不同凭据，禁止共享同一个 Token。
+- 不信任请求正文、查询参数或 Tool 参数中自称的 actor_id、actor_code、author、created_by。
+- 写操作中的 Actor 字段由服务端覆盖或拒绝，客户端不能指定其他 Actor。
+- 修改和完成 AI 任务时，同时校验任务 owner_actor_id 与 AuthContext.actor_id。
+- 追加项目报告或 Study Report 时，只能写入当前 AuthContext 对应的 Actor 名下。
+- 用户审批与审核模型操作使用不同认证域，AI Actor 凭据不能获得用户审批能力。
+- 凭据只显示掩码或指纹，支持单独撤销、过期和轮换；撤销一个 Actor 不影响其他 Actor。
+- 认证失败、已撤销凭据、身份字段冲突和越权访问进入安全日志与 Audit Log。
+- 日志不得记录完整 Token、Authorization 标头或其他认证秘密。
+- 高频认证失败触发限流；连续冒充或越权尝试可以临时禁用对应凭据。
+- 数据库层对 actor_code 建立唯一约束，对任务和报告的 Actor 关联建立外键约束。
+- 服务端测试必须覆盖：xiaomiao 不能修改 xiaoke 任务、xiaoke 不能提交 xiaomiao 报告、AI 不能批准主进度、已撤销凭据不能继续调用。
+
+阶段边界：
+
+- 第二关完成 Actor 模型、预设身份、连接模型、OAuth 凭据模型和防伪规则设计。
+- 第三关按照已经确定的 OpenAI Secure MCP Tunnel 与 Claude Remote MCP 方案实现接入，并测试身份识别。
+- 第六关创建数据库表、初始 Actor 数据与实际凭据，落实认证中间件。
+
+二十五、数据模型总体规则
+
+- 所有主要实体使用 UUID 主键。
+- 所有时间使用 UTC 的 timestamptz，Windows 客户端负责转换为本地显示时间。
+- 所有可修改的核心数据使用 version 字段执行乐观并发控制，防止用户和多个 AI 互相覆盖。
+- 工作报告、审核记录、项目决策和 Audit Log 使用追加保存，不允许覆盖旧版本。
+- 正式主进度只能由用户操作或已批准的 StageUpdateRequest 改变。
+- 敏感 Key 不进入普通业务表、Settings value_json 或 Audit Log。
+- Project、ProjectTask、AITask 和 Asset 优先使用归档或软删除，历史记录默认禁止级联删除。
+- 外键默认使用 RESTRICT；只有纯关联表可以在父记录删除时安全清理。
+
+二十六、Project
+
+用途：保存项目当前有效的基础信息。
+
+核心字段：
+
+- id：UUID 主键。
+- name：项目名称。
+- description：项目简介。
+- goal：项目目标。
+- scope：项目范围。
+- current_version：当前版本。
+- current_version_goal：当前版本目标。
+- core_features：核心功能说明。
+- out_of_scope：不做的内容。
+- important_principles：重要原则。
+- status：active、paused、completed、archived。
+- version：并发控制版本号。
+- created_at、updated_at、archived_at。
+
+规则：
+
+- Project 保存当前有效版本。
+- 重大目标、范围和架构修改必须同时创建 ProjectDecision，保存修改前后内容和原因。
+- 项目归档不删除其关卡、任务、报告、审核和历史。
+
+二十七、ProjectStage
+
+用途：保存项目地图中的正式关卡。
+
+核心字段：
+
+- id、project_id。
+- name、description。
+- position：关卡顺序，同一项目内唯一。
+- completion_criteria：关卡完成条件。
+- status。
+- started_at、completed_at。
+- version。
+
+状态：
+
+- locked。
+- not_started。
+- in_progress。
+- pending_review。
+- needs_changes。
+- blocked。
+- completed。
+
+规则：
+
+- 正式状态由用户或已批准的更新申请改变。
+- AI 不可以直接将关卡改为 completed。
+- 关卡顺序使用唯一约束，禁止同一项目出现两个相同 position。
+
+二十八、ProjectTask（补充模型）
+
+用途：保存关卡下的正式主任务和分任务，避免把正式主任务与 AI 私人任务混在一起。
+
+核心字段：
+
+- id、project_id、stage_id。
+- parent_task_id：分任务的父任务，可以为空。
+- title、description、completion_criteria。
+- status、position。
+- assigned_actor_id：可选负责 AI。
+- version。
+- created_at、updated_at、completed_at、archived_at。
+
+状态：not_started、in_progress、pending_review、needs_changes、blocked、completed。
+
+规则：
+
+- parent_task_id 必须指向同一项目中的 ProjectTask。
+- 正式完成必须经过审核；AI 不能直接写入 completed。
+- ProjectTask 与 AITask 相互独立，AITask 完成不会自动更新 ProjectTask。
+
+二十九、StageReport
+
+用途：保存正式项目 AI 每轮工作的不可变报告。
+
+核心字段：
+
+- id、project_id、stage_id。
+- project_task_id、ai_task_id：可选关联任务。
+- actor_id：由认证上下文写入。
+- work_goal、completed_content、change_summary。
+- changed_files、test_result。
+- current_progress、remaining_issues、next_plan。
+- submitted_at。
+
+规则：
+
+- 报告提交后不覆盖；需要补充时创建新 StageReport。
+- actor_id 不接受客户端指定其他 Actor。
+- 相关素材通过 AssetLink 关联，不在报告正文中重复保存文件。
+
+三十、StageUpdateRequest 与 ReviewAttempt
+
+StageUpdateRequest 用途：保存 AI 对正式任务或关卡的更新申请。
+
+核心字段：
+
+- id、project_id、stage_id、project_task_id。
+- requester_actor_id、stage_report_id。
+- requested_status、reason。
+- base_version：申请时目标对象的版本号。
+- status。
+- submitted_at、resolved_at、decision_reason。
+
+状态：submitted、under_review、needs_more_info、approved、rejected、cancelled。
+
+规则：
+
+- 批准前校验 base_version，防止旧申请覆盖用户后来做出的修改。
+- AI 只能提交申请，不能批准申请。
+- 用户批准后，由服务端在同一数据库事务中更新正式状态并写入 Audit Log。
+
+ReviewAttempt 用途：保存每次提交与审核的不可变版本。
+
+- 每次补充和重新审核创建新的 ReviewAttempt。
+- 保存原始报告、审核模型、审核结果、理由、已检查内容、缺失内容和时间。
+- 旧审核版本永久保留，不能被新审核覆盖。
+
+三十一、AITask
+
+用途：保存每个 AI 独立的个人任务树。
+
+核心字段：
+
+- id、project_id、owner_actor_id。
+- project_task_id：可选关联正式任务。
+- parent_task_id：AI 子任务关系。
+- title、description。
+- status、progress_percent、notes。
+- blocker_type、blocker_reason。
+- position、version。
+- created_at、updated_at、completed_at、archived_at。
+
+规则：
+
+- owner_actor_id 由服务端权限上下文校验。
+- AI 只能修改自己的 AITask。
+- AITask 完成只代表该 AI 的工作完成，不代表正式主任务完成。
+
+三十二、AIActor 与 AIActorCredential
+
+- AIActor 使用第二十一至二十四节确定的字段、预设身份和权限规则。
+- AIActor 表示稳定项目成员身份，不绑定某个固定模型版本。
+- actor_code 全局唯一且不可变。
+- AIActorCredential 与 AIActor 分表保存，支持凭据过期、撤销和轮换。
+- 业务表只保存 actor_id 外键，不保存明文凭据。
+
+三十三、Asset 与 AssetLink
+
+Asset 核心字段：
+
+- id、project_id。
+- file_name、display_name、asset_type、mime_type。
+- storage_key：素材目录中的相对存储标识。
+- size_bytes、sha256。
+- uploaded_by_type、uploaded_by_actor_id。
+- notes。
+- created_at、updated_at、deleted_at。
+
+规则：
+
+- 文件保存在独立素材目录，PostgreSQL 保存元数据和关联关系。
+- sha256 用于完整性验证和重复文件识别。
+- 被历史审核记录引用的素材不得永久删除，只能归档。
+
+AssetLink 核心字段：asset_id、target_type、target_id、created_at。
+
+- 用于关联 Project、ProjectStage、ProjectTask、AITask、StageReport、ReviewAttempt 和 StudySession。
+- 对 asset_id、target_type、target_id 建立唯一约束，避免重复关联。
+
+三十四、StudySession 与 StudyParticipant
+
+StudySession 核心字段：
+
+- id、task_text。
+- timer_mode：count_up、count_down。
+- planned_duration_seconds：倒计时设定时长。
+- started_at、ended_at。
+- actual_duration_seconds、paused_duration_seconds。
+- status。
+- created_at、updated_at。
+
+状态：created、running、paused、completed、cancelled、interrupted。
+
+规则：
+
+- 数据模型先支持 paused；具体暂停与恢复行为在 Study API 设计时确定。
+- actual_duration_seconds 不包含暂停时长。
+- App 异常退出时可以保存为 interrupted，恢复后由业务规则处理。
+
+StudyParticipant 核心字段：study_session_id、actor_id、joined_at、last_active_at。
+
+- 同一个 Session 与 Actor 组合唯一。
+- 只有实际参与的 AI 才创建记录。
+- 未参与的 AI 不显示未提交报告，也不要求提交报告。
+
+三十五、StudyReport
+
+核心字段：
+
+- id、study_session_id、actor_id。
+- sequence_number：同一 AI 在该 Session 中的报告序号。
+- content、submitted_at。
+
+规则：
+
+- StudyReport 追加保存，不允许覆盖。
+- 同一个 AI 可以对同一个 Session 提交 0、1 或多份报告。
+- 对 study_session_id、actor_id、sequence_number 建立唯一约束。
+- actor_id 由服务端认证上下文写入，不能由客户端冒充。
+
+三十六、StudySummary
+
+核心字段：
+
+- id、study_session_id。
+- content。
+- source：user、ai_assisted。
+- revision。
+- confirmed_by_user_at。
+- created_at、updated_at。
+
+规则：
+
+- study_session_id 唯一，一个 Session 最多一份正式用户总结。
+- 用户修改时更新同一份 Summary 并增加 revision，不创建第二份独立总结。
+- AI 生成的内容只是草稿；用户确认后才保存为正式 Summary。
+- StudySummary 与 StudyReport 分开保存，互不覆盖。
+
+三十七、当前音乐状态数据
+
+CurrentMusicState 是 Windows 客户端的临时状态对象，不作为 PostgreSQL 长期业务表。
+
+字段：
+
+- session_source：Windows 当前媒体 Session 来源。
+- track_title、artist、album_title。
+- playback_status：playing、paused、stopped、unknown。
+- position_seconds、duration_seconds。
+- thumbnail。
+- updated_at。
+
+规则：
+
+- 状态来自 Windows GlobalSystemMediaTransportControlsSession。
+- 切歌、暂停、恢复或播放器关闭时更新内存状态和 UI。
+- 应用关闭后不要求持久保存 CurrentMusicState。
+
+三十八、v0.1 BGM 历史决定
+
+- v0.1 不保存完整 BGM 播放历史，只实时显示当前音乐。
+- 不高频写入歌曲播放进度，避免产生大量低价值数据。
+- StudySession 核心功能不依赖 BGM 历史。
+- QQ 音乐兼容性在 Windows 音乐模块测试中验证。
+- v0.2+ 如需启用，可新增 StudyMusicHistory，不需要修改现有 StudySession 主结构。
+
+三十九、AuditLog
+
+用途：保存不可修改的关键操作审计记录。
+
+核心字段：
+
+- id、request_id。
+- actor_type、actor_id。
+- action。
+- resource_type、resource_id。
+- result。
+- changes：脱敏后的变更摘要。
+- ip_hash、user_agent。
+- created_at。
+
+规则：
+
+- AuditLog 只追加，不提供普通修改和删除接口。
+- changes 不保存 Key、Token、密码、Authorization 标头、完整连接串或未脱敏隐私数据。
+- 关键状态变化、权限失败、身份冲突、报告提交、审核结果和正式进度更新必须写入 AuditLog。
+
+四十、Settings
+
+核心字段：
+
+- id。
+- scope_type：global、project、actor。
+- scope_id：全局设置时为空。
+- setting_key。
+- value_json：仅保存非敏感配置。
+- credential_reference：敏感凭据的安全存储引用。
+- version、updated_at。
+
+规则：
+
+- 同一 scope_type、scope_id、setting_key 组合唯一。
+- Windows Key 保存在系统安全凭据存储，Settings 只保存引用。
+- 服务端密钥放入 /etc/mingwu/mingwu.env 或后续密钥服务，不写入 Settings。
+
+四十一、其他必要辅助模型
+
+ProjectDecision：保存项目目标、范围、技术方案和重大设计变化，包括修改前、修改后、原因、决策者和时间。
+
+Blocker：保存任务阻塞类型、原因、提交者、需要谁处理、解决条件、创建时间和解决时间。
+
+ReviewAttempt：保存每次不可变审核版本。
+
+AssetLink：保存素材与业务对象的多态关联。
+
+StudyParticipant：保存 Session 实际参与 AI。
+
+四十二、约束、索引与删除规则
+
+- ProjectStage 对 project_id、position 建立唯一约束。
+- AIActor 对 actor_code 建立唯一约束。
+- StudySummary 对 study_session_id 建立唯一约束。
+- StudyParticipant 对 study_session_id、actor_id 建立唯一约束。
+- StudyReport 对 study_session_id、actor_id、sequence_number 建立唯一约束。
+- 常用查询按 project_id、stage_id、status、actor_id、submitted_at 和 created_at 建立索引。
+- 可修改核心实体使用 version 执行乐观并发控制。
+- 历史报告、审核记录、ProjectDecision 和 AuditLog 禁止硬删除。
+- Project、ProjectTask、AITask 和 Asset 使用归档或软删除。
+- 删除操作不得通过级联方式抹除正式历史。
+- 数据库结构通过 Drizzle ORM + SQL Migration 管理，已执行的 Migration 不直接改写。
+
+四十三、跨平台 MCP 身份与连接模型
+
+最终原则：AI Actor 是长期身份，MCPConnection 是长期连接登记，MCP Session 是一次临时协议会话。断线、重连、应用重启或更换客户端平台只会产生新的 Session，不会改变 AI Actor。
+
+身份映射：
+
+认证凭据 → MCPConnection → AIActor → AuthContext
+
+- AI Actor 可以拥有 0 到多条 MCPConnection。
+- 每个平台或客户端实例使用独立连接和独立凭据，不跨平台共用同一个明文 Token。
+- 多条连接可以绑定同一个 AI Actor，因此同一个 AI 在不同平台接入后仍使用同一 actor_id、任务树、报告和历史记录。
+- client_platform 只用于连接管理和审计，不参与决定业务身份。
+- 客户端提交的 actor_id、actor_code 或显示名称不可信；业务身份只能由服务端根据有效凭据解析。
+- MCP 协议产生的临时 Session ID 不作为身份凭证，也不写入业务对象的 actor_id。
+
+MCPConnection 核心字段：
+
+- id：UUID，连接登记的稳定标识。
+- actor_id：绑定的 AIActor。
+- display_name：用户可识别的连接名称。
+- client_platform：openai_plugin、claude、other。
+- transport：openai_secure_tunnel、remote_streamable_http 或后续扩展类型。
+- endpoint_reference：连接目标的非敏感引用；不保存带 Token 的 URL。
+- auth_method：v0.1 为 oauth_2_1_bearer。
+- credential_id：当前生效的 AIActorCredential。
+- status：draft、active、disabled、revoked、error。
+- created_at、updated_at、last_connected_at、last_tested_at、revoked_at。
+- last_test_status、last_error_code：只保存脱敏后的状态和错误分类。
+- metadata：非敏感扩展信息，不允许保存 Key、Token 或 Authorization 标头。
+
+约束：
+
+- 一个 AIActorCredential 只能归属于一个 Actor，并只能绑定到该 Actor 的连接。
+- 同一连接同时最多有一条 active 凭据；轮换期间允许短暂保留待验证的新凭据。
+- 删除连接采用撤销或禁用，不级联删除 Actor 的任务、报告和审计历史。
+- 连接来源、凭据指纹、认证结果和实际 actor_id 写入脱敏 AuditLog。
+
+四十四、AI Connections 设置结构
+
+Windows 客户端的 AI Connections 设置页按 AI Actor 分组，每个 Actor 下显示自己的连接卡片。
+
+公共信息：
+
+- AI 名称与 actor_code。
+- 平台类型、连接方式和连接状态。
+- endpoint 的非敏感部分。
+- 凭据指纹后四位、创建时间、最近连接时间和最近测试结果。
+- 新建连接、测试连接、轮换凭据、删除凭据、禁用连接和删除连接入口。
+
+独立配置入口：
+
+- OpenAI：独立入口，固定选择 OpenAI Plugin + Secure MCP Tunnel，绑定目标 Actor，显示 Tunnel 配置状态和 OAuth 状态。
+- Claude：独立入口，使用普通 Remote MCP + Streamable HTTP，连接 https://mingwu.maomao.im/mcp，并显示 OAuth 状态。
+- 其他 AI：预留通用 Remote MCP 入口，可选择 Actor、填写显示名称并使用同一 OAuth 身份模型；不得绕过 Actor 绑定和权限检查。
+
+UI 不允许直接编辑 actor_id，不允许把“平台名称”当作 AI 身份，也不允许一个连接在创建后静默改绑到另一个 Actor。需要变更 Actor 时必须撤销旧连接并重新创建。
+
+四十五、OpenAI 最终连接方案
+
+- OpenAI 侧通过开发模式 Plugin 选择 Secure MCP Tunnel 接入。
+- VPS 上运行独立的 OpenAI tunnel-client；它只通过出站 HTTPS 连接 OpenAI，不要求为 OpenAI 新开放 VPS 入站端口。
+- tunnel-client 将请求转发到本机 http://127.0.0.1:8790/mcp，不占用或修改 VPS 已有服务端口。
+- Tunnel 是传输通道，不是 AI Actor 身份；OpenAI 连接仍通过 OAuth 凭据映射到对应 MCPConnection 和 AIActor。
+- OAuth discovery 可以经过 Tunnel；浏览器需要访问的授权服务使用 mingwu.maomao.im 上的 HTTPS 授权入口。
+- OpenAI 连接默认绑定 xiaomiao；如未来同一 Actor 从其他 OpenAI 客户端接入，为该客户端签发新的独立连接凭据，仍映射到 xiaomiao。
+- OpenAI Tunnel 的 runtime API key 与业务 OAuth Token 分开管理；前者只允许 tunnel-client 使用，后者只用于 Mingwu Actor 认证。
+
+四十六、Claude Remote MCP 最终连接方案
+
+- Claude 侧使用普通远程 MCP，通过 Streamable HTTP 连接 https://mingwu.maomao.im/mcp。
+- 公网 HTTPS 由现有 Cloudflare Tunnel 转发到 http://127.0.0.1:8790，不新增公网数据库或应用端口。
+- Claude 连接使用独立 OAuth 凭据，默认绑定 xiaoke，并由服务端解析为 xiaoke 的 AuthContext。
+- Claude 不复用 OpenAI Tunnel runtime API key，也不复用 OpenAI 平台连接的明文 Token。
+- 如果同一个 Actor 以后从不同 MCP 客户端接入，各客户端获得独立凭据，但可以共同映射到该 Actor。
+- 第三关必须实际验证初始化、工具发现、读取权限、写入归属、断线重连和凭据撤销。
+
+四十七、敏感 Key 与日志规则
+
+- 禁止记录 Authorization、Cookie、Set-Cookie、X-API-Key、access_token、refresh_token、client_secret、Tunnel runtime API key 和数据库密码。
+- HTTP 与 MCP 日志使用字段白名单；请求头和原始请求体默认不整体记录。
+- 错误信息只保存错误分类、request_id、connection_id、credential_fingerprint 和 actor_id，不保存原始凭据。
+- 日志序列化层统一把疑似 secret、token、key、password、authorization 字段替换为 [REDACTED]。
+- AuditLog 的 changes 继续使用脱敏摘要，不保存凭据修改前后的值。
+- 测试必须包含故意触发认证失败和连接失败的场景，并检查日志中不存在测试 Token。
+
+四十八、Key 的显示、修改与删除
+
+显示规则：
+
+- UI 中 Key、Token 和 client_secret 默认只显示固定掩码与不可逆指纹后四位。
+- 已保存的完整凭据永不通过 UI、API、日志或错误报告回显。
+- 只有刚创建凭据的单次流程可以显示一次新 Token；关闭页面后不能再次读取，只能重新生成。
+
+修改规则：
+
+- “修改 Key”实际执行安全轮换，不原地覆盖旧凭据。
+- 先创建待验证的新凭据，连接测试通过后原子切换为 active，再撤销旧凭据。
+- 新凭据测试失败时保留旧凭据有效，避免把可用连接直接改坏。
+- 每次轮换生成独立 AuditLog，记录操作者、连接、旧新指纹和结果，不记录 Token。
+
+删除规则：
+
+- 删除凭据先在服务端标记 revoked，使其立即不能继续认证。
+- Windows 客户端同时删除系统安全凭据存储中的对应秘密。
+- 保留凭据 id、指纹、撤销时间和审计历史，不保留可用秘密。
+- 删除当前唯一 active 凭据后，连接状态变为 disabled；不得自动改绑其他 Actor 的凭据。
+
+四十九、连接测试设计
+
+连接测试按由浅到深的固定流程执行：
+
+1. 检查目标地址格式与 HTTPS 要求，不允许 Token 出现在 URL 查询参数中。
+2. 检查网络可达性、TLS 和 MCP 协议初始化。
+3. 执行工具发现，确认服务版本和最小必要工具可见。
+4. 校验 OAuth 凭据并由服务端返回当前 actor_code、connection_id 和权限摘要。
+5. 验证解析出的 Actor 与连接绑定一致，发现身份冲突立即失败。
+6. 执行只读权限探测，不在连接测试中创建真实项目、任务、报告或审核记录。
+7. 返回 success、warning 或 failed，以及脱敏错误分类和 request_id。
+
+测试结果保存 last_tested_at、last_test_status 和脱敏错误码；不保存 Token、完整响应体或内部堆栈。第三关实现实际测试接口，第五关实现 AI Connections 页面上的操作入口，第六关完成服务端认证、凭据轮换和撤销逻辑。
+
+五十、第二关密钥与连接设计结论
+
+- AI Connections 设置结构已经确定。
+- OpenAI、Claude 和其他 AI 的独立配置入口已经确定。
+- OpenAI Secure MCP Tunnel 与 Claude Remote MCP 最终连接路径已经确定。
+- 跨平台稳定 Actor、独立连接凭据与临时 Session 的边界已经确定。
+- Key 的安全存储、日志脱敏、默认隐藏、轮换、撤销和连接测试规则已经确定。
+- 本节完成的是正式编码前的设计定稿；实际建表、接入和测试仍按后续关卡执行。
