@@ -91,6 +91,18 @@ export class StageService {
   }
 
   /**
+   * 只读：返回某项目按 position 升序的全部关卡。
+   * 项目不存在时明确报错（不把“空列表”当作不存在的项目）。
+   */
+  async listStages(projectId: string): Promise<ProjectStage[]> {
+    const project = await this.projectRepository.findById(projectId);
+    if (!project) {
+      throw new ProjectNotFoundError(projectId);
+    }
+    return this.repository.listByProject(projectId);
+  }
+
+  /**
    * 修改关卡基础信息：只允许改 name / description / completionCriteria / position。
    * - 未知关卡 → 404；expectedVersion 与当前 version 不一致 → 409；
    * - position 变更后仍须满足同项目唯一，冲突 → 409（仓储原子检查 version 与 position）；

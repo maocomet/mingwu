@@ -217,9 +217,9 @@ Windows App
 
 ### MCP Tools
 
-- [ ] project_get_status
-- [ ] project_list_stages
-- [ ] project_get_stage
+- [x] project_get_status
+- [x] project_list_stages
+- [x] project_get_stage
 - [ ] project_submit_stage_update
 - [ ] project_list_reports
 - [ ] task_list_my_tasks

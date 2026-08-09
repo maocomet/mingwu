@@ -1,4 +1,8 @@
-import Fastify, { type FastifyError, type FastifyInstance } from 'fastify';
+import Fastify, {
+  type FastifyError,
+  type FastifyInstance,
+  type FastifyServerOptions,
+} from 'fastify';
 import type { AppConfig } from './config.js';
 import type { ProjectService } from './application/project/project-service.js';
 import type { StageService } from './application/stage/stage-service.js';
@@ -8,6 +12,8 @@ import {
   healthRoutes,
   type ReadinessCheck,
 } from './api/routes/health.js';
+import { mcpRoutes } from './api/routes/mcp.js';
+import { McpSessionRegistry } from './mcp/mcp-sessions.js';
 import { projectRoutes } from './api/routes/projects.js';
 import { stageRoutes } from './api/routes/stages.js';
 import { taskRoutes } from './api/routes/tasks.js';
@@ -40,13 +46,16 @@ export interface AppDeps {
   readinessChecks?: ReadinessCheck[];
   /** readyz 单项检查超时毫秒数，默认 2000，测试可注入小值。 */
   readyzTimeoutMs?: number;
+  /** 覆盖 Fastify logger 选项（测试可注入捕获 stream 断言日志脱敏）；默认按 nodeEnv 选择。 */
+  logger?: FastifyServerOptions['logger'];
 }
 
 export function buildApp(deps: AppDeps): FastifyInstance {
   const app = Fastify({
-    logger: {
-      level: deps.config.nodeEnv === 'test' ? 'silent' : 'info',
-    },
+    logger:
+      deps.logger ?? {
+        level: deps.config.nodeEnv === 'test' ? 'silent' : 'info',
+      },
     ajv: {
       customOptions: {
         // 严格校验：未知字段直接拒绝（400），而不是被静默删除。
@@ -79,6 +88,22 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   });
   app.register(stageRoutes, { prefix: '/api/v1', stageService: deps.stageService });
   app.register(taskRoutes, { prefix: '/api/v1', taskService: deps.taskService });
+
+  // MCP Streamable HTTP 挂在根路径 /mcp（不在 /api/v1 下），本地测试专用。
+  // session registry 在根实例上创建并装饰，便于测试/运维观察生命周期；
+  // 仅进程内可见，不对外暴露任何路由或数据。MCP session 只是临时连接，绝非 AI Actor 身份。
+  const mcpSessions = new McpSessionRegistry({
+    projectStatusService: deps.projectStatusService,
+    stageService: deps.stageService,
+    serviceName: deps.config.serviceName,
+    serviceVersion: deps.config.serviceVersion,
+    logger: app.log,
+  });
+  app.decorate('mcpSessions', mcpSessions);
+  app.register(mcpRoutes, {
+    config: deps.config,
+    sessions: mcpSessions,
+  });
 
   app.setErrorHandler((error: FastifyError, request, reply) => {
     if (error instanceof ProjectNotFoundError) {

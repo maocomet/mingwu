@@ -375,4 +375,41 @@ describe('StageService', () => {
       expect(final.status).toBe('completed');
     });
   });
+
+  describe('listStages', () => {
+    it('returns all stages of a project ordered by position', async () => {
+      const { projectService, stageService } = makeServices();
+      const projectId = await createProject(projectService);
+      const c = await stageService.createStage(projectId, { id: uuid(), name: 'C', position: 3 });
+      const a = await stageService.createStage(projectId, { id: uuid(), name: 'A', position: 1 });
+      await stageService.createStage(projectId, { id: uuid(), name: 'B', position: 2 });
+      void c;
+      void a;
+      const stages = await stageService.listStages(projectId);
+      expect(stages.map((s) => s.position)).toEqual([1, 2, 3]);
+      expect(stages.map((s) => s.name)).toEqual(['A', 'B', 'C']);
+    });
+
+    it('returns an empty list for a project without stages', async () => {
+      const { projectService, stageService } = makeServices();
+      const projectId = await createProject(projectService);
+      const stages = await stageService.listStages(projectId);
+      expect(stages).toEqual([]);
+    });
+
+    it('throws ProjectNotFoundError for an unknown project instead of returning an empty list', async () => {
+      const { stageService } = makeServices();
+      await expect(stageService.listStages(uuid())).rejects.toBeInstanceOf(ProjectNotFoundError);
+    });
+
+    it('is read-only: listing stages does not change any stage version or timestamp', async () => {
+      const { projectService, stageService } = makeServices();
+      const projectId = await createProject(projectService);
+      const { stage } = await stageService.createStage(projectId, { id: uuid(), name: 'S' });
+      const before = await stageService.getStage(stage.id);
+      await stageService.listStages(projectId);
+      const after = await stageService.getStage(stage.id);
+      expect(after).toEqual(before);
+    });
+  });
 });
