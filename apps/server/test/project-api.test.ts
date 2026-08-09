@@ -1,14 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { ProjectService } from '../src/application/project/project-service.js';
 import { buildApp } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
-import { InMemoryProjectRepository } from '../src/infrastructure/repositories/in-memory-project-repository.js';
-import { uuid } from './helpers.js';
+import { makeServices, uuid } from './helpers.js';
 
 function setup() {
   const config = loadConfig({ NODE_ENV: 'test' });
-  const projectService = new ProjectService(new InMemoryProjectRepository());
-  const app = buildApp({ config, projectService });
+  const { projectService, stageService } = makeServices();
+  const app = buildApp({ config, projectService, stageService });
   return { app, projectService };
 }
 

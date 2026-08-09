@@ -1,12 +1,16 @@
 import { buildApp } from './app.js';
 import { loadConfig } from './config.js';
 import { ProjectService } from './application/project/project-service.js';
+import { StageService } from './application/stage/stage-service.js';
 import { InMemoryProjectRepository } from './infrastructure/repositories/in-memory-project-repository.js';
+import { InMemoryStageRepository } from './infrastructure/repositories/in-memory-stage-repository.js';
 
 async function main(): Promise<void> {
   const config = loadConfig();
-  const projectService = new ProjectService(new InMemoryProjectRepository());
-  const app = buildApp({ config, projectService });
+  const projectRepository = new InMemoryProjectRepository();
+  const projectService = new ProjectService(projectRepository);
+  const stageService = new StageService(new InMemoryStageRepository(), projectRepository);
+  const app = buildApp({ config, projectService, stageService });
 
   const shutdown = async (signal: string): Promise<void> => {
     app.log.info({ signal }, 'shutting down');

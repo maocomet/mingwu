@@ -1,20 +1,28 @@
 import Fastify, { type FastifyError, type FastifyInstance } from 'fastify';
 import type { AppConfig } from './config.js';
 import type { ProjectService } from './application/project/project-service.js';
+import type { StageService } from './application/stage/stage-service.js';
 import {
   healthRoutes,
   type ReadinessCheck,
 } from './api/routes/health.js';
 import { projectRoutes } from './api/routes/projects.js';
+import { stageRoutes } from './api/routes/stages.js';
 import {
   ProjectConflictError,
   ProjectIdempotencyConflictError,
   ProjectNotFoundError,
 } from './domain/project/errors.js';
+import {
+  StageIdempotencyConflictError,
+  StageNotFoundError,
+  StagePositionConflictError,
+} from './domain/stage/errors.js';
 
 export interface AppDeps {
   config: AppConfig;
   projectService: ProjectService;
+  stageService: StageService;
   readinessChecks?: ReadinessCheck[];
   /** readyz 单项检查超时毫秒数，默认 2000，测试可注入小值。 */
   readyzTimeoutMs?: number;
@@ -51,6 +59,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     readyzTimeoutMs: deps.readyzTimeoutMs ?? 2000,
   });
   app.register(projectRoutes, { prefix: '/api/v1', projectService: deps.projectService });
+  app.register(stageRoutes, { prefix: '/api/v1', stageService: deps.stageService });
 
   app.setErrorHandler((error: FastifyError, request, reply) => {
     if (error instanceof ProjectNotFoundError) {
@@ -66,6 +75,21 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     if (error instanceof ProjectIdempotencyConflictError) {
       return reply.status(409).send({
         error: 'project_idempotency_conflict',
+        message: error.message,
+      });
+    }
+    if (error instanceof StageNotFoundError) {
+      return reply.status(404).send({ error: 'stage_not_found', message: error.message });
+    }
+    if (error instanceof StagePositionConflictError) {
+      return reply.status(409).send({
+        error: 'stage_position_conflict',
+        message: error.message,
+      });
+    }
+    if (error instanceof StageIdempotencyConflictError) {
+      return reply.status(409).send({
+        error: 'stage_idempotency_conflict',
         message: error.message,
       });
     }

@@ -263,3 +263,237 @@
 后续允许进入 ProjectStage 小批次。Git 提交与推送由小喵在检查当前完整变更范围后决定。
 
 **返修检查点 #1 已关闭。**
+
+---
+
+## 检查点 #2 · 2026-08-09
+
+**本批次目标**
+
+在已验收的 Project API 基础上，建立 ProjectStage 数据契约、仓储、服务与路由，完成 Stage 最小闭环（创建关卡、获取关卡详情、获取主进度树），为后续 Stage API 与 MCP Tools 提供数据基础。按猫猫要求，本批暂不实现"修改关卡"和"设置关卡状态"。
+
+**候选完成的计划项目原文**（仅候选完成，未打勾）
+
+- `- [ ] 获取主进度树`
+- `- [ ] 获取关卡详情`
+- `- [ ] 创建关卡`
+
+**实际完成内容**
+
+1. 建立 `packages/contracts/src/stage.ts`：`ProjectStage` 类型（id / projectId / name / description / position / completionCriteria / status / startedAt / completedAt / version / createdAt / updatedAt）、`CreateStageInput`、`ProgressTree`（项目 + 关卡列表）、`PROJECT_STAGE_STATUSES` 七个状态，以及 projectId / stage 参数、创建体、关卡 JSON、进度树 JSON 的严格 Schema；`index.ts` 追加导出。
+2. 建立 Stage 领域层：`StageRepository`（findById / listByProject / createIfAbsent）、错误类型（`StageNotFoundError`、`StagePositionConflictError`、`StageIdempotencyConflictError`）。
+3. 实现 `InMemoryStageRepository`：id 唯一性 + 同项目内 `(projectId, position)` 唯一性均由仓储级原子检查保证（同步块内完成，无 await 间隙）。
+4. 实现 `StageService`：
+   - 创建关卡：校验项目存在（不存在 → 404）；`position` 未提供时按同项目最大 position + 1 自动分配；默认 `status = 'not_started'`、`version = 1`；幂等语义比较（position 仅在客户端显式提供时参与比较）。
+   - 获取关卡详情：未知 id → 404 `stage_not_found`。
+   - 获取主进度树：校验项目存在，返回项目基础信息 + 按 position 升序的关卡列表。
+5. 实现 HTTP 路由：`POST /api/v1/projects/:projectId/stages`（201/200）、`GET /api/v1/stages/:id`、`GET /api/v1/projects/:projectId/progress-tree`，JSON Schema 严格校验（未知字段 400）。
+6. `app.ts` 注册 stageRoutes 并新增错误映射（404 `stage_not_found`、409 `stage_position_conflict`、409 `stage_idempotency_conflict`）；`index.ts` 改为共享同一个 `InMemoryProjectRepository` 装配两个服务。
+
+**新增、修改和删除的文件清单**
+
+新增：
+- `packages/contracts/src/stage.ts`
+- `apps/server/src/domain/stage/errors.ts`、`repository.ts`
+- `apps/server/src/infrastructure/repositories/in-memory-stage-repository.ts`
+- `apps/server/src/application/stage/stage-service.ts`
+- `apps/server/src/api/routes/stages.ts`
+- `apps/server/test/stage-repository.test.ts`、`stage-service.test.ts`、`stage-api.test.ts`
+
+修改：
+- `packages/contracts/src/index.ts`（追加 `export * from './stage.js'`）
+- `apps/server/src/app.ts`（`AppDeps` 新增必填 `stageService`、注册 stageRoutes、Stage 错误映射）
+- `apps/server/src/index.ts`（共享项目仓储装配两个服务）
+- `apps/server/test/helpers.ts`（新增 `makeStage` 与 `makeServices` 共享装配）
+- `apps/server/test/health.test.ts`、`project-api.test.ts`（setup 改为提供 `stageService`）
+
+删除：无。
+
+**关键设计决定及其依据**
+
+1. `StageService` 依赖 `ProjectRepository`：创建关卡与主进度树都必须先确认项目存在，避免为不存在的项目产生孤立关卡；两个仓储在 `index.ts` 与测试中共享同一 `InMemoryProjectRepository` 实例。
+2. position 唯一性下移到仓储级原子检查（而非服务层先查再写）：避免并发创建时两个请求同时通过 position 检查后重复占用；第六关由 PostgreSQL `UNIQUE (project_id, position)` 承担同一职责。
+3. 幂等语义比较中 position 只在显式提供时参与：自动分配 position 的幂等重试会重算出不同位置，若一律比较 position 会把合法的重试误判为冲突；显式指定了 position 则必须一致。
+4. 同一 stage id 被用于不同项目时按幂等冲突处理（409）：幂等键（id）全局唯一，跨项目复用同一 id 视为语义不一致，防止数据串项目。
+5. `stageService` 设为 `AppDeps` 必填并显式注入：避免 `buildApp` 内部偷偷构造一套独立存储的服务，隐藏组合错误；既有 health / project 测试只补一行注入，不产生隐藏状态。
+6. 自动分配 position 的并发竞态（两个无 position 的并发创建可能算出相同位置，后到者 409）如实保留并记录为已知风险，不做静默覆盖。
+
+**执行过的测试或检查、命令与真实结果**
+
+- `npm run typecheck`：通过（contracts 与 server 均 `tsc --noEmit` 通过）。
+- `npm test`（vitest run）：**79 passed / 79**，7 个测试文件全过。新增 35 个用例：仓储 8（含并发同 id 1 次创建 + 19 次返回已有、并发同 position 1 次创建 + 19 次 position 冲突）、服务 13（含自动 position 递增、幂等重试、自动 position 重试幂等、同 id 不同内容/不同项目/不同显式 position 冲突、进度树排序）、API 14（含 201/200/400/404/409 各错误码、并发同 id、并发同 position、未知字段与畸形 UUID 400）。
+- 真实冒烟测试（本机启动服务监听 127.0.0.1:8790，Node fetch 脚本直连 HTTP 验证）：
+  - 创建项目 201；创建关卡（自动 position=1）201，status=`not_started`、version=1；
+  - 显式 position=5 的关卡 201；第三个关卡自动 position=max+1=6；
+  - 获取关卡详情 200；未知关卡 404 `stage_not_found`；
+  - 主进度树 200，关卡按 position 升序 `[1,5,6]`，project 正确；
+  - 未知项目进度树 404 `project_not_found`；
+  - 同 id 同内容重试 200；同 id 不同内容 409 `stage_idempotency_conflict`；同项目同 position 409 `stage_position_conflict`；
+  - 服务日志无任何敏感信息；测试后服务已停止，端口 8790 已释放。
+
+**未完成内容、已知问题和风险**
+
+- "修改关卡"与"设置关卡状态"按猫猫要求本批未实现，留待后续批次。
+- 自动分配 position 的并发竞态：两个未提供 position 的并发创建可能算出相同位置，后到者会收到 409 `stage_position_conflict`（不会静默覆盖）。第三关内存原型如实暴露该语义；第六关 PostgreSQL 的唯一约束同样会拒绝，届时可评估是否需要重试分配。
+- 关卡排序依赖 position 升序，本批无"移动/重排"操作；将来支持重排时需要处理批量位置变更的原子性。
+- `startedAt` / `completedAt` 字段已在契约与模型中定义但创建时固定为 null，由"设置关卡状态"批次维护。
+- PostgreSQL、身份认证、AuditLog、生产构建仍按计划归第六关；内存仓储重启即失。
+
+**是否涉及数据库、身份权限、密钥、外部服务或破坏性变化**
+
+- 数据库：未新增/修改任何 Migration（仍为内存仓储，无 DB）。
+- 身份权限：未改动。
+- 密钥：无。
+- 外部服务：未操作 VPS / Cloudflare / GitHub；冒烟测试服务已停止、端口已释放。
+- 破坏性变化：无；全部为新增文件与既有测试 setup 的少量注入补充；未触碰他人既有修改（`docs/project-plan-v0.1.md`、`第一关卡完成报告.txt`、`第二关卡报告.txt`、`infra/`、`CLAUDE.md` 均保留原样）。
+
+**建议下一批任务**
+
+在小喵确认本批后：实现"修改关卡"与"设置关卡状态"，前者补乐观并发修改（复用 `updateIfVersion` 模式并处理 position 变更的原子性），后者维护 `status` / `startedAt` / `completedAt` 与状态流转校验。
+
+**等待小喵审核。**
+
+---
+
+## 小喵审核结果 #2 · 2026-08-09
+
+**审核结论：部分通过，检查点 #2 需要一次小返修。**
+
+已通过并由小喵在计划文档中打勾：
+
+- 获取关卡详情（Stage 基础资源详情）。
+
+暂未通过、保持未勾选：
+
+- 创建关卡。
+- 获取主进度树。
+
+小喵独立验证：
+
+- `npm.cmd run typecheck`：通过。
+- `npm.cmd test`：79/79 通过。
+- 契约严格校验、项目存在性、stage id 幂等冲突、显式 position 唯一冲突、跨项目隔离、详情 404 和关卡排序均符合预期。
+- 额外并发复验：同时创建 20 个不同 id 且都不指定 position 的关卡，只有 1 个成功，19 个返回 `StagePositionConflictError`；最终项目只有 position=1 的一个关卡。
+
+必须修复的问题：
+
+1. 当客户端没有显式提供 position 时，position 是服务端内部自动分配的；有效请求不应因为内部 `max + 1` 竞争而向客户端返回“你指定的位置冲突”。请在仓储中原子分配下一个 position，或在服务层捕获自动分配产生的 position 冲突后重新读取并进行有界重试。客户端显式提供 position 时仍应保持 409 冲突语义。
+2. 增加测试：20 个不同 id、均不提供 position 的并发创建必须全部成功，最终 position 唯一且为连续的 1～20；同时保留同 id 幂等和显式 position 冲突测试。
+
+“获取主进度树”暂缓验收的原因：
+
+- 当前 `ProgressTree` 只有 `project + ProjectStage[]`，实际是项目关卡地图。
+- 第一关需求与第二关数据模型已经确定：正式主进度还包含关卡下的 ProjectTask，以及通过 parent_task_id 组成的主任务／分任务树。
+- 因此当前接口可以保留作为基础，但在加入 ProjectTask 前不能把“获取主进度树”正式打勾。
+- 这是小喵此前安排批次时没有先排 ProjectTask 支撑模型造成的边界疏漏，不算 DeepSeek 擅自偏离要求。
+
+返修范围：只修复自动 position 的并发分配并追加“检查点 #2 返修”；不要开始修改关卡、状态流转或 ProjectTask。返修通过后，小喵将验收“创建关卡”，再单独安排 ProjectTask 与完整主进度树批次。
+
+当前变更不提交、不推送 GitHub。
+
+**等待 DeepSeek 返修。**
+
+---
+
+## 检查点 #2 返修 · 2026-08-09
+
+**本批次目标**
+
+针对"小喵审核结果 #2"提出的唯一必须修复问题（自动 position 的并发分配）完成返修并补测试；不开始关卡修改、状态流转或 ProjectTask。
+
+**候选完成的计划项目原文**（维持现状，未打勾）
+
+- `- [ ] 创建关卡`
+- `- [ ] 获取主进度树`
+
+（"获取关卡详情"已由小喵在计划文档中打勾，本返修不重复认定；"获取主进度树"小喵已说明暂缓验收原因——缺少 ProjectTask 支撑模型，等待小喵单独排期。）
+
+**实际完成内容**
+
+1. **服务层有界重试**（`StageService.createStage` 重构，选择小喵提示的第二种方案）：
+   - 显式提供 position：保持原语义，一次尝试，`StagePositionConflictError`（409 `stage_position_conflict`）直接返回客户端。
+   - 自动分配 position：position 属于服务端内部分配，不再把内部 `max+1` 竞争当作客户端冲突。撞车时捕获 `StagePositionConflictError`，重新读取项目最新关卡、重算 `max+1` 后重试，上限 `AUTO_POSITION_RETRY_LIMIT = 50`；重试必然收敛（每次重算的位置单调递增），只要并发创建数低于上限即全部成功。
+   - 重试耗尽（并发度超过上限的极端情况）时如实返回与显式 position 冲突同语义的 409，不静默覆盖。
+2. **抽取私有方法** `buildStage`（构造关卡快照）与 `insertStage`（`createIfAbsent` + 幂等语义校验），显式 / 自动两条路径共用，避免重复。
+3. **新增并发测试**：
+   - 服务层：20 个不同 id、均不提供 position 的并发创建全部 `created: true`，position 去重后唯一且连续 1～20。
+   - API 层：20 个不同 id、均不提供 position 的并发 POST 全部 201，随后 GET 主进度树 position 为 1～20。
+   - 既有同 id 幂等、显式 position 冲突、自动 position 幂等重试测试全部保留并通过。
+
+**新增、修改和删除的文件清单**
+
+修改：
+- `apps/server/src/application/stage/stage-service.ts`：自动 position 有界重试；抽取 `buildStage` / `insertStage`。
+- `apps/server/test/stage-service.test.ts`：新增 20 并发自动 position 用例。
+- `apps/server/test/stage-api.test.ts`：新增 20 并发自动 position HTTP 用例。
+
+新增：无。删除：无。
+
+**关键设计决定及其依据**
+
+1. 选择"服务层有界重试"而非"仓储原子分配"：不改动 `StageRepository` 契约（`createIfAbsent` 仍以 id 唯一 + `(projectId, position)` 唯一做原子检测），第六关 PostgreSQL 落地时同一逻辑天然同构——`SELECT max(position)+1` 后 INSERT 撞 `UNIQUE (project_id, position)` 约束即重试，无需在数据库层引入序列或 `INSERT ... SELECT` 的复杂分配。
+2. 重试上限取 50：每次重试重算的位置单调递增、必然收敛，上限只需覆盖预期并发度；第三关内存原型与单人真实使用场景并发度远低于 50，20 并发验收有充分余量。达到上限只是理论兜底，不为正常路径引入额外失败面。
+3. 自动分配的撞车不再向客户端报"你指定的位置冲突"：区分"客户端显式指定的位置"与"服务端内部分配的位置"，只有前者才把冲突当成客户端语义错误。
+
+**执行过的测试或检查、命令与真实结果**
+
+- `npm run typecheck`：通过（contracts 与 server 均 `tsc --noEmit` 通过）。
+- `npm test`（vitest run）：**81 passed / 81**，7 个测试文件全过；新增 2 个并发自动分配用例（服务层 + API 层），既有 79 个用例无回归。
+- 真实冒烟测试（本机启动服务监听 127.0.0.1:8790，Node fetch 脚本直连 HTTP）：
+  - 20 个不同 id、均不提供 position 的并发 POST 创建：**全部 201、零 409**；
+  - 随后 GET 主进度树：20 个关卡，position 唯一且连续 `1..20`；
+  - 显式 position 冲突仍返回 409 `stage_position_conflict`（语义保留）；
+  - 服务日志无任何敏感信息；测试后服务已停止，端口 8790 已释放。
+
+**未完成内容、已知问题和风险**
+
+- "修改关卡"与"设置关卡状态"按猫猫与小喵安排仍未实现，留待后续批次。
+- "获取主进度树"在小喵排入 ProjectTask 支撑模型前保持未打勾；当前接口作为基础保留。
+- 自动 position 有界重试的上限 50 在极端并发（>50 个无 position 创建同时到达）下可能耗尽并返回 409；第三关原型与单人场景不会触达，第六关 PostgreSQL 落地时可评估是否需要更高上限或改为数据库序列。
+- PostgreSQL、身份认证、AuditLog、生产构建仍按计划归第六关。
+
+**是否涉及数据库、身份权限、密钥、外部服务或破坏性变化**
+
+- 数据库：未新增/修改任何 Migration（仍为内存仓储，无 DB）。
+- 身份权限：未改动。
+- 密钥：无。
+- 外部服务：未操作 VPS / Cloudflare / GitHub；冒烟测试服务已停止、端口已释放。
+- 破坏性变化：无；仅修改本批次自己的服务与测试文件，未触碰他人既有修改（`docs/project-plan-v0.1.md`、两份关卡报告、`infra/`、`CLAUDE.md` 均保留原样）。
+
+**建议下一批任务**
+
+在小喵确认返修并验收"创建关卡"后：由小喵单独安排 ProjectTask 支撑模型批次，再完成完整"获取主进度树"；之后实现"修改关卡"与"设置关卡状态"。
+
+**等待小喵审核。**
+
+---
+
+## 小喵返修验收结果 #2 · 2026-08-09
+
+**审核结论：自动 position 返修通过，检查点 #2 关闭。**
+
+本轮通过并由小喵在计划文档中打勾：
+
+- 创建关卡。
+
+本检查点此前已经通过：
+
+- 获取关卡详情。
+
+继续保持未勾选：
+
+- 获取主进度树；当前 project + stages 结构作为关卡地图基础保留，待 ProjectTask 主任务／分任务树接入后再验收。
+
+小喵独立验证：
+
+- `npm.cmd run typecheck`：通过。
+- `npm.cmd test`：81/81 通过。
+- 独立并发复验：20 个不同 id 且不提供 position 的创建全部成功，position 唯一且连续为 1～20。
+- 显式指定相同 position 的第二次创建仍发生明确冲突，没有被自动重试逻辑吞掉。
+- 同 id 幂等、跨项目隔离、详情读取、严格 Schema 和错误映射没有回归。
+
+审核结论：自动 position 的重试范围与上限对第三关单用户内存原型合理；第六关 PostgreSQL 实现时仍需重新验证唯一约束竞争，并评估是否改成数据库级分配。
+
+下一批由小喵单独安排 ProjectTask 支撑模型与完整主进度树，不开始关卡修改和状态流转。
+
+**检查点 #2 已关闭。**
