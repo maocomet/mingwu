@@ -1,0 +1,44 @@
+[Unit]
+Description=Mingwu App API and MCP Server
+Documentation=https://github.com/maocomet/mingwu
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=/opt/mingwu/current/apps/server/dist/index.js
+
+[Service]
+Type=simple
+User=mingwu
+Group=mingwu
+WorkingDirectory=/opt/mingwu/current/apps/server
+Environment=NODE_ENV=production
+Environment=HOST=127.0.0.1
+Environment=PORT=8790
+EnvironmentFile=-/etc/mingwu/mingwu.env
+ExecStart=/usr/bin/node /opt/mingwu/current/apps/server/dist/index.js
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=30s
+TimeoutStopSec=30s
+KillSignal=SIGTERM
+UMask=0027
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadWritePaths=/var/lib/mingwu /var/log/mingwu
+RuntimeDirectory=mingwu
+RuntimeDirectoryMode=0750
+
+[Install]
+WantedBy=multi-user.target
