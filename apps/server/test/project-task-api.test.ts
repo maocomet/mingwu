@@ -7,8 +7,9 @@ type App = ReturnType<typeof buildApp>;
 
 function setup() {
   const config = loadConfig({ NODE_ENV: 'test' });
-  const { projectService, stageService, taskService, taskRepository } = makeServices();
-  const app = buildApp({ config, projectService, stageService, taskService });
+  const { projectService, stageService, taskService, taskRepository, projectStatusService } =
+    makeServices();
+  const app = buildApp({ config, projectService, stageService, taskService, projectStatusService });
   return { app, taskRepository };
 }
 

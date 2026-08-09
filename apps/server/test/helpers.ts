@@ -2,6 +2,7 @@ import type { Project, ProjectStage, ProjectTask } from '@mingwu/contracts';
 import { ProjectService } from '../src/application/project/project-service.js';
 import { StageService } from '../src/application/stage/stage-service.js';
 import { ProjectTaskService } from '../src/application/project-task/project-task-service.js';
+import { ProjectStatusService } from '../src/application/project-status/project-status-service.js';
 import { InMemoryProjectRepository } from '../src/infrastructure/repositories/in-memory-project-repository.js';
 import { InMemoryStageRepository } from '../src/infrastructure/repositories/in-memory-stage-repository.js';
 import { InMemoryProjectTaskRepository } from '../src/infrastructure/repositories/in-memory-project-task-repository.js';
@@ -14,7 +15,20 @@ export function makeServices() {
   const projectService = new ProjectService(projectRepository);
   const stageService = new StageService(stageRepository, projectRepository);
   const taskService = new ProjectTaskService(taskRepository, stageRepository, projectRepository);
-  return { projectRepository, stageRepository, taskRepository, projectService, stageService, taskService };
+  const projectStatusService = new ProjectStatusService(
+    projectRepository,
+    stageRepository,
+    taskRepository,
+  );
+  return {
+    projectRepository,
+    stageRepository,
+    taskRepository,
+    projectService,
+    stageService,
+    taskService,
+    projectStatusService,
+  };
 }
 
 export function uuid(): string {

@@ -849,3 +849,143 @@
 - `设置关卡状态`
 
 **检查点 #4 已关闭。**
+
+---
+
+## 小喵下发任务 #5 · 获取项目当前状态 · 2026-08-09
+
+### 本批候选计划项
+
+- `- [ ] 获取项目当前状态`
+
+本批只完成这一个只读聚合接口。它虽然只有一个计划项，但会涉及 Project、ProjectStage、ProjectTask 三类现有数据的确定性汇总，因此作为独立检查点。完成后立即追加“检查点 #5”、停止开发并等待小喵审核；不要继续实现项目历史、MCP Tool、关卡报告、AI Task、AuditLog 或其他计划项。
+
+### 接口与数据来源
+
+- 建议接口：`GET /api/v1/projects/:projectId/status`；
+- 项目不存在返回 404 `project_not_found`，非法 UUID 返回 400；
+- 只读取现有 Project、ProjectStage、ProjectTask 仓储，必须实时计算，不保存第二套进度或状态快照；
+- 复用当前共享仓储实例，不复制测试数据，不从 HTTP 层互相调用接口；
+- 不为尚未实现的 AI 成员、StageReport、Blocker、AuditLog 或历史记录制造空壳模型、假数据或 TODO 字段。
+
+### 最小响应内容
+
+请建立严格 TypeScript 契约与 JSON Schema，至少返回：
+
+1. `project`：项目 `id`、`name`、`status`、`version`；
+2. `currentStage`：`null` 或关卡的 `id`、`name`、`position`、`status`、`version`；
+3. `stageSummary`：`total`、`completed` 与七种 ProjectStage status 的 `byStatus` 计数；
+4. `taskSummary`：`total`、`completed` 与六种 ProjectTask status 的 `byStatus` 计数；
+5. `overallProgressPercent`：0～100 的整数；
+6. `activeTasks`：扁平任务摘要数组，包含 `id`、`stageId`、`parentTaskId`、`title`、`status`、`position`、`assignedActorId`，只收录 `in_progress`、`pending_review`、`needs_changes`、`blocked`。
+
+所有 `byStatus` 必须始终包含完整枚举键，即使计数为 0，避免客户端自行猜测缺失字段。
+
+### 确定性计算规则
+
+- 关卡按 position 升序；任务先按所属关卡 position，再按任务 position，position 相同时以 id 做稳定兜底排序；
+- `currentStage` 选择顺序：先取 position 最小且状态属于 `in_progress`、`pending_review`、`needs_changes`、`blocked` 的关卡；没有则取 position 最小的 `not_started`；再没有则取 position 最小的 `locked`；全部 completed 或没有关卡时返回 null；
+- `overallProgressPercent` 不允许独立保存：存在正式 ProjectTask 时，用 `completed task / total task * 100` 四舍五入；没有任务但存在关卡时，用 `completed stage / total stage * 100` 四舍五入；项目没有关卡时为 0；
+- task 统计当前按所有正式 ProjectTask 记录计数，包括主任务与分任务。把该规则写入代码注释和检查点，后续若产品决定按叶子任务或权重计算再单独变更；
+- endpoint 必须即时反映刚刚发生的关卡元数据/状态修改，不得缓存陈旧副本。
+
+### 完整性与边界
+
+- 聚合任务时必须保证只计入当前项目各关卡中的任务；如果读取到 task.projectId 与当前项目不一致的脏数据，不得计入或伪装为正常结果，应复用/扩展受控的数据完整性错误并返回安全的 500；
+- 不接受任何请求体、actorId、用户声明或可修改参数；本批是只读用户/AI 都可复用的应用服务能力，但不新增 MCP 暴露；
+- 不修改 Project、Stage、Task 状态，不生成历史或报告；
+- 不操作 `docs/project-plan-v0.1.md`、两份关卡报告、Git/GitHub、VPS、Cloudflare、`.claude/` 或 `ui素材mingwu/`。
+
+### 最低测试与验收要求
+
+- 空项目：currentStage null、完整零计数、overallProgressPercent 0；
+- 只有关卡没有任务：使用关卡完成率；有任务后切换为任务完成率；验证四舍五入；
+- 覆盖七种关卡状态、六种任务状态的完整 `byStatus`；
+- 验证 currentStage 的优先级与 position 选择规则；
+- 验证 activeTasks 过滤、跨关卡稳定排序及嵌套任务以扁平摘要出现；
+- 验证未知项目 404、非法 UUID 400、GET 请求不接受请求体语义；
+- 直接注入 task.projectId 错配的脏数据，证明接口返回受控 500 且响应不泄露内部 id；
+- 修改关卡状态后立即查询，证明聚合结果实时变化；
+- 运行完整 `npm run typecheck` 与 `npm test`；如做真实 HTTP 冒烟，结束后释放端口。
+
+### 检查点要求
+
+完成后仅把“获取项目当前状态”列为候选完成，在 `docs/DeepSeek开发汇报.md` 文件末尾追加“检查点 #5”，写清响应契约、选择/排序/进度公式、数据完整性处理、文件清单与真实测试结果，然后暂停并请猫猫转交小喵审核。未经审核不得开始 MCP 或下一批。
+
+---
+
+## 检查点 #5 · 获取项目当前状态（只读聚合）
+
+- **检查点编号与时间**：检查点 #5，2026-08-09 08:23。
+- **本批次目标**：实现计划中“获取项目当前状态”唯一一个只读聚合接口 `GET /api/v1/projects/:projectId/status`：严格契约、应用服务、路由与完整测试；不继续开发项目历史、MCP Tool、关卡报告、AI Task、AuditLog 或其他计划项。
+- **候选完成的计划项目原文（未打勾）**：
+  - `- [ ] 获取项目当前状态`
+- **实际完成内容**：
+  - 契约新增 `ProjectCurrentStatus` 响应类型与严格 JSON Schema（`additionalProperties: false`），字段：`project`（id/name/status/version）、`currentStage`（id/name/position/status/version，可 null）、`stageSummary`、`taskSummary`、`overallProgressPercent`（0～100 整数）、`activeTasks`（扁平数组）。
+  - 应用服务 `ProjectStatusService`：只读聚合，每次调用直接读共享 Project / ProjectStage / ProjectTask 仓储实时计算，不保存第二套进度、不缓存陈旧副本。
+  - 路由 `GET /api/v1/projects/:projectId/status`：项目不存在 404 `project_not_found`，非法 UUID 400；无请求体语义，不接受 actorId 或任何可修改参数；不修改任何数据、不新增 MCP 暴露。
+  - 扩展 `ProjectTaskTreeCorruptionError` 的 reason 为 `scope_mismatch`（新增），复用其既有受控 500 映射 `project_task_tree_corrupt`。
+- **响应契约**（最小内容）：
+  1. `project`：`{ id, name, status, version }`；
+  2. `currentStage`：null 或 `{ id, name, position, status, version }`；
+  3. `stageSummary`：`{ total, completed, byStatus }`，byStatus 含七种 ProjectStage status 完整键；
+  4. `taskSummary`：`{ total, completed, byStatus }`，byStatus 含六种 ProjectTask status 完整键；
+  5. `overallProgressPercent`：0～100 整数；
+  6. `activeTasks`：扁平摘要 `{ id, stageId, parentTaskId, title, status, position, assignedActorId }`，只收录 in_progress / pending_review / needs_changes / blocked。
+  - 所有 `byStatus` 始终返回完整枚举键（计数为 0 也返回），Schema 用 `required` 全键 + `additionalProperties: false` 强制。
+- **currentStage 选择规则**（服务内按 position 升序逐档取第一个）：
+  1. 先取 position 最小且状态 ∈ {in_progress, pending_review, needs_changes, blocked} 的关卡；
+  2. 没有则取 position 最小的 `not_started`；
+  3. 再没有则取 position 最小的 `locked`；
+  4. 全部 completed 或没有关卡时返回 null。
+- **排序规则**：关卡按 position 升序（`listByProject` 已保证）；`activeTasks` 先按所属关卡 position、再按任务 position、position 相同时以 id 稳定兜底排序。
+- **进度公式**（实时计算，不独立保存）：
+  - 存在正式 ProjectTask（taskTotal > 0）时：`Math.round(completed / total * 100)`；
+  - 没有任务但存在关卡时：`Math.round(completedStage / totalStage * 100)`；
+  - 项目没有关卡时为 0。
+  - 任务统计按当前所有正式 ProjectTask 记录计数（含主任务与分任务），此规则已写入服务代码注释与本检查点；后续若产品决定改按叶子任务或权重计算再单独变更。
+- **数据完整性处理**：聚合任务时逐一校验 `task.projectId === 当前项目` 且 `task.stageId === 所在关卡`；读到错配脏数据不计数、不伪装为正常结果，抛 `ProjectTaskTreeCorruptionError('scope_mismatch')`；HTTP 层只返回受控 500 `project_task_tree_corrupt` 与通用文案，不泄露内部任务/关卡/项目 id。
+- **文件清单**：
+  - 新增：`packages/contracts/src/project-status.ts`（契约 + 严格 Schema）；`apps/server/src/application/project-status/project-status-service.ts`（只读聚合服务）；`apps/server/test/project-status-service.test.ts`（13 项）；`apps/server/test/project-status-api.test.ts`（7 项）。
+  - 修改：`packages/contracts/src/index.ts`（导出新契约）；`apps/server/src/domain/project-task/errors.ts`（`ProjectTaskTreeCorruptionError` 增加 `scope_mismatch` reason）；`apps/server/src/api/routes/projects.ts`（新增 status 路由，插件注入 `projectStatusService`）；`apps/server/src/app.ts`（AppDeps 与注册注入）；`apps/server/src/index.ts`（装配服务）；`apps/server/test/helpers.ts`（`makeServices` 返回 `projectStatusService`）。
+  - 既有测试适配：`apps/server/test/health.test.ts`、`project-api.test.ts`、`stage-api.test.ts`、`project-task-api.test.ts` 的 `buildApp` 调用补传 `projectStatusService`。
+  - 临时文件：`apps/server/smoke4.ts`（真实 HTTP 冒烟脚本，运行后已删除）。
+  - 删除：无。
+- **执行过的测试或检查、命令与真实结果**：
+  - `npm run typecheck`：@mingwu/contracts 与 @mingwu/server 均通过（0 错误）。
+  - `npm test`：12 个测试文件，**194/194 通过**（新增 project-status-service 13、project-status-api 7；既有 174 项全部保持通过）。
+  - 真实 HTTP 冒烟（`apps/server/smoke4.ts`，127.0.0.1:8790 进程内服务 + fetch）：**8/8 PASS**——聚合 currentStage 选中 in_progress 关卡、stageSummary/taskSummary 计数、进度 0、脏数据 500 受控码且响应不含内部 id、未知项目 404、非法 UUID 400；结束后进程关闭，端口 8790 已确认释放。
+- **未完成内容、已知问题与风险**：
+  - 本批为只读聚合，不实现任务状态修改接口；测试通过仓储直接注入指定状态任务（仓储不校验归属，归属校验由聚合服务承担，符合任务要求）。
+  - `task.stageId` 错配检查为防御性不变量：经 `listByStage(stageId)` 读取时 stageId 恒等于所在关卡，理论上不可达；保留该检查以覆盖未来仓储按项目读取的实现路径。
+  - 任务状态相关统计目前依赖仓储注入完成态；正式任务状态修改接口待后续批次。
+- **是否涉及数据库、身份权限、密钥、外部服务或破坏性变化**：本批不涉及。仍使用第三关内存仓储（无 Migration）；未新增/使用任何密钥或 Tunnel 凭据；未操作 GitHub、VPS、Cloudflare；未删除或覆盖任何已有文件（仅临时冒烟脚本自建自删）。
+- **权限暂缓风险**：接口为只读聚合，无请求体、不接受 actorId/身份字段，用户与 AI 均可复用，本批不新增 MCP 暴露；仍保持无认证的第三关接口开发期状态，正式部署前由统一认证与权限中间件约束。
+- **建议下一批任务**：等待小喵审核本批后，再按计划推进（如 MCP Tool 或小喵指定的下一项）；本批未擅自开始任何后续计划项。
+- **等待小喵审核。**
+
+---
+
+## 小喵验收结果 #5 · 2026-08-09
+
+**结论：检查点 #5 通过并关闭。**
+
+小喵已复核响应契约、只读聚合服务、仓储装配、路由与完整性错误处理，并独立执行：
+
+- `npm.cmd run typecheck`：contracts 与 server 均通过；
+- `npm.cmd test`：12 个测试文件、**194/194** 通过；
+- `git diff --check`：通过，仅有 Windows 行尾提示，无空白错误。
+
+验收确认：
+
+- 当前状态每次从共享 Project、ProjectStage、ProjectTask 仓储实时计算，没有保存第二套状态或缓存；
+- currentStage 分档优先级、activeTasks 稳定排序与进度公式符合任务约定；
+- stage/task 的 byStatus 始终包含完整枚举键，主任务与分任务均按当前规则计数；
+- task.projectId 错配会在计入统计前抛出受控完整性错误，HTTP 返回 500 `project_task_tree_corrupt` 且不泄露内部 id；
+- 接口只读、不接受身份或修改语义，没有提前增加 MCP、历史、AI、报告或阻塞占位数据。
+
+已由小喵在 `docs/project-plan-v0.1.md` 勾选：
+
+- `获取项目当前状态`
+
+**检查点 #5 已关闭。**

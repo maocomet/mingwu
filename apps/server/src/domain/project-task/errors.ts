@@ -48,18 +48,20 @@ export class ProjectTaskPositionConflictError extends Error {
 }
 
 /**
- * 主进度树数据完整性错误：同一关卡任务集合内出现孤儿父引用（parentTaskId 指向
- * 不存在的任务）、自引用或任意长度的父子循环。组树前必须检测并抛出该错误，
- * 禁止把分任务提升为 root 或静默丢弃循环节点；HTTP 层只返回受控错误码与通用
- * 文案，不暴露内部任务 / 关卡 id。
+ * 任务数据完整性错误：同一关卡任务集合内出现孤儿父引用（parentTaskId 指向
+ * 不存在的任务）、自引用、任意长度的父子循环，或聚合时发现任务归属与所在
+ * 关卡不一致（task.projectId / task.stageId 与宿主项目、关卡错配的脏数据）。
+ * 组树与只读聚合前必须检测并抛出该错误，禁止把分任务提升为 root、静默丢弃
+ * 循环节点或把脏数据计入统计；HTTP 层只返回受控错误码与通用文案，不暴露
+ * 内部任务 / 关卡 id。
  */
 export class ProjectTaskTreeCorruptionError extends Error {
   constructor(
     readonly stageId: string,
-    readonly reason: 'orphan_parent' | 'self_reference' | 'cycle',
+    readonly reason: 'orphan_parent' | 'self_reference' | 'cycle' | 'scope_mismatch',
     readonly taskId: string,
   ) {
-    super(`Progress tree data corruption in stage ${stageId}: ${reason} at task ${taskId}`);
+    super(`Project task data corruption in stage ${stageId}: ${reason} at task ${taskId}`);
     this.name = 'ProjectTaskTreeCorruptionError';
   }
 }

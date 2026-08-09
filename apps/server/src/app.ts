@@ -3,6 +3,7 @@ import type { AppConfig } from './config.js';
 import type { ProjectService } from './application/project/project-service.js';
 import type { StageService } from './application/stage/stage-service.js';
 import type { ProjectTaskService } from './application/project-task/project-task-service.js';
+import type { ProjectStatusService } from './application/project-status/project-status-service.js';
 import {
   healthRoutes,
   type ReadinessCheck,
@@ -35,6 +36,7 @@ export interface AppDeps {
   projectService: ProjectService;
   stageService: StageService;
   taskService: ProjectTaskService;
+  projectStatusService: ProjectStatusService;
   readinessChecks?: ReadinessCheck[];
   /** readyz 单项检查超时毫秒数，默认 2000，测试可注入小值。 */
   readyzTimeoutMs?: number;
@@ -70,7 +72,11 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     readinessChecks,
     readyzTimeoutMs: deps.readyzTimeoutMs ?? 2000,
   });
-  app.register(projectRoutes, { prefix: '/api/v1', projectService: deps.projectService });
+  app.register(projectRoutes, {
+    prefix: '/api/v1',
+    projectService: deps.projectService,
+    projectStatusService: deps.projectStatusService,
+  });
   app.register(stageRoutes, { prefix: '/api/v1', stageService: deps.stageService });
   app.register(taskRoutes, { prefix: '/api/v1', taskService: deps.taskService });
 

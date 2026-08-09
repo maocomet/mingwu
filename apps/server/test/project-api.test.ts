@@ -5,8 +5,8 @@ import { makeServices, uuid } from './helpers.js';
 
 function setup() {
   const config = loadConfig({ NODE_ENV: 'test' });
-  const { projectService, stageService, taskService } = makeServices();
-  const app = buildApp({ config, projectService, stageService, taskService });
+  const { projectService, stageService, taskService, projectStatusService } = makeServices();
+  const app = buildApp({ config, projectService, stageService, taskService, projectStatusService });
   return { app, projectService };
 }
 
