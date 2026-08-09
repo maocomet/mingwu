@@ -1,9 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { ProjectService } from '../src/application/project/project-service.js';
 import { ProjectNotFoundError } from '../src/domain/project/errors.js';
 import {
   StageIdempotencyConflictError,
   StageNotFoundError,
+  StagePositionConflictError,
+  StageVersionConflictError,
 } from '../src/domain/stage/errors.js';
 import { makeServices, uuid } from './helpers.js';
 
@@ -137,5 +139,240 @@ describe('StageService', () => {
   it('throws StageNotFoundError for an unknown stage', async () => {
     const { stageService } = makeServices();
     await expect(stageService.getStage(uuid())).rejects.toBeInstanceOf(StageNotFoundError);
+  });
+
+  describe('updateStage', () => {
+    it('modifies metadata, bumps version and refreshes updatedAt while keeping other fields', async () => {
+      // 创建与修改可能落在同一毫秒，用假时钟推进一毫秒，确定性地验证 updatedAt 被刷新。
+      vi.useFakeTimers();
+      try {
+        const { projectService, stageService } = makeServices();
+        const projectId = await createProject(projectService);
+        const { stage } = await stageService.createStage(projectId, {
+          id: uuid(),
+          name: '旧名',
+          description: '旧描述',
+          completionCriteria: '旧条件',
+          position: 1,
+        });
+        vi.setSystemTime(new Date(Date.parse(stage.updatedAt) + 1));
+        const result = await stageService.updateStage(stage.id, {
+          expectedVersion: stage.version,
+          name: '新名',
+          completionCriteria: '新条件',
+        });
+        expect(result.name).toBe('新名');
+        expect(result.description).toBe('旧描述');
+        expect(result.completionCriteria).toBe('新条件');
+        expect(result.position).toBe(1);
+        expect(result.status).toBe(stage.status);
+        expect(result.version).toBe(stage.version + 1);
+        expect(result.updatedAt > stage.updatedAt).toBe(true);
+        expect(result.createdAt).toBe(stage.createdAt);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('clears a nullable field when explicitly set to null', async () => {
+      const { projectService, stageService } = makeServices();
+      const projectId = await createProject(projectService);
+      const { stage } = await stageService.createStage(projectId, {
+        id: uuid(),
+        name: '关卡',
+        description: '要清空',
+      });
+      const result = await stageService.updateStage(stage.id, {
+        expectedVersion: stage.version,
+        description: null,
+      });
+      expect(result.description).toBeNull();
+      expect(result.name).toBe('关卡');
+    });
+
+    it('keeps the existing value when a field is not provided', async () => {
+      const { projectService, stageService } = makeServices();
+      const projectId = await createProject(projectService);
+      const { stage } = await stageService.createStage(projectId, {
+        id: uuid(),
+        name: '关卡',
+        description: '保留',
+      });
+      const result = await stageService.updateStage(stage.id, {
+        expectedVersion: stage.version,
+        name: '改名',
+      });
+      expect(result.description).toBe('保留');
+    });
+
+    it('allows changing position to an unused value', async () => {
+      const { projectService, stageService } = makeServices();
+      const projectId = await createProject(projectService);
+      const { stage } = await stageService.createStage(projectId, { id: uuid(), name: 'A', position: 1 });
+      const result = await stageService.updateStage(stage.id, {
+        expectedVersion: stage.version,
+        position: 9,
+      });
+      expect(result.position).toBe(9);
+    });
+
+    it('rejects a position already taken by another stage in the same project', async () => {
+      const { projectService, stageService } = makeServices();
+      const projectId = await createProject(projectService);
+      const { stage: a } = await stageService.createStage(projectId, { id: uuid(), name: 'A', position: 1 });
+      const { stage: b } = await stageService.createStage(projectId, { id: uuid(), name: 'B', position: 2 });
+      await expect(
+        stageService.updateStage(a.id, { expectedVersion: a.version, position: b.position }),
+      ).rejects.toBeInstanceOf(StagePositionConflictError);
+    });
+
+    it('throws StageNotFoundError for an unknown stage', async () => {
+      const { stageService } = makeServices();
+      await expect(
+        stageService.updateStage(uuid(), { expectedVersion: 1, name: 'X' }),
+      ).rejects.toBeInstanceOf(StageNotFoundError);
+    });
+
+    it('throws StageVersionConflictError on a stale expectedVersion', async () => {
+      const { projectService, stageService } = makeServices();
+      const projectId = await createProject(projectService);
+      const { stage } = await stageService.createStage(projectId, { id: uuid(), name: 'A' });
+      await stageService.updateStage(stage.id, { expectedVersion: stage.version, name: 'B' });
+      await expect(
+        stageService.updateStage(stage.id, { expectedVersion: stage.version, name: 'C' }),
+      ).rejects.toBeInstanceOf(StageVersionConflictError);
+    });
+
+    it('concurrent updateStage with the same expectedVersion: only one succeeds', async () => {
+      const { projectService, stageService } = makeServices();
+      const projectId = await createProject(projectService);
+      const { stage } = await stageService.createStage(projectId, { id: uuid(), name: 'A' });
+      const results = await Promise.all(
+        Array.from({ length: 20 }, () =>
+          stageService
+            .updateStage(stage.id, { expectedVersion: stage.version, name: '并发' })
+            .then(() => 'ok')
+            .catch((e) => (e instanceof StageVersionConflictError ? 'conflict' : 'other')),
+        ),
+      );
+      expect(results.filter((r) => r === 'ok')).toHaveLength(1);
+      expect(results.filter((r) => r === 'conflict')).toHaveLength(19);
+      const final = await stageService.getStage(stage.id);
+      expect(final.version).toBe(stage.version + 1);
+    });
+  });
+
+  describe('setStageStatus', () => {
+    it('accepts each of the seven legal statuses and bumps version', async () => {
+      const { projectService, stageService } = makeServices();
+      const projectId = await createProject(projectService);
+      const { stage } = await stageService.createStage(projectId, { id: uuid(), name: '关卡' });
+      const statuses = ['locked', 'not_started', 'in_progress', 'pending_review', 'needs_changes', 'blocked', 'completed'] as const;
+      let current = stage;
+      for (const status of statuses) {
+        if (status === current.status) continue;
+        current = await stageService.setStageStatus(current.id, {
+          expectedVersion: current.version,
+          status,
+        });
+        expect(current.status).toBe(status);
+        expect(current.version).toBeGreaterThan(0);
+      }
+    });
+
+    it('writes startedAt on first entry into in_progress', async () => {
+      const { projectService, stageService } = makeServices();
+      const projectId = await createProject(projectService);
+      const { stage } = await stageService.createStage(projectId, { id: uuid(), name: '关卡' });
+      expect(stage.startedAt).toBeNull();
+      const result = await stageService.setStageStatus(stage.id, {
+        expectedVersion: stage.version,
+        status: 'in_progress',
+      });
+      expect(result.startedAt).not.toBeNull();
+      expect(result.completedAt).toBeNull();
+    });
+
+    it('ensures startedAt is non-null and writes completedAt when entering completed', async () => {
+      const { projectService, stageService } = makeServices();
+      const projectId = await createProject(projectService);
+      const { stage } = await stageService.createStage(projectId, { id: uuid(), name: '关卡' });
+      // 直接从 not_started 进入 completed：startedAt 应被补写
+      const result = await stageService.setStageStatus(stage.id, {
+        expectedVersion: stage.version,
+        status: 'completed',
+      });
+      expect(result.startedAt).not.toBeNull();
+      expect(result.completedAt).not.toBeNull();
+      expect(result.status).toBe('completed');
+    });
+
+    it('clears completedAt when leaving completed but retains startedAt', async () => {
+      const { projectService, stageService } = makeServices();
+      const projectId = await createProject(projectService);
+      const { stage } = await stageService.createStage(projectId, { id: uuid(), name: '关卡' });
+      const completed = await stageService.setStageStatus(stage.id, {
+        expectedVersion: stage.version,
+        status: 'completed',
+      });
+      expect(completed.completedAt).not.toBeNull();
+      const reopened = await stageService.setStageStatus(completed.id, {
+        expectedVersion: completed.version,
+        status: 'in_progress',
+      });
+      expect(reopened.completedAt).toBeNull();
+      expect(reopened.startedAt).toBe(completed.startedAt);
+    });
+
+    it('does not bump version when status is set to the current value', async () => {
+      const { projectService, stageService } = makeServices();
+      const projectId = await createProject(projectService);
+      const { stage } = await stageService.createStage(projectId, { id: uuid(), name: '关卡' });
+      const result = await stageService.setStageStatus(stage.id, {
+        expectedVersion: stage.version,
+        status: 'not_started',
+      });
+      expect(result.version).toBe(stage.version);
+      expect(result.updatedAt).toBe(stage.updatedAt);
+    });
+
+    it('throws StageNotFoundError for an unknown stage', async () => {
+      const { stageService } = makeServices();
+      await expect(
+        stageService.setStageStatus(uuid(), { expectedVersion: 1, status: 'in_progress' }),
+      ).rejects.toBeInstanceOf(StageNotFoundError);
+    });
+
+    it('throws StageVersionConflictError on a stale expectedVersion', async () => {
+      const { projectService, stageService } = makeServices();
+      const projectId = await createProject(projectService);
+      const { stage } = await stageService.createStage(projectId, { id: uuid(), name: '关卡' });
+      await stageService.setStageStatus(stage.id, {
+        expectedVersion: stage.version,
+        status: 'in_progress',
+      });
+      await expect(
+        stageService.setStageStatus(stage.id, { expectedVersion: stage.version, status: 'blocked' }),
+      ).rejects.toBeInstanceOf(StageVersionConflictError);
+    });
+
+    it('concurrent setStageStatus with the same expectedVersion: only one succeeds', async () => {
+      const { projectService, stageService } = makeServices();
+      const projectId = await createProject(projectService);
+      const { stage } = await stageService.createStage(projectId, { id: uuid(), name: '关卡' });
+      const results = await Promise.all(
+        Array.from({ length: 20 }, () =>
+          stageService
+            .setStageStatus(stage.id, { expectedVersion: stage.version, status: 'completed' })
+            .then(() => 'ok')
+            .catch((e) => (e instanceof StageVersionConflictError ? 'conflict' : 'other')),
+        ),
+      );
+      expect(results.filter((r) => r === 'ok')).toHaveLength(1);
+      expect(results.filter((r) => r === 'conflict')).toHaveLength(19);
+      const final = await stageService.getStage(stage.id);
+      expect(final.version).toBe(stage.version + 1);
+      expect(final.status).toBe('completed');
+    });
   });
 });

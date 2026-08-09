@@ -42,6 +42,25 @@ export interface CreateStageInput {
   completionCriteria?: string | null;
 }
 
+/**
+ * 修改关卡基础信息：必须携带 expectedVersion 且至少提供一个可修改字段。
+ * 只允许修改 name / description / completionCriteria / position；
+ * projectId、status、startedAt、completedAt、version、createdAt 一律不允许经此修改。
+ */
+export interface UpdateStageInput {
+  expectedVersion: number;
+  name?: string;
+  description?: string | null;
+  completionCriteria?: string | null;
+  position?: number;
+}
+
+/** 设置关卡状态：只允许 status 与 expectedVersion，禁止携带任何身份字段。 */
+export interface SetStageStatusInput {
+  status: ProjectStageStatus;
+  expectedVersion: number;
+}
+
 export const projectIdParamsSchema = {
   type: 'object',
   required: ['projectId'],
@@ -66,6 +85,36 @@ export const createStageBodySchema = {
     description: { type: ['string', 'null'], maxLength: 2000 },
     position: { type: 'integer', minimum: 1 },
     completionCriteria: { type: ['string', 'null'], maxLength: 5000 },
+  },
+} as const;
+
+export const updateStageBodySchema = {
+  type: 'object',
+  required: ['expectedVersion'],
+  additionalProperties: false,
+  // 至少提供一个可修改字段，空修改体（仅 expectedVersion）返回 400。
+  anyOf: [
+    { required: ['name'] },
+    { required: ['description'] },
+    { required: ['completionCriteria'] },
+    { required: ['position'] },
+  ],
+  properties: {
+    expectedVersion: { type: 'integer', minimum: 1 },
+    name: { type: 'string', minLength: 1, maxLength: 200 },
+    description: { type: ['string', 'null'], maxLength: 2000 },
+    completionCriteria: { type: ['string', 'null'], maxLength: 5000 },
+    position: { type: 'integer', minimum: 1 },
+  },
+} as const;
+
+export const setStageStatusBodySchema = {
+  type: 'object',
+  required: ['status', 'expectedVersion'],
+  additionalProperties: false,
+  properties: {
+    status: { enum: [...PROJECT_STAGE_STATUSES] },
+    expectedVersion: { type: 'integer', minimum: 1 },
   },
 } as const;
 

@@ -92,4 +92,84 @@ describe('InMemoryStageRepository', () => {
     expect(results.filter((r) => r === 'conflict')).toHaveLength(19);
     expect((await repository.listByProject(projectId)).length).toBe(1);
   });
+
+  it('updateIfVersion applies metadata changes and bumps version', async () => {
+    const { repository } = setup();
+    const stage = makeStage({ position: 1 });
+    await repository.createIfAbsent(stage);
+    const updated = {
+      ...stage,
+      name: '改名',
+      description: '新描述',
+      position: 5,
+      version: stage.version + 1,
+      updatedAt: new Date().toISOString(),
+    };
+    const result = await repository.updateIfVersion(updated, stage.version);
+    expect(result).not.toBeNull();
+    expect(result!.name).toBe('改名');
+    expect(result!.description).toBe('新描述');
+    expect(result!.position).toBe(5);
+    expect(result!.version).toBe(stage.version + 1);
+    expect((await repository.findById(stage.id))!.name).toBe('改名');
+  });
+
+  it('updateIfVersion returns null and does not write when the stage does not exist', async () => {
+    const { repository } = setup();
+    const ghost = makeStage();
+    const result = await repository.updateIfVersion(ghost, ghost.version);
+    expect(result).toBeNull();
+    expect(await repository.findById(ghost.id)).toBeNull();
+  });
+
+  it('updateIfVersion returns null and does not write on version mismatch', async () => {
+    const { repository } = setup();
+    const stage = makeStage();
+    await repository.createIfAbsent(stage);
+    const result = await repository.updateIfVersion(
+      { ...stage, version: stage.version + 1 },
+      stage.version + 99,
+    );
+    expect(result).toBeNull();
+    expect((await repository.findById(stage.id))!.version).toBe(stage.version);
+  });
+
+  it('updateIfVersion rejects a position occupied by a different stage in the same project', async () => {
+    const { repository } = setup();
+    const projectId = uuid();
+    const stage = makeStage({ projectId, position: 1 });
+    await repository.createIfAbsent(stage);
+    await repository.createIfAbsent(makeStage({ projectId, position: 2 }));
+    const updated = { ...stage, position: 2, version: stage.version + 1 };
+    await expect(repository.updateIfVersion(updated, stage.version)).rejects.toBeInstanceOf(
+      StagePositionConflictError,
+    );
+    // 原数据不被覆盖
+    expect((await repository.findById(stage.id))!.position).toBe(1);
+  });
+
+  it('updateIfVersion allows keeping its own position (self excluded from the uniqueness check)', async () => {
+    const { repository } = setup();
+    const stage = makeStage({ position: 3 });
+    await repository.createIfAbsent(stage);
+    const updated = { ...stage, name: '保持位置', version: stage.version + 1 };
+    const result = await repository.updateIfVersion(updated, stage.version);
+    expect(result!.position).toBe(3);
+  });
+
+  it('concurrent updateIfVersion with the same expectedVersion: only one succeeds', async () => {
+    const { repository } = setup();
+    const stage = makeStage();
+    await repository.createIfAbsent(stage);
+    const results = await Promise.all(
+      Array.from({ length: 20 }, () =>
+        repository.updateIfVersion(
+          { ...stage, name: '并发改名', version: stage.version + 1 },
+          stage.version,
+        ),
+      ),
+    );
+    expect(results.filter((r) => r !== null)).toHaveLength(1);
+    expect((await repository.findById(stage.id))!.version).toBe(stage.version + 1);
+  });
 });

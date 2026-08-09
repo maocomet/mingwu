@@ -28,3 +28,14 @@ export class StageIdempotencyConflictError extends Error {
     this.name = 'StageIdempotencyConflictError';
   }
 }
+
+/**
+ * 乐观并发冲突：expectedVersion 与关卡当前 version 不一致。仓储级 CAS 检测到
+ * 版本已被其他写操作推进时抛出，防止旧状态静默覆盖新状态。
+ */
+export class StageVersionConflictError extends Error {
+  constructor(readonly stageId: string, readonly expectedVersion: number) {
+    super(`Stage ${stageId} version conflict: expected ${expectedVersion}`);
+    this.name = 'StageVersionConflictError';
+  }
+}

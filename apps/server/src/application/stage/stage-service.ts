@@ -1,6 +1,8 @@
 import type {
   CreateStageInput,
   ProjectStage,
+  SetStageStatusInput,
+  UpdateStageInput,
 } from '@mingwu/contracts';
 import { ProjectNotFoundError } from '../../domain/project/errors.js';
 import type { ProjectRepository } from '../../domain/project/repository.js';
@@ -8,6 +10,7 @@ import {
   StageIdempotencyConflictError,
   StageNotFoundError,
   StagePositionConflictError,
+  StageVersionConflictError,
 } from '../../domain/stage/errors.js';
 import type { StageRepository } from '../../domain/stage/repository.js';
 
@@ -85,6 +88,93 @@ export class StageService {
       throw new StageNotFoundError(id);
     }
     return stage;
+  }
+
+  /**
+   * 修改关卡基础信息：只允许改 name / description / completionCriteria / position。
+   * - 未知关卡 → 404；expectedVersion 与当前 version 不一致 → 409；
+   * - position 变更后仍须满足同项目唯一，冲突 → 409（仓储原子检查 version 与 position）；
+   * - 成功修改后 version + 1、刷新 updatedAt，其他字段保持不变；
+   * - description / completionCriteria 显式传 null 时清空，不传时保留原值。
+   */
+  async updateStage(id: string, input: UpdateStageInput): Promise<ProjectStage> {
+    const existing = await this.repository.findById(id);
+    if (!existing) {
+      throw new StageNotFoundError(id);
+    }
+    const updated: ProjectStage = {
+      ...existing,
+      name: input.name ?? existing.name,
+      description: input.description !== undefined ? input.description : existing.description,
+      completionCriteria:
+        input.completionCriteria !== undefined ? input.completionCriteria : existing.completionCriteria,
+      position: input.position ?? existing.position,
+      version: existing.version + 1,
+      updatedAt: new Date().toISOString(),
+    };
+    const result = await this.repository.updateIfVersion(updated, input.expectedVersion);
+    if (!result) {
+      throw new StageVersionConflictError(id, input.expectedVersion);
+    }
+    return result;
+  }
+
+  /**
+   * 设置关卡状态：允许在七种合法状态间自由设置，不发明不可逆转换规则，但保持字段不变量：
+   * - 首次进入 in_progress：startedAt 为空则写入当前 UTC 时间；
+   * - 进入 completed：确保 startedAt 非空并写入 completedAt；
+   * - 从 completed 离开：清空 completedAt，startedAt 保留（旧状态由未来 AuditLog/项目历史保存）；
+   * - 状态实际改变时 version + 1、刷新 updatedAt；设为当前状态时不推进版本；
+   * - 同一 expectedVersion 的并发写入只有一个成功，陈旧请求返回 409，不静默覆盖较新状态。
+   */
+  async setStageStatus(id: string, input: SetStageStatusInput): Promise<ProjectStage> {
+    const existing = await this.repository.findById(id);
+    if (!existing) {
+      throw new StageNotFoundError(id);
+    }
+
+    if (existing.status === input.status) {
+      // 状态未改变：校验版本一致后原样返回，不推进 version / updatedAt。
+      const result = await this.repository.updateIfVersion(
+        { ...existing },
+        input.expectedVersion,
+      );
+      if (!result) {
+        throw new StageVersionConflictError(id, input.expectedVersion);
+      }
+      return result;
+    }
+
+    const now = new Date().toISOString();
+    let startedAt = existing.startedAt;
+    let completedAt = existing.completedAt;
+
+    if (input.status === 'in_progress' && startedAt === null) {
+      startedAt = now;
+    }
+    if (input.status === 'completed') {
+      if (startedAt === null) {
+        startedAt = now;
+      }
+      completedAt = now;
+    }
+    if (existing.status === 'completed') {
+      completedAt = null;
+    }
+
+    const updated: ProjectStage = {
+      ...existing,
+      status: input.status,
+      startedAt,
+      completedAt,
+      version: existing.version + 1,
+      updatedAt: now,
+    };
+    const result = await this.repository.updateIfVersion(updated, input.expectedVersion);
+    if (!result) {
+      throw new StageVersionConflictError(id, input.expectedVersion);
+    }
+    return result;
   }
 
   private buildStage(projectId: string, input: CreateStageInput, position: number): ProjectStage {

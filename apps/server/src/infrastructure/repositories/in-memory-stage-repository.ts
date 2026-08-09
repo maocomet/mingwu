@@ -39,4 +39,27 @@ export class InMemoryStageRepository implements StageRepository {
     this.stages.set(stage.id, structuredClone(stage));
     return { stage, created: true };
   }
+
+  async updateIfVersion(
+    updated: ProjectStage,
+    expectedVersion: number,
+  ): Promise<ProjectStage | null> {
+    const existing = this.stages.get(updated.id);
+    if (!existing || existing.version !== expectedVersion) {
+      return null;
+    }
+    // 版本与 position 在同一同步块内检查并写入：排除自身后，同项目不得出现
+    // 两个相同 position 的关卡。
+    const positionTaken = [...this.stages.values()].some(
+      (s) =>
+        s.projectId === updated.projectId &&
+        s.position === updated.position &&
+        s.id !== updated.id,
+    );
+    if (positionTaken) {
+      throw new StagePositionConflictError(updated.projectId, updated.position);
+    }
+    this.stages.set(updated.id, structuredClone(updated));
+    return structuredClone(updated);
+  }
 }

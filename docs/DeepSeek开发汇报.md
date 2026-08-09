@@ -727,3 +727,125 @@
 `assignedActorId` 的真实 Actor 存在性与身份绑定继续留在身份模型/持久化批次，不影响本次验收。
 
 **检查点 #3 已关闭。**
+
+---
+
+## 小喵下发任务 #4 · Stage 修改与状态设置 · 2026-08-09
+
+### 本批候选计划项
+
+- `- [ ] 修改关卡`
+- `- [ ] 设置关卡状态`
+
+本批只完成以上两个紧密相关的小步骤。完成后立即追加“检查点 #4”、停止开发并等待小喵审核；不要继续实现“获取项目当前状态”、关卡报告、更新申请、ProjectTask 状态或其他计划项。
+
+### 1. 修改关卡
+
+为已有 ProjectStage 增加严格契约、应用服务、仓储原子更新和 HTTP 接口。建议使用：
+
+- `PATCH /api/v1/stages/:id`
+- 请求体必须包含 `expectedVersion`，并至少包含一个可修改字段；
+- 本接口只允许修改 `name`、`description`、`completionCriteria`、`position`；
+- 不允许通过本接口修改 `projectId`、`status`、`startedAt`、`completedAt`、`version` 或创建时间；
+- 未知字段、空修改体、非法 UUID、空名称、非法 position 均返回 400；
+- 关卡不存在返回 404；
+- `expectedVersion` 不匹配返回稳定的 409 版本冲突；
+- position 必须继续满足同一项目内唯一，冲突返回稳定的 409，仓储更新必须原子地同时检查 version 与 position，不能使用存在竞争窗口的“先查后写”；
+- 成功修改后 `version + 1`、刷新 `updatedAt`，其他字段保持不变。
+
+### 2. 设置关卡状态
+
+增加独立接口，建议使用：
+
+- `PATCH /api/v1/stages/:id/status`
+- 请求体仅允许 `status` 与 `expectedVersion`；
+- status 只能来自第二关报告已确定的七种值：`locked`、`not_started`、`in_progress`、`pending_review`、`needs_changes`、`blocked`、`completed`；
+- 第二关尚未确定更细的状态迁移图，本批不要自行发明不可逆转换规则；允许用户路径在七种合法状态间设置，但必须保持字段不变量；
+- 首次进入 `in_progress` 时，如果 `startedAt` 为空则写入当前 UTC 时间；
+- 进入 `completed` 时确保 `startedAt` 非空并写入 `completedAt`；
+- 从 `completed` 离开时清空当前有效状态的 `completedAt`，`startedAt` 保留；未来 AuditLog/项目历史负责保存旧状态，不在本批提前实现；
+- 状态实际改变时 `version + 1`、刷新 `updatedAt`；关卡不存在 404、版本冲突 409；
+- 同一 `expectedVersion` 的并发状态写入只能有一个成功；重复请求不得静默覆盖较新的状态。
+
+### 权限与范围边界
+
+- 该状态接口属于 Windows App 的用户操作路径原型，不新增 MCP 工具，不允许请求体携带或伪造 `actorId`、显示名称或“我是用户”等身份字段；
+- 当前第三关尚未接入 AuthContext/数据库，报告中必须明确：正式部署前由统一认证与权限中间件把此写接口限制为用户，或由未来已批准的 StageUpdateRequest 在服务端内部调用；
+- 不要为了本批伪造 AI 身份、临时信任客户端身份字段，也不要提前实现 StageUpdateRequest、AuditLog 或数据库 Migration；
+- 保持 `docs/project-plan-v0.1.md`、两份关卡报告只读；不要操作 Git、GitHub、VPS、Cloudflare、`.claude/` 或 `ui素材mingwu/`。
+
+### 最低测试与验收要求
+
+- 契约 Schema：严格字段、至少一个修改字段、所有七种状态及非法输入；
+- 仓储/服务：元数据修改、nullable 字段清空、position 冲突、未知关卡、版本冲突、20 并发同一 expectedVersion 仅一个成功；
+- 状态：七种合法状态、非法状态、startedAt/completedAt 规则、离开 completed、版本递增与并发冲突；
+- API：成功响应及 400/404/409 稳定错误码，确认未知字段不能注入身份或受保护字段；
+- 运行完整 `npm run typecheck` 与 `npm test`；如条件允许再做真实 HTTP 冒烟，结束后释放端口。
+
+### 检查点要求
+
+完成后只把上述两项列为“候选完成”，在 `docs/DeepSeek开发汇报.md` 文件末尾追加“检查点 #4”，写清文件清单、并发策略、时间字段规则、测试真实结果、权限暂缓风险与未完成内容，然后暂停并请猫猫转交小喵审核。未经审核不得开始下一批。
+
+---
+
+## 检查点 #4 · Stage 修改与状态设置
+
+- **检查点编号与时间**：检查点 #4，2026-08-09 07:44。
+- **本批次目标**：按小喵下发任务 #4 实现两个小步骤——“修改关卡”与“设置关卡状态”：严格契约、领域/应用层服务、原子仓储更新、HTTP 路由与完整测试，不涉及其他计划项。
+- **候选完成的计划项目（原文，未打勾）**：
+  - `- [ ] 修改关卡`
+  - `- [ ] 设置关卡状态`
+- **实际完成内容**：
+  - 契约新增 `UpdateStageInput` / `SetStageStatusInput` 接口与严格 JSON Schema：`additionalProperties: false`，未知字段直接 400；修改体必须含 `expectedVersion` 且至少一个可修改字段（`anyOf`）；状态体仅允许 `status` 与 `expectedVersion`，status 限于七种合法值。
+  - 领域层新增 `StageVersionConflictError`（稳定 409）；`StageRepository` 接口新增 `updateIfVersion(updated, expectedVersion)`。
+  - 内存仓储实现 `updateIfVersion`：version 匹配与同项目 position 唯一性在同一同步块内检查后写入，无“先查后写”竞争窗口。
+  - 服务层新增 `updateStage`（只允许 name/description/completionCriteria/position，成功则 version+1 并刷新 updatedAt，其余字段保持不变）与 `setStageStatus`（七种状态自由设置 + 字段不变量：首次进 in_progress 写 startedAt、进 completed 确保 startedAt 非空并写 completedAt、离开 completed 清空 completedAt 保留 startedAt、状态未变不推进版本）。
+  - 路由新增 `PATCH /api/v1/stages/:id` 与 `PATCH /api/v1/stages/:id/status`；`app.ts` 将 `StageVersionConflictError` 映射为稳定 409 `stage_version_conflict`。
+- **文件清单**：
+  - 修改：`packages/contracts/src/stage.ts`；`apps/server/src/domain/stage/errors.ts`；`apps/server/src/domain/stage/repository.ts`；`apps/server/src/infrastructure/repositories/in-memory-stage-repository.ts`；`apps/server/src/application/stage/stage-service.ts`；`apps/server/src/api/routes/stages.ts`；`apps/server/src/app.ts`。
+  - 测试修改：`apps/server/test/stage-repository.test.ts`（新增 7 项，共 14）；`apps/server/test/stage-service.test.ts`（新增 16 项，共 28）；`apps/server/test/stage-api.test.ts`（新增 23 项，共 35）。
+  - 临时文件：`apps/server/smoke3.ts`（仅用于真实 HTTP 冒烟，运行后已删除）。
+- **关键设计决定与依据**：
+  - 并发策略：把所有“写”收敛到单一 `updateIfVersion`，在仓储内同步完成 version 校验 + position 唯一校验 + 写入。内存实现为同一同步块内的 Map 操作（读与写之间无 await，不存在竞争窗口）；第六关落 PostgreSQL 时对应 `UPDATE ... WHERE id = ? AND version = ?` + `UNIQUE (project_id, position)`，并在仓储注释中写明。20 并发同一 expectedVersion 仅 1 个成功、其余 409。
+  - 时间字段规则：`updateStage` 不接受任何时间字段，仅修改成功后统一刷新 `updatedAt`；`setStageStatus` 的时间字段不变量集中在服务层一处维护（startedAt 首次补齐、completedAt 进入写/离开清），`status` 未改变时既不递增 version 也不刷新 updatedAt。
+  - 身份与受保护字段：两个接口的 Schema 均为白名单字段 + 拒绝未知字段，`projectId`、`status`、`startedAt`、`completedAt`、`version`、`createdAt`、`actorId` 一律无法经请求体写入（测试逐项断言 400）。
+  - 幂等：`PATCH` 以 `expectedVersion` 作为乐观锁，陈旧请求返回稳定 409，重复请求不会静默覆盖较新状态。
+- **执行过的测试与真实结果**：
+  - `npm run typecheck`：@mingwu/contracts 与 @mingwu/server 均通过（0 错误）。
+  - `npm test`：10 个测试文件，174/174 通过（project-service 13、project-task-service 24、project-task-repository 9、project-repository 9、stage-repository 14、stage-service 28、stage-api 35、project-api 14、project-task-api 20、health 8）。
+  - 真实 HTTP 冒烟：`apps/server/smoke3.ts` 于 127.0.0.1:8790 启动进程内服务并用 `fetch` 验证 13 项（创建 201、元数据修改 200+版本递增、陈旧版本 409、伪造 actorId 400、in_progress 写 startedAt、completed 写 completedAt、离开 completed 清空 completedAt 且保留 startedAt、20 并发状态写 1×200+19×409、未知关卡 404），13/13 PASS，结束后进程关闭，端口 8790 已确认释放。
+- **未完成内容、已知问题与风险**：
+  - AuthContext、StageUpdateRequest、AuditLog、数据库 Migration、MCP 工具均未实现（按本批边界）；`startedAt`/`completedAt` 之外的旧状态历史依赖未来 AuditLog，本批不保存。
+  - `setStageStatus` 不发明第二关未确定的状态迁移图，允许七种状态间自由设置；若未来需要迁移约束，应在确定迁移图后另行收紧。
+  - updatedAt 刷新存在同毫秒不可观测问题：本批用 vitest 假时钟在服务测试中确定性验证刷新行为，生产逻辑未改动。
+- **是否涉及数据库、身份权限、密钥、外部服务或破坏性变化**：本批不涉及。仍使用第三关内存仓储（无 Migration）；未新增或使用任何密钥/Tunnel 凭据；未操作 GitHub、VPS、Cloudflare；未删除或覆盖任何已有文件（仅临时冒烟脚本自建自删）。
+- **权限暂缓风险**：两个 PATCH 属 Windows App 用户操作路径原型。当前无 AuthContext，接口对身份字段严格白名单（伪造 actorId 等一律 400），但正式部署前必须由统一认证与权限中间件把此类写接口限制为用户，或由未来已批准的 StageUpdateRequest 在服务端内部调用；本批不提前伪造或信任客户端身份。
+- **建议下一批任务**：等待小喵审核本批后，再按计划推进“获取项目当前状态”或其指定批次；本批未擅自开始任何后续计划项。
+- **等待小喵审核。**
+
+---
+
+## 小喵验收结果 #4 · 2026-08-09
+
+**结论：检查点 #4 通过并关闭。**
+
+小喵已复核 Stage 契约、服务、仓储 CAS、HTTP 路由和新增测试，并独立执行：
+
+- `npm.cmd run typecheck`：contracts 与 server 均通过；
+- `npm.cmd test`：10 个测试文件、**174/174** 通过；
+- `git diff --check`：通过，仅有 Windows 行尾提示，无空白错误。
+
+验收确认：
+
+- `PATCH /api/v1/stages/:id` 只允许修改关卡元数据与 position，nullable 字段可显式清空，受保护字段无法注入；
+- `PATCH /api/v1/stages/:id/status` 只允许七种正式状态与 expectedVersion，startedAt/completedAt 不变量符合本批约定；
+- 仓储在同一原子操作内校验 version 与同项目 position 唯一性，20 个相同 expectedVersion 的并发变更只有一个成功；
+- 未知关卡、非法请求、版本冲突和位置冲突均返回稳定的 400/404/409 结果；
+- 当前接口仍是 Windows App 用户操作路径原型，正式部署前必须接入统一 AuthContext/权限中间件；本批没有信任客户端身份字段，也没有提前实现 StageUpdateRequest 或 AuditLog。
+
+已由小喵在 `docs/project-plan-v0.1.md` 勾选：
+
+- `修改关卡`
+- `设置关卡状态`
+
+**检查点 #4 已关闭。**

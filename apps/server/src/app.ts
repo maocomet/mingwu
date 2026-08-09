@@ -19,6 +19,7 @@ import {
   StageIdempotencyConflictError,
   StageNotFoundError,
   StagePositionConflictError,
+  StageVersionConflictError,
 } from './domain/stage/errors.js';
 import {
   ProjectTaskIdempotencyConflictError,
@@ -102,6 +103,12 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     if (error instanceof StageIdempotencyConflictError) {
       return reply.status(409).send({
         error: 'stage_idempotency_conflict',
+        message: error.message,
+      });
+    }
+    if (error instanceof StageVersionConflictError) {
+      return reply.status(409).send({
+        error: 'stage_version_conflict',
         message: error.message,
       });
     }
