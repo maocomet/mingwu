@@ -35,4 +35,12 @@ export class InMemoryStudySessionRepository implements StudySessionRepository {
     this.sessions.set(session.id, structuredClone(session));
     return session;
   }
+
+  async listTerminal(): Promise<StudySession[]> {
+    return [...this.sessions.values()]
+      .filter(
+        (s) => s.status === 'completed' || s.status === 'cancelled' || s.status === 'interrupted',
+      )
+      .map((s) => structuredClone(s));
+  }
 }

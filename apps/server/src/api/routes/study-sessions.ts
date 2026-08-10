@@ -15,11 +15,33 @@ import {
   setCountdownBodySchema,
   setTaskBodySchema,
   startStudySessionBodySchema,
+  studySessionHistoryPageJsonSchema,
+  studySessionHistoryQuerySchema,
   studySessionJsonSchema,
   studySessionParamsSchema,
 } from '@mingwu/contracts';
 import type { FastifyPluginAsync } from 'fastify';
+import { StudySessionHistoryLimitInvalidError } from '../../domain/study-session/errors.js';
 import type { StudySessionService } from '../../application/study-session/study-session-service.js';
+
+const HISTORY_PAGE_DEFAULT_LIMIT = 20;
+const HISTORY_PAGE_MAX_LIMIT = 100;
+
+/**
+ * 解析并校验历史列表 limit：HTTP query 是字符串且全局关闭类型强制转换，
+ * 缺省 20；显式传入时必须是 1..100 的整数（数字字符串），否则抛受控
+ * StudySessionHistoryLimitInvalidError（app.ts 映射为 400），不回显非法值。
+ */
+function parseHistoryLimit(raw: string | undefined): number {
+  if (raw === undefined) {
+    return HISTORY_PAGE_DEFAULT_LIMIT;
+  }
+  const limit = Number(raw);
+  if (!Number.isInteger(limit) || limit < 1 || limit > HISTORY_PAGE_MAX_LIMIT) {
+    throw new StudySessionHistoryLimitInvalidError();
+  }
+  return limit;
+}
 
 export const studySessionRoutes: FastifyPluginAsync<{
   studySessionService: StudySessionService;
@@ -74,6 +96,28 @@ export const studySessionRoutes: FastifyPluginAsync<{
       const { id } = request.params as { id: string };
       const input = request.body as SetCountdownInput;
       return studySessionService.setCountdown(id, input);
+    },
+  );
+
+  // 历史列表：只返回终态 Session（completed，预留 cancelled / interrupted）的稳定分页，
+  // endedAt DESC, id DESC。只读接口，不接受任何身份字段，不新增 actorId 入口。
+  // query 中 limit / cursor 均为字符串：limit 缺省 20、范围 1..100，cursor 为不透明
+  // URL-safe 游标；非法 limit / cursor 返回受控 400，不回显原始游标。静态路径注册在
+  // `/:id` 之前（find-my-way 静态路由本就有更高优先级，此处显式保持顺序）。
+  app.get(
+    '/study-sessions/history',
+    {
+      schema: {
+        querystring: studySessionHistoryQuerySchema,
+        response: { 200: studySessionHistoryPageJsonSchema },
+      },
+    },
+    async (request) => {
+      const query = request.query as { limit?: string; cursor?: string };
+      return studySessionService.listHistory({
+        limit: parseHistoryLimit(query.limit),
+        cursor: query.cursor ?? null,
+      });
     },
   );
 

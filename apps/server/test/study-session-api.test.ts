@@ -1334,3 +1334,272 @@ describe('POST /api/v1/study-sessions/:id/end', () => {
     expect(latest.json().version).toBe(running.version + 1);
   });
 });
+
+describe('GET /api/v1/study-sessions/history', () => {
+  const T0 = '2026-01-01T08:00:00.000Z';
+
+  async function seedTerminal(
+    services: ReturnType<typeof makeServices>,
+    overrides: Partial<StudySession> = {},
+  ): Promise<StudySession> {
+    const session = makeStudySession({ status: 'completed', endedAt: T0, ...overrides });
+    await services.studySessionRepository.createIfAbsent(session);
+    return session;
+  }
+
+  /** 与服务层一致的游标编码：`endedAt\0id` base64url。 */
+  function historyCursor(endedAt: string, id: string): string {
+    return Buffer.from(`${endedAt}\u0000${id}`, 'utf8').toString('base64url');
+  }
+
+  it('returns an empty page when no terminal sessions exist', async () => {
+    const { app, services } = setup();
+    await services.studySessionRepository.createIfAbsent(makeStudySession({ status: 'created' }));
+    const res = await app.inject({ method: 'GET', url: '/api/v1/study-sessions/history' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ items: [], nextCursor: null });
+  });
+
+  it('returns only terminal sessions sorted by endedAt desc and drops client-only fields', async () => {
+    const { app, services } = setup();
+    const a = await seedTerminal(services, { taskText: '最早', endedAt: T0 });
+    const b = await seedTerminal(services, {
+      taskText: '最晚',
+      timerMode: 'count_up',
+      startedAt: T0,
+      endedAt: '2026-01-01T10:00:00.000Z',
+      actualDurationSeconds: 120,
+    });
+    await services.studySessionRepository.createIfAbsent(
+      makeStudySession({ status: 'running', startedAt: T0 }),
+    );
+    const res = await app.inject({ method: 'GET', url: '/api/v1/study-sessions/history' });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.items).toHaveLength(2);
+    expect(body.items[0].id).toBe(b.id);
+    expect(body.items[0].taskText).toBe('最晚');
+    expect(body.items[0].timerMode).toBe('count_up');
+    expect(body.items[0].actualDurationSeconds).toBe(120);
+    expect(body.items[1].id).toBe(a.id);
+    for (const item of body.items) {
+      expect(item).not.toHaveProperty('version');
+      expect(item).not.toHaveProperty('pausedAt');
+      expect(item).not.toHaveProperty('updatedAt');
+    }
+    expect(body.nextCursor).toBeNull();
+  });
+
+  it('defaults limit to 20 and pages through the whole list without duplicates', async () => {
+    const { app, services } = setup();
+    const ids: string[] = [];
+    for (let i = 0; i < 25; i += 1) {
+      const s = await seedTerminal(services, {
+        endedAt: new Date(Date.parse(T0) + i * 60_000).toISOString(),
+      });
+      ids.push(s.id);
+    }
+    const expected = [...ids].reverse(); // endedAt 升序播种 → 降序展示为倒序
+    const first = await app.inject({ method: 'GET', url: '/api/v1/study-sessions/history' });
+    expect(first.statusCode).toBe(200);
+    expect(first.json().items).toHaveLength(20);
+    expect(first.json().nextCursor).not.toBeNull();
+    const collected: string[] = first.json().items.map((i: { id: string }) => i.id);
+    let cursor: string | null = first.json().nextCursor;
+    while (cursor !== null) {
+      const page = await app.inject({
+        method: 'GET',
+        url: `/api/v1/study-sessions/history?cursor=${encodeURIComponent(cursor)}`,
+      });
+      expect(page.statusCode).toBe(200);
+      collected.push(...page.json().items.map((i: { id: string }) => i.id));
+      cursor = page.json().nextCursor;
+    }
+    expect(collected).toEqual(expected);
+  });
+
+  it('honours an explicit limit and continues from its cursor', async () => {
+    const { app, services } = setup();
+    const ids: string[] = [];
+    for (let i = 0; i < 5; i += 1) {
+      const s = await seedTerminal(services, {
+        endedAt: new Date(Date.parse(T0) + i * 60_000).toISOString(),
+      });
+      ids.push(s.id);
+    }
+    const all = await app.inject({ method: 'GET', url: '/api/v1/study-sessions/history?limit=100' });
+    expect(all.json().items).toHaveLength(5);
+    const first = await app.inject({ method: 'GET', url: '/api/v1/study-sessions/history?limit=2' });
+    expect(first.json().items).toHaveLength(2);
+    expect(first.json().nextCursor).not.toBeNull();
+    const second = await app.inject({
+      method: 'GET',
+      url: `/api/v1/study-sessions/history?limit=2&cursor=${encodeURIComponent(first.json().nextCursor)}`,
+    });
+    expect(second.json().items).toHaveLength(2);
+    expect(second.json().nextCursor).not.toBeNull();
+    const third = await app.inject({
+      method: 'GET',
+      url: `/api/v1/study-sessions/history?limit=2&cursor=${encodeURIComponent(second.json().nextCursor)}`,
+    });
+    expect(third.json().items).toHaveLength(1);
+    expect(third.json().nextCursor).toBeNull();
+    const pageIds = [...first.json().items, ...second.json().items, ...third.json().items].map(
+      (i: { id: string }) => i.id,
+    );
+    expect(new Set(pageIds).size).toBe(5);
+    expect(pageIds).toEqual([...ids].reverse());
+  });
+
+  it('does not repeat already-seen items when a newer terminal session is inserted between pages', async () => {
+    const { app, services } = setup();
+    const ids: string[] = [];
+    for (let i = 0; i < 3; i += 1) {
+      const s = await seedTerminal(services, {
+        endedAt: new Date(Date.parse(T0) + i * 60_000).toISOString(),
+      });
+      ids.push(s.id);
+    }
+    // 播种按 endedAt 升序：[最早, 中间, 最新] → 历史降序 [ids[2], ids[1], ids[0]]。
+    const first = await app.inject({ method: 'GET', url: '/api/v1/study-sessions/history?limit=1' });
+    expect(first.json().items.map((i: { id: string }) => i.id)).toEqual([ids[2]!]);
+    expect(first.json().nextCursor).not.toBeNull();
+    // 翻页之间插入 endedAt 更新的记录：排序在最前，但旧 cursor 只向后取，
+    // 后续页不得出现新记录，也不得重复已经看过的项目。
+    await seedTerminal(services, {
+      endedAt: new Date(Date.parse(T0) + 10 * 60_000).toISOString(),
+    });
+    const second = await app.inject({
+      method: 'GET',
+      url: `/api/v1/study-sessions/history?limit=1&cursor=${encodeURIComponent(first.json().nextCursor)}`,
+    });
+    expect(second.statusCode).toBe(200);
+    expect(second.json().items.map((i: { id: string }) => i.id)).toEqual([ids[1]!]);
+    expect(second.json().nextCursor).not.toBeNull();
+    const third = await app.inject({
+      method: 'GET',
+      url: `/api/v1/study-sessions/history?limit=1&cursor=${encodeURIComponent(second.json().nextCursor)}`,
+    });
+    expect(third.json().items.map((i: { id: string }) => i.id)).toEqual([ids[0]!]);
+    expect(third.json().nextCursor).toBeNull();
+  });
+
+  it('returns a controlled 400 for a limit above 100', async () => {
+    const { app } = setup();
+    const res = await app.inject({ method: 'GET', url: '/api/v1/study-sessions/history?limit=101' });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe('study_session_history_limit_invalid');
+  });
+
+  it('rejects a non-digit or zero limit as a validation failure', async () => {
+    const { app } = setup();
+    for (const limit of ['0', '01', 'abc', '-1']) {
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/v1/study-sessions/history?limit=${limit}`,
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toBe('validation_failed');
+    }
+  });
+
+  it('returns a controlled 400 for an invalid cursor without echoing it', async () => {
+    const { app } = setup();
+    const raw = '%%%not-a-real-cursor%%%';
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/v1/study-sessions/history?cursor=${encodeURIComponent(raw)}`,
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe('study_session_history_cursor_invalid');
+    expect(JSON.stringify(res.json())).not.toContain(raw);
+  });
+
+  it('rejects a cursor with appended garbage or base64url padding as a controlled 400', async () => {
+    const { app } = setup();
+    const good = historyCursor(T0, uuid());
+    for (const cursor of [`${good}!!!`, `${good}==`, `=${good}`, `${good}\u0000`]) {
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/v1/study-sessions/history?cursor=${encodeURIComponent(cursor)}`,
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toBe('study_session_history_cursor_invalid');
+      expect(JSON.stringify(res.json())).not.toContain(encodeURIComponent(cursor));
+    }
+  });
+
+  it('rejects a cursor whose time is parseable but not canonical UTC ISO as a controlled 400', async () => {
+    const { app } = setup();
+    for (const endedAt of [
+      '2026-01-01T08:00:00Z',
+      '2026-01-01 08:00:00',
+      '2026-01-01T08:00:00.000+08:00',
+    ]) {
+      const cursor = historyCursor(endedAt, uuid());
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/v1/study-sessions/history?cursor=${encodeURIComponent(cursor)}`,
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toBe('study_session_history_cursor_invalid');
+    }
+  });
+
+  it('returns a controlled 500 without leaking ids when a terminal record has a null endedAt', async () => {
+    const { app, services } = setup();
+    const corrupt = makeStudySession({ status: 'completed', endedAt: null });
+    await services.studySessionRepository.createIfAbsent(corrupt);
+    const res = await app.inject({ method: 'GET', url: '/api/v1/study-sessions/history' });
+    expect(res.statusCode).toBe(500);
+    expect(res.json().error).toBe('study_session_history_data_corrupt');
+    const body = JSON.stringify(res.json());
+    expect(body).not.toContain(corrupt.id);
+  });
+
+  it('returns a controlled 500 without leaking ids when a terminal record has a non-canonical endedAt', async () => {
+    const { app, services } = setup();
+    const corrupt = makeStudySession({ status: 'completed', endedAt: '2026-01-01T08:00:00Z' });
+    await services.studySessionRepository.createIfAbsent(corrupt);
+    const res = await app.inject({ method: 'GET', url: '/api/v1/study-sessions/history' });
+    expect(res.statusCode).toBe(500);
+    expect(res.json().error).toBe('study_session_history_data_corrupt');
+    expect(JSON.stringify(res.json())).not.toContain(corrupt.id);
+  });
+
+  it('returns a controlled 500 without leaking ids when a terminal record has an invalid id', async () => {
+    const { app, services } = setup();
+    const corrupt = makeStudySession({ id: 'not-a-uuid', status: 'completed', endedAt: T0 });
+    await services.studySessionRepository.createIfAbsent(corrupt);
+    const res = await app.inject({ method: 'GET', url: '/api/v1/study-sessions/history' });
+    expect(res.statusCode).toBe(500);
+    expect(res.json().error).toBe('study_session_history_data_corrupt');
+    expect(JSON.stringify(res.json())).not.toContain('not-a-uuid');
+  });
+
+  it('rejects an empty cursor as a validation failure', async () => {
+    const { app } = setup();
+    const res = await app.inject({ method: 'GET', url: '/api/v1/study-sessions/history?cursor=' });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe('validation_failed');
+  });
+
+  it('rejects unknown query fields, including identity fields like actorId', async () => {
+    const { app } = setup();
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/v1/study-sessions/history?limit=20&actorId=x',
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe('validation_failed');
+  });
+
+  it('static route wins over the parameterized /:id route', async () => {
+    const { app } = setup();
+    const history = await app.inject({ method: 'GET', url: '/api/v1/study-sessions/history' });
+    expect(history.statusCode).toBe(200);
+    const unknown = await app.inject({ method: 'GET', url: `/api/v1/study-sessions/${uuid()}` });
+    expect(unknown.statusCode).toBe(404);
+    expect(unknown.json().error).toBe('study_session_not_found');
+  });
+});

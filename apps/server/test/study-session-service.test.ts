@@ -3,6 +3,9 @@ import type { CreateStudySessionInput, StudySession } from '@mingwu/contracts';
 import { TASK_TEXT_MAX_LENGTH } from '@mingwu/contracts';
 import { StudySessionService } from '../src/application/study-session/study-session-service.js';
 import {
+  StudySessionHistoryCursorInvalidError,
+  StudySessionHistoryDataCorruptError,
+  StudySessionHistoryLimitInvalidError,
   StudySessionIdempotencyConflictError,
   StudySessionNotFoundError,
   StudySessionPlannedDurationInvalidError,
@@ -1221,5 +1224,272 @@ describe('StudySessionService.endStudySession', () => {
     expect(latest!.status).toBe('completed');
     expect(latest!.endedAt).toBe(FIXED_NOW);
     expect(latest!.version).toBe(session.version + 1);
+  });
+});
+
+describe('StudySessionService.listHistory', () => {
+  const T0 = '2026-01-01T08:00:00.000Z';
+  const T1 = '2026-01-01T09:00:00.000Z';
+  const T2 = '2026-01-01T10:00:00.000Z';
+
+  /** 与服务层一致的游标编码：`endedAt\0id` base64url。 */
+  function historyCursor(endedAt: string, id: string): string {
+    return Buffer.from(`${endedAt}\u0000${id}`, 'utf8').toString('base64url');
+  }
+
+  it('returns an empty page when no terminal sessions exist', async () => {
+    const { service, studySessionRepository } = setup();
+    await seedSession(studySessionRepository, { status: 'created' });
+    await seedSession(studySessionRepository, { status: 'running', startedAt: T0 });
+    await seedSession(studySessionRepository, { status: 'paused', startedAt: T0, pausedAt: T0 });
+    const page = await service.listHistory({ limit: 20, cursor: null });
+    expect(page).toEqual({ items: [], nextCursor: null });
+  });
+
+  it('only includes terminal sessions and projects each item', async () => {
+    const { service, studySessionRepository } = setup();
+    const completed = await seedSession(studySessionRepository, {
+      timerMode: 'count_down',
+      taskText: '完成任务',
+      plannedDurationSeconds: 600,
+      status: 'completed',
+      startedAt: T0,
+      endedAt: T1,
+      actualDurationSeconds: 60,
+      pausedDurationSeconds: 10,
+      createdAt: T0,
+    });
+    await seedSession(studySessionRepository, { status: 'created' });
+    const page = await service.listHistory({ limit: 20, cursor: null });
+    expect(page.nextCursor).toBeNull();
+    expect(page.items).toHaveLength(1);
+    expect(page.items[0]).toEqual({
+      id: completed.id,
+      taskText: '完成任务',
+      timerMode: 'count_down',
+      status: 'completed',
+      startedAt: T0,
+      endedAt: T1,
+      actualDurationSeconds: 60,
+      plannedDurationSeconds: 600,
+      createdAt: T0,
+    });
+    // 历史条目不带 version / pausedAt / updatedAt 等客户端无关字段。
+    expect(page.items[0]).not.toHaveProperty('version');
+    expect(page.items[0]).not.toHaveProperty('pausedAt');
+    expect(page.items[0]).not.toHaveProperty('updatedAt');
+  });
+
+  it('includes reserved cancelled and interrupted statuses as terminal', async () => {
+    const { service, studySessionRepository } = setup();
+    await seedSession(studySessionRepository, { status: 'cancelled', endedAt: T0 });
+    await seedSession(studySessionRepository, { status: 'interrupted', endedAt: T1 });
+    const page = await service.listHistory({ limit: 20, cursor: null });
+    expect(page.items.map((i) => i.status).sort()).toEqual(['cancelled', 'interrupted']);
+  });
+
+  it('sorts by endedAt descending', async () => {
+    const { service, studySessionRepository } = setup();
+    const a = await seedSession(studySessionRepository, { status: 'completed', endedAt: T0 });
+    const b = await seedSession(studySessionRepository, { status: 'completed', endedAt: T2 });
+    const c = await seedSession(studySessionRepository, { status: 'completed', endedAt: T1 });
+    const page = await service.listHistory({ limit: 20, cursor: null });
+    expect(page.items.map((i) => i.id)).toEqual([b.id, c.id, a.id]);
+  });
+
+  it('breaks endedAt ties with id descending for a stable order', async () => {
+    const { service, studySessionRepository } = setup();
+    await seedSession(studySessionRepository, { status: 'completed', endedAt: T0 });
+    await seedSession(studySessionRepository, { status: 'completed', endedAt: T0 });
+    await seedSession(studySessionRepository, { status: 'completed', endedAt: T0 });
+    const all = await service.listHistory({ limit: 100, cursor: null });
+    const ids = all.items.map((i) => i.id);
+    expect([...ids].sort().reverse()).toEqual(ids);
+  });
+
+  it('pages by cursor across the same endedAt without duplicates', async () => {
+    const { service, studySessionRepository } = setup();
+    const a = await seedSession(studySessionRepository, { status: 'completed', endedAt: T0 });
+    const b = await seedSession(studySessionRepository, { status: 'completed', endedAt: T0 });
+    const c = await seedSession(studySessionRepository, { status: 'completed', endedAt: T0 });
+    const ordered = [a.id, b.id, c.id].sort().reverse();
+    const first = await service.listHistory({ limit: 2, cursor: null });
+    expect(first.items.map((i) => i.id)).toEqual([ordered[0], ordered[1]]);
+    expect(first.nextCursor).not.toBeNull();
+    const second = await service.listHistory({ limit: 2, cursor: first.nextCursor });
+    expect(second.items.map((i) => i.id)).toEqual([ordered[2]]);
+    expect(second.nextCursor).toBeNull();
+  });
+
+  it('paginates across differing endedAt values without duplicates or gaps', async () => {
+    const { service, studySessionRepository } = setup();
+    for (let i = 0; i < 5; i += 1) {
+      await seedSession(studySessionRepository, {
+        status: 'completed',
+        endedAt: new Date(Date.parse(T0) + i * 60_000).toISOString(),
+      });
+    }
+    const all = await service.listHistory({ limit: 100, cursor: null });
+    const collected: string[] = [];
+    let cursor: string | null = null;
+    do {
+      const page = await service.listHistory({ limit: 2, cursor });
+      collected.push(...page.items.map((i) => i.id));
+      cursor = page.nextCursor;
+    } while (cursor !== null);
+    expect(collected).toEqual(all.items.map((i) => i.id));
+    expect(new Set(collected).size).toBe(5);
+  });
+
+  it('emits nextCursor only when more data exists beyond the page', async () => {
+    const { service, studySessionRepository } = setup();
+    // 恰好 limit 条：第一页即全部，nextCursor 为 null（客户端停止分页）。
+    const a = await seedSession(studySessionRepository, { status: 'completed', endedAt: T1 });
+    const exact = await service.listHistory({ limit: 1, cursor: null });
+    expect(exact.items.map((i) => i.id)).toEqual([a.id]);
+    expect(exact.nextCursor).toBeNull();
+    // 超过 limit 条：第一页发 nextCursor，第二页取剩余项后 nextCursor 为 null。
+    await seedSession(studySessionRepository, { status: 'completed', endedAt: T0 });
+    const first = await service.listHistory({ limit: 1, cursor: null });
+    expect(first.items.map((i) => i.id)).toEqual([a.id]);
+    expect(first.nextCursor).toBe(historyCursor(T1, a.id));
+    const second = await service.listHistory({ limit: 1, cursor: first.nextCursor });
+    expect(second.items).toHaveLength(1);
+    expect(second.nextCursor).toBeNull();
+  });
+
+  it('does not repeat already-seen items when a newer terminal session is inserted between pages', async () => {
+    const { service, studySessionRepository } = setup();
+    const a = await seedSession(studySessionRepository, { status: 'completed', endedAt: T1 });
+    const b = await seedSession(studySessionRepository, { status: 'completed', endedAt: T0 });
+    const first = await service.listHistory({ limit: 1, cursor: null });
+    expect(first.items.map((i) => i.id)).toEqual([a.id]);
+    expect(first.nextCursor).not.toBeNull();
+    // 翻页之间插入 endedAt 更新的记录：排序在最前，但旧 cursor 只向后取，
+    // 后续页不得出现新记录，也不得重复已经看过的 a / b。
+    await seedSession(studySessionRepository, { status: 'completed', endedAt: T2 });
+    const second = await service.listHistory({ limit: 1, cursor: first.nextCursor });
+    expect(second.items.map((i) => i.id)).toEqual([b.id]);
+    expect(second.nextCursor).toBeNull();
+  });
+
+  it('rejects a limit outside 1..100 at the service layer', async () => {
+    const { service } = setup();
+    for (const limit of [0, -1, 101, 1.5, Number.NaN]) {
+      await expect(service.listHistory({ limit, cursor: null })).rejects.toBeInstanceOf(
+        StudySessionHistoryLimitInvalidError,
+      );
+    }
+  });
+
+  it('accepts boundary limits 1 and 100', async () => {
+    const { service, studySessionRepository } = setup();
+    await seedSession(studySessionRepository, { status: 'completed', endedAt: T0 });
+    for (const limit of [1, 100]) {
+      const page = await service.listHistory({ limit, cursor: null });
+      expect(page.items.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('rejects a cursor that is not valid base64url', async () => {
+    const { service } = setup();
+    await expect(
+      service.listHistory({ limit: 20, cursor: '%%%not-base64%%%' }),
+    ).rejects.toBeInstanceOf(StudySessionHistoryCursorInvalidError);
+  });
+
+  it('rejects a cursor with the wrong structure', async () => {
+    const { service } = setup();
+    const oneField = Buffer.from('only-one-field', 'utf8').toString('base64url');
+    const threeFields = Buffer.from(`a\u0000b\u0000c`, 'utf8').toString('base64url');
+    for (const cursor of [oneField, threeFields]) {
+      await expect(service.listHistory({ limit: 20, cursor })).rejects.toBeInstanceOf(
+        StudySessionHistoryCursorInvalidError,
+      );
+    }
+  });
+
+  it('rejects a cursor with an unparseable time or non-uuid id', async () => {
+    const { service } = setup();
+    const badTime = Buffer.from(`not-a-time\u0000${uuid()}`, 'utf8').toString('base64url');
+    const badId = Buffer.from(
+      `2026-01-01T08:00:00.000Z\u0000not-a-uuid`,
+      'utf8',
+    ).toString('base64url');
+    for (const cursor of [badTime, badId]) {
+      await expect(service.listHistory({ limit: 20, cursor })).rejects.toBeInstanceOf(
+        StudySessionHistoryCursorInvalidError,
+      );
+    }
+  });
+
+  it('does not mutate the store while paging', async () => {
+    const { service, studySessionRepository } = setup();
+    await seedSession(studySessionRepository, { status: 'completed', endedAt: T0 });
+    await service.listHistory({ limit: 1, cursor: null });
+    const latest = await studySessionRepository.listTerminal();
+    expect(latest).toHaveLength(1);
+    expect(latest[0]!.status).toBe('completed');
+    expect(latest[0]!.endedAt).toBe(T0);
+  });
+
+  // —— 返修 #2 / #3：严格 cursor 与终态数据校验 ——
+
+  it('rejects a cursor with appended garbage or base64url padding', async () => {
+    const { service } = setup();
+    const good = historyCursor(T0, uuid());
+    for (const cursor of [`${good}!!!`, `${good}==`, `=${good}`, `${good}\u0000`]) {
+      await expect(service.listHistory({ limit: 20, cursor })).rejects.toBeInstanceOf(
+        StudySessionHistoryCursorInvalidError,
+      );
+    }
+  });
+
+  it('rejects a cursor whose time is parseable but not canonical UTC ISO', async () => {
+    const { service } = setup();
+    // 可解析但非规范（无毫秒 / 空格分隔 / 带偏移）：toISOString() 与输入不一致，
+    // 必须拒绝，避免排序 / keyset 比较破坏字符串时间序假设。
+    for (const endedAt of [
+      '2026-01-01T08:00:00Z',
+      '2026-01-01 08:00:00',
+      '2026-01-01T08:00:00.000+08:00',
+      '2026-01-01T08:00:00.0000Z',
+    ]) {
+      const cursor = historyCursor(endedAt, uuid());
+      await expect(service.listHistory({ limit: 20, cursor })).rejects.toBeInstanceOf(
+        StudySessionHistoryCursorInvalidError,
+      );
+    }
+  });
+
+  it('treats a terminal record with a null endedAt as data corruption', async () => {
+    const { service, studySessionRepository } = setup();
+    await seedSession(studySessionRepository, { status: 'completed', endedAt: null });
+    await expect(service.listHistory({ limit: 20, cursor: null })).rejects.toBeInstanceOf(
+      StudySessionHistoryDataCorruptError,
+    );
+  });
+
+  it('treats a terminal record with a non-canonical endedAt as data corruption', async () => {
+    const { service, studySessionRepository } = setup();
+    await seedSession(studySessionRepository, {
+      status: 'completed',
+      endedAt: '2026-01-01T08:00:00Z',
+    });
+    await expect(service.listHistory({ limit: 20, cursor: null })).rejects.toBeInstanceOf(
+      StudySessionHistoryDataCorruptError,
+    );
+  });
+
+  it('treats a terminal record with an invalid id as data corruption', async () => {
+    const { service, studySessionRepository } = setup();
+    await seedSession(studySessionRepository, {
+      id: 'not-a-uuid',
+      status: 'completed',
+      endedAt: T0,
+    });
+    await expect(service.listHistory({ limit: 20, cursor: null })).rejects.toBeInstanceOf(
+      StudySessionHistoryDataCorruptError,
+    );
   });
 });

@@ -39,6 +39,9 @@ import {
   ProjectTaskTreeCorruptionError,
 } from './domain/project-task/errors.js';
 import {
+  StudySessionHistoryCursorInvalidError,
+  StudySessionHistoryDataCorruptError,
+  StudySessionHistoryLimitInvalidError,
   StudySessionIdempotencyConflictError,
   StudySessionNotFoundError,
   StudySessionPlannedDurationInvalidError,
@@ -250,6 +253,30 @@ export function buildApp(deps: AppDeps): FastifyInstance {
       return reply.status(400).send({
         error: 'study_session_planned_duration_invalid',
         message: error.message,
+      });
+    }
+    // 历史分页游标 / limit 非法属于客户端输入错误，返回受控 400。
+    // 游标错误消息不含原始 cursor，避免把内部编码细节或用户内容反弹给调用方。
+    if (error instanceof StudySessionHistoryCursorInvalidError) {
+      return reply.status(400).send({
+        error: 'study_session_history_cursor_invalid',
+        message: error.message,
+      });
+    }
+    if (error instanceof StudySessionHistoryLimitInvalidError) {
+      return reply.status(400).send({
+        error: 'study_session_history_limit_invalid',
+        message: error.message,
+      });
+    }
+    // 历史所需的终态数据损坏（endedAt 缺失 / 非规范、分页 ID 非法）属于服务端数据问题，
+    // 返回 500 与受控错误码；细节只进服务日志，不把记录内容或 Session id 放进响应，
+    // 也不得静默截断历史。
+    if (error instanceof StudySessionHistoryDataCorruptError) {
+      request.log.error({ err: error }, 'study session history data corruption detected');
+      return reply.status(500).send({
+        error: 'study_session_history_data_corrupt',
+        message: 'study session history data is inconsistent',
       });
     }
     if (error.validation) {

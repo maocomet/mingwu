@@ -212,7 +212,7 @@ Windows App
 - [ ] 用户提交总结
 - [ ] AI 追加自己的报告
 - [ ] 多个 AI 报告互不覆盖
-- [ ] 查询 Study Session 历史
+- [x] 查询 Study Session 历史
 - [ ] 查询单次 Session 完整详情
 
 ### MCP Tools

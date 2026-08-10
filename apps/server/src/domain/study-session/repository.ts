@@ -18,4 +18,11 @@ export interface StudySessionRepository {
    * 否则返回 null（不写入任何数据）。
    */
   updateIfVersion(session: StudySession, expectedVersion: number): Promise<StudySession | null>;
+  /**
+   * 列出全部终态 Session（completed / cancelled / interrupted），返回深拷贝，
+   * 顺序不保证。稳定排序与 keyset 分页由应用服务负责；PostgreSQL 阶段应改为
+   * 数据库端 keyset pagination（`WHERE ... AND (endedAt < ? OR (endedAt = ? AND id < ?))
+   * ORDER BY endedAt DESC, id DESC LIMIT n`），而不是全表载入后排序。
+   */
+  listTerminal(): Promise<StudySession[]>;
 }

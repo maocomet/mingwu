@@ -105,3 +105,35 @@ export class StudySessionTimeCorruptionError extends Error {
     this.name = 'StudySessionTimeCorruptionError';
   }
 }
+
+/**
+ * 历史分页游标非法：无法解码、结构错误、时间 / ID 非法。返回受控 400，
+ * 响应与日志都不回显原始 cursor，避免把内部编码细节或用户内容反弹给调用方。
+ */
+export class StudySessionHistoryCursorInvalidError extends Error {
+  constructor() {
+    super('Study session history cursor is invalid');
+    this.name = 'StudySessionHistoryCursorInvalidError';
+  }
+}
+
+/**
+ * 历史分页 limit 非法：超出 1..100 范围。返回受控 400，不回显非法值。
+ */
+export class StudySessionHistoryLimitInvalidError extends Error {
+  constructor() {
+    super('Study session history limit is invalid');
+    this.name = 'StudySessionHistoryLimitInvalidError';
+  }
+}
+
+/**
+ * 历史所需的终态数据损坏：endedAt 缺失 / 非规范、分页 ID 非法。属服务端数据问题，
+ * 返回受控 500；消息与日志不得回显记录内容或 ID，也不得静默跳过或截断历史。
+ */
+export class StudySessionHistoryDataCorruptError extends Error {
+  constructor() {
+    super('Study session history data is corrupted');
+    this.name = 'StudySessionHistoryDataCorruptError';
+  }
+}

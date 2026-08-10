@@ -20,6 +20,13 @@ export const STUDY_SESSION_STATUSES = [
 ] as const;
 export type StudySessionStatus = (typeof STUDY_SESSION_STATUSES)[number];
 
+/**
+ * 历史列表只允许的终态状态。与全量状态枚举是子集关系，用于把历史响应契约
+ * 收紧为 `completed | cancelled | interrupted`，运行时只出终态由服务层保证。
+ */
+export const HISTORY_TERMINAL_STATUSES = ['completed', 'cancelled', 'interrupted'] as const;
+export type HistoryTerminalStatus = (typeof HISTORY_TERMINAL_STATUSES)[number];
+
 export const TIMER_MODES = ['count_up', 'count_down'] as const;
 export type TimerMode = (typeof TIMER_MODES)[number];
 
@@ -209,5 +216,83 @@ export const studySessionJsonSchema = {
     version: { type: 'integer', minimum: 1 },
     createdAt: { type: 'string' },
     updatedAt: { type: 'string' },
+  },
+} as const;
+
+/**
+ * 历史条目：终态 Session 在历史列表中的投影（不含 AI / 总结等本批未建立字段）。
+ * status 收紧为终态子集、endedAt 收紧为非空字符串：历史以 endedAt 稳定分页，
+ * 契约层面不允许非终态或缺失结束时间的条目进入响应。
+ */
+export interface StudySessionHistoryItem {
+  id: string;
+  taskText: string | null;
+  timerMode: TimerMode;
+  status: HistoryTerminalStatus;
+  startedAt: string | null;
+  endedAt: string;
+  actualDurationSeconds: number;
+  plannedDurationSeconds: number | null;
+  createdAt: string;
+}
+
+/** 历史分页响应。nextCursor 为不透明 URL-safe 游标；无更多数据时为 null。 */
+export interface StudySessionHistoryPage {
+  items: StudySessionHistoryItem[];
+  nextCursor: string | null;
+}
+
+export const studySessionHistoryItemJsonSchema = {
+  type: 'object',
+  required: [
+    'id',
+    'taskText',
+    'timerMode',
+    'status',
+    'startedAt',
+    'endedAt',
+    'actualDurationSeconds',
+    'plannedDurationSeconds',
+    'createdAt',
+  ],
+  additionalProperties: false,
+  properties: {
+    id: { type: 'string', pattern: UUID_PATTERN },
+    taskText: { type: ['string', 'null'], maxLength: TASK_TEXT_MAX_LENGTH },
+    timerMode: { enum: [...TIMER_MODES] },
+    status: { enum: [...HISTORY_TERMINAL_STATUSES] },
+    startedAt: { type: ['string', 'null'] },
+    endedAt: { type: 'string' },
+    actualDurationSeconds: { type: 'integer', minimum: 0 },
+    plannedDurationSeconds: {
+      type: ['integer', 'null'],
+      minimum: MIN_PLANNED_DURATION_SECONDS,
+      maximum: MAX_PLANNED_DURATION_SECONDS,
+    },
+    createdAt: { type: 'string' },
+  },
+} as const;
+
+export const studySessionHistoryPageJsonSchema = {
+  type: 'object',
+  required: ['items', 'nextCursor'],
+  additionalProperties: false,
+  properties: {
+    items: { type: 'array', items: studySessionHistoryItemJsonSchema },
+    nextCursor: { type: ['string', 'null'] },
+  },
+} as const;
+
+/**
+ * 历史列表 query 契约。HTTP query 天然是字符串且全局关闭类型强制转换，
+ * limit 用数字字符串格式校验（pattern），范围 1..100 由应用层显式转换时检查；
+ * 不得为了便利重新开启全局 coerceTypes。
+ */
+export const studySessionHistoryQuerySchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    limit: { type: 'string', pattern: '^[1-9][0-9]*$' },
+    cursor: { type: 'string', minLength: 1 },
   },
 } as const;

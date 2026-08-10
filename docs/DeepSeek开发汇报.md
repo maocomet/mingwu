@@ -2364,3 +2364,315 @@
 - 未实现取消、异常中断、自动结束、历史、总结或报告，范围正确。
 
 计划文档对应项已由小喵打勾。检查点 #10 正式关闭。
+
+---
+
+## 小喵下发任务 #11 · Study Session 历史 · 2026-08-09
+
+### 本批候选计划项
+
+- [ ] 查询 Study Session 历史
+
+本批只实现可稳定分页的 Session 历史列表。现有 `GET /api/v1/study-sessions/:id` 仍只是核心记录读取；在用户总结、AI 参与者与 AI 报告尚未建立前，不得申报或勾选“查询单次 Session 完整详情”。
+
+### 一、历史列表定义
+
+实现：
+
+- `GET /api/v1/study-sessions/history`
+- 历史只包含终态 Session：当前为 `completed`，并为未来 `cancelled | interrupted` 预留；`created | running | paused` 不进入历史列表。
+- 默认每页 20 条，允许 `limit=1..100`。
+- 因 HTTP query 天然是字符串且全局关闭类型强制转换，`limit` 的 query schema 应验证数字字符串格式，再由应用层显式、安全地转换为整数；不得重新开启全局 `coerceTypes`。
+
+### 二、响应契约
+
+新增历史条目与分页响应契约。每条至少返回：
+
+- `id`
+- `taskText`
+- `timerMode`
+- `status`
+- `startedAt`
+- `endedAt`
+- `actualDurationSeconds`
+- `plannedDurationSeconds`
+- `createdAt`
+
+分页响应：
+
+- `items`
+- `nextCursor: string | null`
+
+历史按 `endedAt DESC, id DESC` 稳定排序；同一结束时间用 ID 兜底，不能依赖 Map 插入顺序。
+
+### 三、游标规则
+
+- 使用服务端生成的不透明 URL-safe cursor，至少编码最后一条记录的 `endedAt + id` 排序键；
+- 下一页严格返回位于该排序键之后的数据，避免相同时间记录重复或漏项；
+- cursor 不得包含任务正文或其他用户内容；
+- cursor 无法解码、结构错误、时间 / ID 非法时返回稳定 400，例如 `study_session_history_cursor_invalid`，不回显原始 cursor；
+- 没有更多数据时 `nextCursor = null`。
+
+本批内存仓储可以先提供按终态读取的能力，应用服务负责稳定排序与分页；请在源码注释中说明 PostgreSQL 阶段应改为数据库端 keyset pagination，而不是全表载入。
+
+### 四、测试要求
+
+- 覆盖契约、仓储 / 服务与 HTTP API；
+- 覆盖空历史、默认 limit、自定义 limit 边界与非法 limit；
+- 覆盖活动 Session 被排除、completed 被包含；
+- 直接播种 cancelled / interrupted，确认作为终态进入历史；
+- 覆盖按 `endedAt DESC, id DESC` 排序，尤其多个 Session 相同 `endedAt`；
+- 至少创建 5 条记录，以 `limit=2` 连续翻页到结束，证明无重复、无遗漏、顺序稳定；
+- 翻页之间插入一条更新的终态记录时，旧 cursor 的后续页不得重复已经看过的项目；
+- 覆盖伪造 / 损坏 cursor 返回受控 400，响应与日志不回显原始 cursor；
+- GET 不接受请求体意义上的身份字段，不新增 `actorId` 入口；
+- 运行 `npm run typecheck`、`npm test`、`git diff --check`。
+
+### 本批明确不做
+
+- 不申报“查询单次 Session 完整详情”；
+- 不实现用户总结、AI 参与者、AI 报告或音乐信息；
+- 不实现取消 / interrupted 写接口，只允许测试播种预留终态；
+- 不修改计划文档复选框；
+- 不执行 Git、GitHub、VPS 或其他外部操作；
+- 不读取或修改 `.claude/`、`ui素材mingwu/` 等无关目录。
+
+完成后把“检查点 #11”追加到本文件末尾，列出候选完成项、排序 / 游标规则、接口、文件清单、真实测试结果与数据库阶段风险，然后立即暂停，等待小喵审核。
+
+---
+
+## 检查点 #11 · Study Session 历史 · 2026-08-09 23:21
+
+### 本批目标
+
+实现可稳定分页的 Session 历史列表：新增 `GET /api/v1/study-sessions/history`，只返回终态 Session（completed，预留 cancelled / interrupted），默认每页 20、`limit=1..100`，按 `endedAt DESC, id DESC` 稳定排序，使用服务端生成的不透明 URL-safe 游标做 keyset 分页。
+
+### 候选完成的计划项（原文，仅候选不勾选）
+
+- [ ] 查询 Study Session 历史
+
+### 实际完成内容
+
+- **契约层**（`packages/contracts/src/study-session.ts`）：新增 `StudySessionHistoryItem`（9 字段投影）、`StudySessionHistoryPage`（items + nextCursor）、`studySessionHistoryItemJsonSchema`、`studySessionHistoryPageJsonSchema`、`studySessionHistoryQuerySchema`（limit 为数字字符串 pattern `^[1-9][0-9]*$`，cursor 为 minLength 1 的字符串；全局 `coerceTypes:false`，不重新开启类型强制转换）。
+- **错误层**（`errors.ts`）：新增 `StudySessionHistoryCursorInvalidError` 与 `StudySessionHistoryLimitInvalidError`，均无参数、消息不回显非法值。
+- **仓储层**：`StudySessionRepository` 接口与内存实现新增 `listTerminal()`，返回终态 Session 深拷贝；源码注释说明 PostgreSQL 阶段应改为数据库端 keyset pagination（`WHERE (endedAt < ? OR (endedAt = ? AND id < ?)) ORDER BY endedAt DESC, id DESC LIMIT n`），而非全表载入。
+- **服务层**：新增 `listHistory({ limit, cursor })`。模块级辅助函数：`decodeHistoryCursor`（base64url 解码 + NUL 结构 / 时间可解析 / UUID 校验，任一失败抛受控错误）、`encodeHistoryCursor`、`toHistoryItem` 投影、`compareHistoryByNewestFirst` 排序、`isAfterHistoryCursor` keyset 过滤。服务自守 limit 1..100 边界。
+- **路由层**：注册 `GET /api/v1/study-sessions/history`（静态路径，注册在 `/:id` 之前）；`parseHistoryLimit` 处理缺省 20 与范围检查。
+- **app.ts**：游标 / limit 非法映射为受控 400（`study_session_history_cursor_invalid` / `study_session_history_limit_invalid`）。
+
+### 排序与游标规则（关键设计决定及依据）
+
+- **排序键** `endedAt DESC, id DESC`：同一结束时间用 ID 兜底，保证顺序稳定、不依赖 Map 插入顺序。
+- **不透明 URL-safe 游标** = base64url(`endedAt\0id`)：分隔符取 NUL 而非 `|` 等可打印字符，避免时间或 id 中出现同名分隔符造成歧义；游标不含任务正文或其他用户内容。
+- **keyset 过滤（DESC 顺序）**：游标之后的记录满足 `endedAt < cursor.endedAt || (endedAt === cursor.endedAt && id < cursor.id)`，只向后取。因此翻页之间插入更新的终态记录时，旧游标的后续页不会重复已看过的项目（新记录排在最前，天然不在旧游标窗口内——append-only 历史的可接受特性，已有测试锁定该行为）。
+- **limit+1 探测**：先取 `limit+1` 条判断是否还有更多；有则 `nextCursor` 编码本页最后一条的排序键，无更多数据时为 `null`。恰好等于 limit 条时 `nextCursor` 也为 `null`，客户端据此停止分页。
+- **游标校验**：无法解码、结构错误（NUL 段数≠2）、时间不可解析、id 非 UUID → 受控 400，响应与日志不回显原始 cursor。
+- **限流校验**：limit 先由 query schema 校验数字字符串格式，再由应用层 `Number` 转换并检查 1..100，非法返回受控 400，不回显非法值。
+- **历史条目投影**：只返回 9 个字段，不带 version / pausedAt / updatedAt 等客户端无关字段。
+- **身份边界**：GET 只读，不接受任何身份字段，不新增 `actorId` 入口，严格白名单拒绝未知 query 字段。
+
+### 新增、修改和删除的文件清单
+
+修改（本批未新增、未删除文件）：
+
+- `packages/contracts/src/study-session.ts`
+- `apps/server/src/domain/study-session/errors.ts`
+- `apps/server/src/domain/study-session/repository.ts`
+- `apps/server/src/infrastructure/repositories/in-memory-study-session-repository.ts`
+- `apps/server/src/application/study-session/study-session-service.ts`
+- `apps/server/src/api/routes/study-sessions.ts`
+- `apps/server/src/app.ts`
+- `apps/server/test/study-session-contract.test.ts`
+- `apps/server/test/study-session-service.test.ts`
+- `apps/server/test/study-session-api.test.ts`
+- `apps/server/test/study-session-repository.test.ts`
+
+### 执行过的测试或检查（命令与真实结果）
+
+- `npm run typecheck`：`@mingwu/contracts` 与 `@mingwu/server` 均通过；
+- `npm test`：19 个测试文件，**456/456 通过**（较检查点 #10 的 413 新增 43：契约 7、服务 13、仓储 3、API 12）；
+- `git diff --check`：通过，仅有 Windows LF→CRLF 行尾提示，无空白错误。
+
+新增测试覆盖：契约（条目 / 分页 / query schema）、仓储 `listTerminal`、服务与 API 的排序与分页——空历史、默认 limit=20、limit 边界与非法 limit、活动 Session 被排除、completed 被包含、直接播种 cancelled / interrupted 进入历史、相同 `endedAt` 用 id 兜底、5 条记录 `limit=2` 连续翻页到结束无重复无遗漏、翻页间插入更新的终态记录旧游标不重复已看项目、伪造 / 损坏 cursor 受控 400 且不回显原始 cursor、静态路由优先于 `/:id`。
+
+### 未完成内容、已知问题和风险
+
+- 未申报"查询单次 Session 完整详情"；未实现用户总结、AI 参与者、AI 报告或音乐信息（本批明确不做）；
+- 未实现取消 / interrupted 写接口，只允许测试播种预留终态；
+- 内存仓储 `listTerminal` 为全表载入后排序分页，时间复杂度 O(n)；数据量大时应由 PostgreSQL 索引 `(ended_at DESC, id DESC)` 的 keyset pagination 取代（仓储与服务源码注释均已说明，属第六关工作）；
+- 无状态游标是排序键快照：若未来引入删除终态记录的接口，翻页间删除可能导致跳项；本批无删除写接口，不构成当前风险；
+- 防御分支：理论上 endedAt 为 null 的终态不编码游标，仅影响损坏数据的极端情形，不改变正常路径。
+
+### 是否涉及数据库 / 身份权限 / 密钥 / 外部服务 / 破坏性变化
+
+- 均无：未触碰数据库、身份权限、密钥、外部服务；无破坏性变化；未修改计划复选框；未读取或修改 `.claude/`、`ui素材mingwu/` 等无关目录；未执行 Git / GitHub / VPS 操作。
+
+### 建议下一批任务
+
+- 查询单次 Session 完整详情；
+- 用户提交总结 / AI 追加自己的报告（多个 AI 报告互不覆盖）。
+
+**等待小喵审核。**
+
+---
+
+## 小喵审核结果 #11 · 需要返修 · 2026-08-09
+
+### 审核结论
+
+本批的正常路径设计基本成立：终态筛选、`endedAt DESC, id DESC` 排序、`limit+1` 探测、连续翻页以及插入新记录后的旧游标行为均有覆盖。小喵独立执行：
+
+- `npm run typecheck`：通过；
+- `npm test`：19 个测试文件，**456/456 通过**；
+- `git diff --check`：除既有 LF→CRLF 提示外无空白错误。
+
+但发现以下三项必须返修，因此暂不验收、暂不勾选“查询 Study Session 历史”。
+
+### 必须返修 1：移除源码与测试里的真实 NUL 字节
+
+- `apps/server/src/application/study-session/study-session-service.ts` 含 **1 个真实 NUL 字节**；
+- `apps/server/test/study-session-service.test.ts` 含 **5 个真实 NUL 字节**。
+
+当前 `HISTORY_CURSOR_SEPARATOR` 与测试字符串把 NUL 字符本体写进了 `.ts` 文件，导致 Git 将核心服务文件识别为二进制（`Binary files ... differ`），破坏普通代码 diff、审查与合并。源码中应使用转义写法 `\0` 表达运行时 NUL，文件字节本身不得含 `0x00`；测试同样处理。
+
+返修后请确认：所有本批 `.ts` 文件的真实 NUL 字节计数为 0，且 `git diff` 能以普通文本显示服务文件与测试文件。
+
+### 必须返修 2：游标必须做规范化校验
+
+当前 `Buffer.from(cursor, 'base64url')` 会宽松接受非规范输入。小喵实测：在一个合法游标末尾追加 `!!!` 或 `=`，Node 仍可解码成完全相同的原文，因此这些损坏游标会被当作合法游标接受，而不是返回约定的 400。
+
+请在解码时同时做到：
+
+- 只接受无 padding 的 URL-safe base64url 字符集；
+- 解码后重新编码必须与输入逐字相同，否则抛 `StudySessionHistoryCursorInvalidError`；
+- `endedAt` 不仅要能被 `Date.parse`，还必须是规范 UTC ISO 字符串（例如 `new Date(ms).toISOString() === endedAt`），避免可解析但非规范的时间字符串破坏当前字符串排序 / keyset 比较；
+- 增加“合法游标追加垃圾字符 / padding”和“可解析但非规范时间”回归测试，均应稳定返回受控 400，且响应和日志不回显游标。
+
+### 必须返修 3：收紧历史响应与终态数据不变量
+
+历史契约现在仍允许全部 Session 状态，并允许 `endedAt: null`，与“历史只包含终态且用 endedAt 分页”的定义不一致。服务中的 `endedAt ?? ''` 与“有更多数据但最后一条 endedAt 为 null 时 nextCursor=null”还会在脏数据下静默截断历史。
+
+请：
+
+- 将历史条目的 `status` 类型 / Schema 收紧为 `completed | cancelled | interrupted`；
+- 将历史条目的 `endedAt` 收紧为非空字符串；
+- 服务在排序、分页前验证仓储返回的终态记录具备规范非空 `endedAt`（以及分页所需的合法 ID）；若数据损坏，抛新的受控内部错误并映射为通用 500，不得静默排序为 `''`、返回不符合契约的数据或提前把 `nextCursor` 置空，也不得向响应泄露记录内容 / ID；
+- 增加服务层与 API 层脏数据回归测试。
+
+### 边界要求
+
+- 只返修以上问题，不开始下一批；
+- 不修改计划文档复选框；
+- 不执行 Git / GitHub / VPS 操作；
+- 不读取或修改 `.claude/`、`ui素材mingwu/` 等无关目录；
+- 完成后在本文件末尾追加“检查点 #11 返修”，列出修改、测试与 NUL / 文本 diff 检查结果，然后暂停等待复验。
+
+---
+
+## 检查点 #11 返修 · Study Session 历史 · 2026-08-09 23:40
+
+### 返修目标
+
+针对小喵审核结果 #11 的三项必返修项逐项修复：①移除源码与测试中的真实 NUL 字节；②游标规范化校验；③收紧历史响应契约与终态数据不变量。只返修这三项，不开始下一批。
+
+### 候选完成的计划项（原文，仅候选不勾选）
+
+- [ ] 查询 Study Session 历史
+
+### 实际完成内容
+
+**返修 1：移除真实 NUL 字节**
+
+- `study-session-service.ts` 的 `HISTORY_CURSOR_SEPARATOR` 改为源码转义写法 `'\u0000'`（文件字节为 6 个可打印字符，运行时 JS 求值为 NUL 字符）；
+- 测试字符串同样使用转义写法，不写入 0x00 字节；
+- 用临时 node 脚本（`_fix-nul2.cjs` / `_fix-nul3.cjs` / `_fix-nul4.cjs`）扫描并替换残留 NUL 字节，完成后删除脚本。
+
+**返修 2：游标规范化校验**
+
+- `decodeHistoryCursor` 增加三层校验，任一不满足抛 `StudySessionHistoryCursorInvalidError`（受控 400）：
+  1. 字符集正则 `/^[A-Za-z0-9_-]+$/`，只接受无 padding 的 URL-safe base64url，`= + /` 与垃圾字符直接拒绝；
+  2. 解码后 `Buffer.toString('base64url')` 与输入逐字比对，拒绝变体 / 冗余编码；
+  3. `endedAt` 用新增 `isCanonicalIsoTime`：`Date.parse` 可解析且 `new Date(ms).toISOString() === value`，拒绝可解析但非规范的时间。
+- 新增回归：服务层与 API 层均覆盖“合法游标追加 `!!!` / `==` / 前置 `=` / 尾部 NUL”与“可解析但非规范时间（无毫秒、空格分隔、带偏移）” → 稳定受控 400，响应不回显游标。
+
+**返修 3：收紧历史响应与终态数据不变量**
+
+- 契约层：新增 `HISTORY_TERMINAL_STATUSES`（completed / cancelled / interrupted）与 `HistoryTerminalStatus` 类型；`StudySessionHistoryItem.status` 收紧为 `HistoryTerminalStatus`、`endedAt` 收紧为非空 `string`；schema 同步收紧（status enum 用 `[...HISTORY_TERMINAL_STATUSES]`、endedAt 为 `{ type: 'string' }`）；
+- 错误层：新增 `StudySessionHistoryDataCorruptError`；
+- 服务层：新增 `assertTerminalHistoryRecord`，`listHistory` 在排序 / 分页前逐条校验仓储返回记录——status 必须为终态、endedAt 规范非空、id 合法 UUID，任一不满足抛 `StudySessionHistoryDataCorruptError`（HTTP 层映射为 500）；删除 `endedAt ?? ''` 静默 fallback 与“最后一条 endedAt 为 null 时置空 nextCursor”的防御分支；`toHistoryItem` / `compareHistoryByNewestFirst` / `isAfterHistoryCursor` 全部收紧为只接受已校验的收窄类型，不再有 `?? ''`；
+- app.ts：`StudySessionHistoryDataCorruptError` → 500 `study_session_history_data_corrupt`，消息与响应不含记录内容 / ID，细节只进服务日志；
+- 新增回归：服务层脏数据（completed 但 endedAt null / 非规范 endedAt / 非法 id）→ `StudySessionHistoryDataCorruptError`；API 层同样脏数据 → 500 `study_session_history_data_corrupt` 且响应不回显 id。
+
+### 新增、修改和删除的文件清单
+
+修改：
+
+- `packages/contracts/src/study-session.ts`
+- `apps/server/src/domain/study-session/errors.ts`
+- `apps/server/src/application/study-session/study-session-service.ts`
+- `apps/server/src/app.ts`
+- `apps/server/test/study-session-contract.test.ts`
+- `apps/server/test/study-session-service.test.ts`
+- `apps/server/test/study-session-api.test.ts`
+
+删除（临时修复脚本，返修完成后已移除）：
+
+- `_fix-nul2.cjs`、`_fix-nul3.cjs`、`_fix-nul4.cjs`
+
+### 关键设计决定及依据
+
+- NUL 在源码中一律转义书写、文件字节不含 0x00：保证 Git 以普通文本处理文件，避免二进制误判，恢复正常 diff / 审查 / 合并。
+- 游标校验采用“字符集 + 重编码逐字比对 + 规范 UTC ISO”三层：从结构上拒绝变体编码与可解析但非规范时间，确保字符串排序 / keyset 比较的时间序假设不被破坏。
+- 脏数据一律走受控内部错误 → 通用 500：历史要么返回符合契约的完整分页，要么整体失败，杜绝“看起来成功但静默丢记录 / 提前结束分页”的截断行为。
+
+### 执行过的测试或检查（命令与真实结果）
+
+- `npm run typecheck`：`@mingwu/contracts` 与 `@mingwu/server` 均通过；
+- `npm test`：19 个测试文件，**467/467 通过**（较返修前 456 新增 11：契约 +1、服务 +5、API +5）；
+- NUL 字节检查（node 字节扫描）：本批 7 个 `.ts` 文件真实 NUL 计数均为 0（含 contracts / service / errors / app / 三个测试文件）；
+- `git diff --check`：通过，仅有 Windows LF→CRLF 提示，无空白错误；
+- `git diff --numstat`：`apps/server/src/app.ts` 27/0、`packages/contracts/src/study-session.ts` 85/0 等均显示普通文本行数，服务文件与测试文件未被识别为二进制。
+
+### 未完成内容、已知问题和风险
+
+- 未申报新计划项；“查询单次 Session 完整详情”仍留待后续批次；
+- 内存仓储 `listTerminal` 全表载入后排序分页为 O(n)，PostgreSQL 阶段应改用 `(ended_at DESC, id DESC)` 索引的 keyset pagination（源码注释已说明，属第六关工作）；
+- 无状态游标为排序键快照：若未来引入删除终态记录的接口，翻页间删除可能跳项；本批无删除写接口，不构成当前风险。
+
+### 是否涉及数据库 / 身份权限 / 密钥 / 外部服务 / 破坏性变化
+
+- 均无：未触碰数据库、身份权限、密钥、外部服务；无破坏性变化；未修改计划复选框；未读取或修改 `.claude/`、`ui素材mingwu/` 等无关目录；未执行 Git / GitHub / VPS 操作。
+
+### 建议下一批任务
+
+- 查询单次 Session 完整详情；
+- 用户提交总结 / AI 追加自己的报告（多个 AI 报告互不覆盖）。
+
+**等待小喵复验。**
+
+---
+
+## 小喵复验结果 #11 · 通过 · 2026-08-10
+
+### 验收结论
+
+检查点 #11 及其返修已通过，计划项“查询 Study Session 历史”由小喵正式勾选。
+
+小喵独立复验结果：
+
+- `npm run typecheck`：通过；
+- `npm test`：19 个测试文件，**467/467 通过**；
+- 本批所有改动的 `.ts` 文件真实 NUL 字节计数均为 0；
+- `git diff --numstat` 能正常显示服务文件与测试文件的文本行数，不再识别为二进制；
+- `git diff --check`：除 Windows LF→CRLF 提示外无空白错误；
+- 规范 base64url、重编码一致性、规范 UTC ISO 时间、终态响应契约及脏数据受控 500 均已落实并有回归测试；
+- 连续翻页、相同结束时间排序、翻页间插入更新记录等正常路径保持稳定。
+
+### 验收边界
+
+- 本次只验收“查询 Study Session 历史”；
+- “查询单次 Session 完整详情”仍保持未勾选；
+- 用户总结、AI 参与者和 AI 学习报告尚未建立，不得提前申报完整详情；
+- PostgreSQL 数据库端 keyset pagination 仍属于后续数据库阶段，不影响本批内存实现验收。
+
+**检查点 #11 已完成，可以进入下一批。**

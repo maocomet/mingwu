@@ -9,6 +9,9 @@ import {
   setCountdownBodySchema,
   setTaskBodySchema,
   startStudySessionBodySchema,
+  studySessionHistoryItemJsonSchema,
+  studySessionHistoryPageJsonSchema,
+  studySessionHistoryQuerySchema,
   studySessionJsonSchema,
 } from '@mingwu/contracts';
 import { uuid } from './helpers.js';
@@ -272,6 +275,138 @@ describe('StudySession contract schemas', () => {
     it('rejects a status value outside the enum', () => {
       const validate = compile({ ...studySessionJsonSchema });
       expect(validate(session({ status: 'bogus' }))).toBe(false);
+    });
+  });
+
+  describe('studySessionHistoryItemJsonSchema', () => {
+    function item(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+      const now = new Date().toISOString();
+      return {
+        id: uuid(),
+        taskText: '任务',
+        timerMode: 'count_up',
+        status: 'completed',
+        startedAt: now,
+        endedAt: now,
+        actualDurationSeconds: 60,
+        plannedDurationSeconds: null,
+        createdAt: now,
+        ...overrides,
+      };
+    }
+
+    it('accepts a completed history item', () => {
+      const validate = compile({ ...studySessionHistoryItemJsonSchema });
+      expect(validate(item())).toBe(true);
+    });
+
+    it('rejects a missing required field', () => {
+      const validate = compile({ ...studySessionHistoryItemJsonSchema });
+      const { actualDurationSeconds, ...missing } = item();
+      expect(validate(missing)).toBe(false);
+    });
+
+    it('rejects extra fields', () => {
+      const validate = compile({ ...studySessionHistoryItemJsonSchema });
+      expect(validate(item({ version: 3 }))).toBe(false);
+    });
+
+    it('enforces uuid id and non-negative integer duration', () => {
+      const validate = compile({ ...studySessionHistoryItemJsonSchema });
+      expect(validate(item({ id: 'nope' }))).toBe(false);
+      expect(validate(item({ actualDurationSeconds: -1 }))).toBe(false);
+      expect(validate(item({ actualDurationSeconds: 1.5 }))).toBe(false);
+    });
+
+    it('accepts null plannedDurationSeconds and rejects out-of-range values', () => {
+      const validate = compile({ ...studySessionHistoryItemJsonSchema });
+      expect(validate(item({ plannedDurationSeconds: null }))).toBe(true);
+      expect(validate(item({ plannedDurationSeconds: 0 }))).toBe(false);
+      expect(validate(item({ plannedDurationSeconds: 86401 }))).toBe(false);
+    });
+
+    it('rejects a status value outside the terminal enum', () => {
+      const validate = compile({ ...studySessionHistoryItemJsonSchema });
+      // 历史条目契约只允许终态（completed / cancelled / interrupted）；
+      // 非终态运行状态与未知值都拒绝，endedAt 也必须非空。
+      expect(validate(item({ status: 'completed' }))).toBe(true);
+      expect(validate(item({ status: 'cancelled' }))).toBe(true);
+      expect(validate(item({ status: 'interrupted' }))).toBe(true);
+      expect(validate(item({ status: 'running' }))).toBe(false);
+      expect(validate(item({ status: 'bogus' }))).toBe(false);
+    });
+
+    it('requires a non-null endedAt', () => {
+      const validate = compile({ ...studySessionHistoryItemJsonSchema });
+      expect(validate(item({ endedAt: null }))).toBe(false);
+    });
+  });
+
+  describe('studySessionHistoryPageJsonSchema', () => {
+    function item(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+      const now = new Date().toISOString();
+      return {
+        id: uuid(),
+        taskText: '任务',
+        timerMode: 'count_up',
+        status: 'completed',
+        startedAt: now,
+        endedAt: now,
+        actualDurationSeconds: 60,
+        plannedDurationSeconds: null,
+        createdAt: now,
+        ...overrides,
+      };
+    }
+
+    it('accepts a page with items and a cursor', () => {
+      const validate = compile({ ...studySessionHistoryPageJsonSchema });
+      expect(validate({ items: [item()], nextCursor: 'abc' })).toBe(true);
+    });
+
+    it('accepts an empty page with null cursor', () => {
+      const validate = compile({ ...studySessionHistoryPageJsonSchema });
+      expect(validate({ items: [], nextCursor: null })).toBe(true);
+    });
+
+    it('rejects missing items or nextCursor and extra fields', () => {
+      const validate = compile({ ...studySessionHistoryPageJsonSchema });
+      expect(validate({ items: [item()] })).toBe(false);
+      expect(validate({ nextCursor: null })).toBe(false);
+      expect(validate({ items: [], nextCursor: null, total: 3 })).toBe(false);
+    });
+
+    it('rejects an item that fails the item schema', () => {
+      const validate = compile({ ...studySessionHistoryPageJsonSchema });
+      expect(validate({ items: [{ id: 'nope' }], nextCursor: null })).toBe(false);
+    });
+  });
+
+  describe('studySessionHistoryQuerySchema', () => {
+    it('accepts an empty query (both params optional)', () => {
+      const validate = compile({ ...studySessionHistoryQuerySchema });
+      expect(validate({})).toBe(true);
+    });
+
+    it('accepts a valid numeric-string limit and a cursor', () => {
+      const validate = compile({ ...studySessionHistoryQuerySchema });
+      expect(validate({ limit: '20', cursor: 'abc' })).toBe(true);
+      expect(validate({ limit: '1' })).toBe(true);
+      expect(validate({ limit: '100' })).toBe(true);
+    });
+
+    it('rejects a non-digit limit, leading zero, and empty cursor', () => {
+      const validate = compile({ ...studySessionHistoryQuerySchema });
+      expect(validate({ limit: 'abc' })).toBe(false);
+      expect(validate({ limit: '0' })).toBe(false);
+      expect(validate({ limit: '01' })).toBe(false);
+      expect(validate({ limit: '-1' })).toBe(false);
+      expect(validate({ cursor: '' })).toBe(false);
+    });
+
+    it('rejects an extra query field (strict whitelist, no actorId)', () => {
+      const validate = compile({ ...studySessionHistoryQuerySchema });
+      expect(validate({ limit: '20', actorId: 'x' })).toBe(false);
     });
   });
 });

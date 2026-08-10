@@ -106,4 +106,45 @@ describe('InMemoryStudySessionRepository', () => {
     expect((await repository.findById(session.id))!.taskText).toBe('并发写入');
     expect((await repository.findById(session.id))!.version).toBe(session.version + 1);
   });
+
+  describe('listTerminal', () => {
+    it('returns an empty list when no terminal sessions exist', async () => {
+      const { repository } = setup();
+      expect(await repository.listTerminal()).toEqual([]);
+    });
+
+    it('only includes terminal sessions (completed / cancelled / interrupted)', async () => {
+      const { repository } = setup();
+      const completed = makeStudySession({ status: 'completed', endedAt: '2026-01-01T08:00:00.000Z' });
+      const cancelled = makeStudySession({ status: 'cancelled', endedAt: '2026-01-01T08:00:00.000Z' });
+      const interrupted = makeStudySession({
+        status: 'interrupted',
+        endedAt: '2026-01-01T08:00:00.000Z',
+      });
+      await repository.createIfAbsent(completed);
+      await repository.createIfAbsent(makeStudySession({ status: 'created' }));
+      await repository.createIfAbsent(
+        makeStudySession({ status: 'running', startedAt: '2026-01-01T08:00:00.000Z' }),
+      );
+      await repository.createIfAbsent(
+        makeStudySession({ status: 'paused', startedAt: '2026-01-01T08:00:00.000Z' }),
+      );
+      await repository.createIfAbsent(cancelled);
+      await repository.createIfAbsent(interrupted);
+      const terminal = await repository.listTerminal();
+      expect(terminal).toHaveLength(3);
+      const ids = terminal.map((s) => s.id).sort();
+      expect(ids).toEqual([completed.id, cancelled.id, interrupted.id].sort());
+    });
+
+    it('returns defensive copies so mutating a result cannot leak into the store', async () => {
+      const { repository } = setup();
+      const session = makeStudySession({ status: 'completed', endedAt: '2026-01-01T08:00:00.000Z' });
+      await repository.createIfAbsent(session);
+      const [read] = await repository.listTerminal();
+      read!.taskText = 'mutated';
+      const [again] = await repository.listTerminal();
+      expect(again!.taskText).toBe(session.taskText);
+    });
+  });
 });

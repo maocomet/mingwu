@@ -1,19 +1,28 @@
 import type {
   CreateStudySessionInput,
   EndStudySessionInput,
+  HistoryTerminalStatus,
   PauseStudySessionInput,
   ResumeStudySessionInput,
   SetCountdownInput,
   SetTaskInput,
   StartStudySessionInput,
   StudySession,
+  StudySessionHistoryItem,
+  StudySessionHistoryPage,
+  StudySessionStatus,
 } from '@mingwu/contracts';
 import {
+  HISTORY_TERMINAL_STATUSES,
   MAX_PLANNED_DURATION_SECONDS,
   MIN_PLANNED_DURATION_SECONDS,
   TASK_TEXT_MAX_LENGTH,
+  UUID_PATTERN,
 } from '@mingwu/contracts';
 import {
+  StudySessionHistoryCursorInvalidError,
+  StudySessionHistoryDataCorruptError,
+  StudySessionHistoryLimitInvalidError,
   StudySessionIdempotencyConflictError,
   StudySessionNotFoundError,
   StudySessionPlannedDurationInvalidError,
@@ -90,6 +99,145 @@ function sameCreateSemantics(
     taskText === existing.taskText &&
     plannedDurationSeconds === existing.plannedDurationSeconds &&
     existing.status === 'created'
+  );
+}
+
+/** UUID 校验正则：从契约层 pattern 字符串编译一次，供游标解码与终态数据校验复用。 */
+const UUID_REGEX = new RegExp(UUID_PATTERN);
+
+/** 规范无 padding 的 URL-safe base64url 字符集：任何额外字符（含 `= + /` 与垃圾）直接拒绝。 */
+const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/;
+
+/** status 是否为历史允许的终态（completed / cancelled / interrupted），收窄到终态子集。 */
+function isTerminalStatus(status: StudySessionStatus): status is HistoryTerminalStatus {
+  return HISTORY_TERMINAL_STATUSES.some((s) => s === status);
+}
+
+/**
+ * 是否为规范 UTC ISO 字符串：Date.parse 可解析且 `toISOString()` 逐字一致。
+ * 排序与 keyset 比较依赖字符串按时间序排列，可解析但非规范的时间（无毫秒、
+ * 空格分隔、带偏移等）会破坏该假设，一律视为非法。
+ */
+function isCanonicalIsoTime(value: string): boolean {
+  const ms = Date.parse(value);
+  return !Number.isNaN(ms) && new Date(ms).toISOString() === value;
+}
+
+/**
+ * 历史游标分隔符：不透明、URL-safe（base64url 编码的 `endedAt\0id`）。
+ * 分隔符取 NUL 而非 `|` 等可打印字符，避免时间或 id 中出现同名分隔符造成歧义。
+ */
+const HISTORY_CURSOR_SEPARATOR = '\u0000';
+
+/** 编码分页游标：endedAt 与 id 以 NUL 拼接后 base64url，天然 URL-safe。 */
+function encodeHistoryCursor(endedAt: string, id: string): string {
+  const raw = `${endedAt}${HISTORY_CURSOR_SEPARATOR}${id}`;
+  return Buffer.from(raw, 'utf8').toString('base64url');
+}
+
+/**
+ * 解码分页游标并完整校验，拒绝任何非规范输入：
+ * - 字符集必须是无 padding 的 URL-safe base64url，`= + /` 与垃圾字符直接拒绝；
+ * - 解码后重新编码必须与输入逐字相同，拒绝变体 / 冗余编码；
+ * - 必须恰好含一个 NUL 分隔符；endedAt 必须是规范 UTC ISO 字符串；id 必须是 UUID。
+ * 任一不满足抛 StudySessionHistoryCursorInvalidError（受控 400）。
+ * 错误消息不回显原始 cursor，避免把内部编码细节或用户内容反弹给调用方。
+ */
+function decodeHistoryCursor(cursor: string): { endedAt: string; id: string } {
+  if (!BASE64URL_PATTERN.test(cursor)) {
+    throw new StudySessionHistoryCursorInvalidError();
+  }
+  let decoded: Buffer;
+  try {
+    decoded = Buffer.from(cursor, 'base64url');
+  } catch {
+    throw new StudySessionHistoryCursorInvalidError();
+  }
+  if (decoded.toString('base64url') !== cursor) {
+    throw new StudySessionHistoryCursorInvalidError();
+  }
+  const parts = decoded.toString('utf8').split(HISTORY_CURSOR_SEPARATOR);
+  if (parts.length !== 2) {
+    throw new StudySessionHistoryCursorInvalidError();
+  }
+  // length 已确认为 2，非空断言只消除 noUncheckedIndexedAccess 的类型噪音。
+  const endedAt = parts[0]!;
+  const id = parts[1]!;
+  if (!isCanonicalIsoTime(endedAt) || !UUID_REGEX.test(id)) {
+    throw new StudySessionHistoryCursorInvalidError();
+  }
+  return { endedAt, id };
+}
+
+/**
+ * 校验仓储返回的记录可用于历史分页：status 必须是终态、endedAt 规范非空、
+ * id 合法 UUID。listTerminal 按契约只返回终态记录，任何记录任一不满足即视为
+ * 领域数据损坏，抛受控内部错误（HTTP 层映射为 500），不得静默跳过损坏记录、
+ * 排序为空串、返回不符合契约的数据或提前置空 nextCursor，也不得泄露记录内容 / ID。
+ */
+function assertTerminalHistoryRecord(
+  session: StudySession,
+): asserts session is StudySession & { status: HistoryTerminalStatus; endedAt: string } {
+  if (
+    !isTerminalStatus(session.status) ||
+    session.endedAt === null ||
+    !isCanonicalIsoTime(session.endedAt) ||
+    !UUID_REGEX.test(session.id)
+  ) {
+    throw new StudySessionHistoryDataCorruptError();
+  }
+}
+
+/**
+ * 终态 Session 在历史列表中的投影：去掉 version / pausedAt 等客户端无关字段。
+ * 仅接受已通过 assertTerminalHistoryRecord 校验的终态记录（endedAt 规范非空），
+ * 因此返回的 history item 天然满足历史契约（status 终态、endedAt 非空）。
+ */
+function toHistoryItem(
+  session: StudySession & { status: HistoryTerminalStatus; endedAt: string },
+): StudySessionHistoryItem {
+  return {
+    id: session.id,
+    taskText: session.taskText,
+    timerMode: session.timerMode,
+    status: session.status,
+    startedAt: session.startedAt,
+    endedAt: session.endedAt,
+    actualDurationSeconds: session.actualDurationSeconds,
+    plannedDurationSeconds: session.plannedDurationSeconds,
+    createdAt: session.createdAt,
+  };
+}
+
+/**
+ * 历史排序：endedAt 降序，同一 endedAt 用 id 降序兜底，保证分页稳定不重复。
+ * 只对已校验的终态记录排序；endedAt 规范非空，无需 `?? ''` 之类的静默 fallback。
+ */
+function compareHistoryByNewestFirst(
+  a: StudySession & { status: HistoryTerminalStatus; endedAt: string },
+  b: StudySession & { status: HistoryTerminalStatus; endedAt: string },
+): number {
+  if (a.endedAt !== b.endedAt) {
+    return a.endedAt < b.endedAt ? 1 : -1;
+  }
+  if (a.id !== b.id) {
+    return a.id < b.id ? 1 : -1;
+  }
+  return 0;
+}
+
+/**
+ * keyset 过滤（DESC 顺序）：cursor 指向的条目之后的下一条。
+ * PostgreSQL 阶段对应 `WHERE endedAt < ? OR (endedAt = ? AND id < ?)`。
+ * endedAt 已由调用方校验规范非空，直接参与字符串比较。
+ */
+function isAfterHistoryCursor(
+  session: StudySession & { status: HistoryTerminalStatus; endedAt: string },
+  cursor: { endedAt: string; id: string },
+): boolean {
+  return (
+    session.endedAt < cursor.endedAt ||
+    (session.endedAt === cursor.endedAt && session.id < cursor.id)
   );
 }
 
@@ -476,5 +624,61 @@ export class StudySessionService {
       throw new StudySessionVersionConflictError(id, input.expectedVersion);
     }
     return result;
+  }
+
+  /**
+   * 历史列表：返回终态 Session（completed / cancelled / interrupted）的稳定分页。
+   * - 只读接口，不接受任何身份字段，不新增 actorId 入口；
+   * - limit 必须是 1..100 整数（默认 20 由路由层在缺省时填入，本服务自守边界）；
+   *   cursor 为 null 表示第一页，非 null 时必须能完整解码（结构 / 时间 / UUID）；
+   * - 本批内存仓储以全表终态载入后，由本服务排序 + keyset 过滤实现稳定分页；
+   *   PostgreSQL 阶段应改为数据库端 keyset pagination（见仓储注释），避免全表载入；
+   * - 排序 / 分页前逐条校验终态记录：status 必须为终态、endedAt 规范非空、
+   *   id 合法 UUID。listTerminal 按契约只返回终态记录，任何记录不满足即视为
+   *   领域数据损坏，抛 StudySessionHistoryDataCorruptError（HTTP 层映射为 500），
+   *   不得静默跳过损坏记录、排序为空串、返回不符合契约的数据或提前置空 nextCursor；
+   * - 排序键 endedAt DESC, id DESC：游标之后满足
+   *   `endedAt < cursor.endedAt || (endedAt === cursor.endedAt && id < cursor.id)`；
+   * - 取 limit+1 探测是否有更多页：超出 → nextCursor 编码本页最后一条的 endedAt+id，
+   *   否则 nextCursor 为 null；
+   * - 非法 limit / cursor 抛受控错误（HTTP 层映射为 400），不把无效输入反弹给调用方。
+   */
+  async listHistory(options: {
+    limit: number;
+    cursor: string | null;
+  }): Promise<StudySessionHistoryPage> {
+    const { limit, cursor } = options;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+      throw new StudySessionHistoryLimitInvalidError();
+    }
+    const decodedCursor = cursor === null ? null : decodeHistoryCursor(cursor);
+    const terminal = await this.repository.listTerminal();
+    // 排序 / 分页前逐条校验：任何终态记录缺规范 endedAt 或非法 id 都属于数据损坏，
+    // 直接抛受控内部错误，避免把损坏记录排序进分页或返回给客户端。
+    const records: (StudySession & { status: HistoryTerminalStatus; endedAt: string })[] = [];
+    for (const session of terminal) {
+      assertTerminalHistoryRecord(session);
+      records.push(session);
+    }
+    records.sort(compareHistoryByNewestFirst);
+    const page: (StudySession & { status: HistoryTerminalStatus; endedAt: string })[] = [];
+    for (const session of records) {
+      if (decodedCursor !== null && !isAfterHistoryCursor(session, decodedCursor)) {
+        continue;
+      }
+      page.push(session);
+      if (page.length === limit + 1) {
+        break;
+      }
+    }
+    const hasMore = page.length > limit;
+    const pageItems = hasMore ? page.slice(0, limit) : page;
+    const last = pageItems[pageItems.length - 1];
+    // hasMore 为真时 last 必存在；每条记录都已通过终态校验，endedAt 规范非空。
+    const nextCursor = hasMore && last !== undefined ? encodeHistoryCursor(last.endedAt, last.id) : null;
+    return {
+      items: pageItems.map(toHistoryItem),
+      nextCursor,
+    };
   }
 }
