@@ -208,7 +208,7 @@ Windows App
 - [x] 开始 Session
 - [x] 确定暂停规则
 - [x] 恢复 Session
-- [ ] 结束 Session
+- [x] 结束 Session
 - [ ] 用户提交总结
 - [ ] AI 追加自己的报告
 - [ ] 多个 AI 报告互不覆盖

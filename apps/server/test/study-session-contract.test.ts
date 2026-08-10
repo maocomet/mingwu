@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   TASK_TEXT_MAX_LENGTH,
   createStudySessionBodySchema,
+  endStudySessionBodySchema,
   pauseStudySessionBodySchema,
   resumeStudySessionBodySchema,
   setCountdownBodySchema,
@@ -213,6 +214,21 @@ describe('StudySession contract schemas', () => {
       expect(validate({ expectedVersion: 0 })).toBe(false);
       expect(validate({ expectedVersion: '1' })).toBe(false);
       expect(validate({ expectedVersion: 1, status: 'running' })).toBe(false);
+    });
+  });
+
+  describe('endStudySessionBodySchema', () => {
+    it('accepts a valid end request', () => {
+      const validate = compile({ ...endStudySessionBodySchema });
+      expect(validate({ expectedVersion: 1 })).toBe(true);
+    });
+
+    it('requires expectedVersion >= 1 and rejects extra fields and a string version', () => {
+      const validate = compile({ ...endStudySessionBodySchema });
+      expect(validate({})).toBe(false);
+      expect(validate({ expectedVersion: 0 })).toBe(false);
+      expect(validate({ expectedVersion: '1' })).toBe(false);
+      expect(validate({ expectedVersion: 1, status: 'completed' })).toBe(false);
     });
   });
 

@@ -1,5 +1,6 @@
 import type {
   CreateStudySessionInput,
+  EndStudySessionInput,
   PauseStudySessionInput,
   ResumeStudySessionInput,
   SetCountdownInput,
@@ -8,6 +9,7 @@ import type {
 } from '@mingwu/contracts';
 import {
   createStudySessionBodySchema,
+  endStudySessionBodySchema,
   pauseStudySessionBodySchema,
   resumeStudySessionBodySchema,
   setCountdownBodySchema,
@@ -141,6 +143,24 @@ export const studySessionRoutes: FastifyPluginAsync<{
       const { id } = request.params as { id: string };
       const input = request.body as ResumeStudySessionInput;
       return studySessionService.resumeStudySession(id, input);
+    },
+  );
+
+  // 结束 Session：running / paused → completed。服务端单次采样时间并结算最终时长；
+  // endedAt / 状态 / 时长结果均由服务端写入，客户端不能提交。
+  app.post(
+    '/study-sessions/:id/end',
+    {
+      schema: {
+        params: studySessionParamsSchema,
+        body: endStudySessionBodySchema,
+        response: { 200: studySessionJsonSchema },
+      },
+    },
+    async (request) => {
+      const { id } = request.params as { id: string };
+      const input = request.body as EndStudySessionInput;
+      return studySessionService.endStudySession(id, input);
     },
   );
 };

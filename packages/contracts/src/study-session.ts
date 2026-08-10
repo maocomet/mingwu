@@ -85,6 +85,11 @@ export interface ResumeStudySessionInput {
   expectedVersion: number;
 }
 
+export interface EndStudySessionInput {
+  /** 本次结束基于的版本号，用于乐观并发控制。 */
+  expectedVersion: number;
+}
+
 export const studySessionParamsSchema = {
   type: 'object',
   required: ['id'],
@@ -151,6 +156,15 @@ export const pauseStudySessionBodySchema = {
 } as const;
 
 export const resumeStudySessionBodySchema = {
+  type: 'object',
+  required: ['expectedVersion'],
+  additionalProperties: false,
+  properties: {
+    expectedVersion: { type: 'integer', minimum: 1 },
+  },
+} as const;
+
+export const endStudySessionBodySchema = {
   type: 'object',
   required: ['expectedVersion'],
   additionalProperties: false,

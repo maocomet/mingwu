@@ -941,3 +941,285 @@ describe('StudySessionService.resumeStudySession', () => {
     expect(latest!.version).toBe(session.version + 1);
   });
 });
+
+describe('StudySessionService.endStudySession', () => {
+  const FIXED_NOW = '2026-01-01T08:00:00.000Z';
+  const T0 = '2026-01-01T08:00:00.000Z';
+
+  it('ends a running session and settles wall-clock against accumulated pauses (125.9s wall / 65s paused → 60s actual)', async () => {
+    let current = Date.parse(T0);
+    const clock = () => new Date(current).toISOString();
+    const { service, studySessionRepository } = setup(clock);
+    const session = await seedSession(studySessionRepository, {
+      timerMode: 'count_down',
+      taskText: '任务',
+      plannedDurationSeconds: 600,
+      status: 'running',
+      startedAt: clock(),
+      pausedDurationSeconds: 65,
+    });
+    current += 125_900; // 墙钟 125.9 秒 → 整秒 125
+    const result = await service.endStudySession(session.id, {
+      expectedVersion: session.version,
+    });
+    expect(result.status).toBe('completed');
+    expect(result.endedAt).toBe(clock());
+    expect(result.pausedAt).toBeNull();
+    expect(result.pausedDurationSeconds).toBe(65);
+    expect(result.actualDurationSeconds).toBe(60);
+    expect(result.startedAt).toBe(T0);
+    expect(result.version).toBe(session.version + 1);
+  });
+
+  it('ends a running count_up session with no pauses', async () => {
+    let current = Date.parse(T0);
+    const clock = () => new Date(current).toISOString();
+    const { service, studySessionRepository } = setup(clock);
+    const session = await seedSession(studySessionRepository, {
+      timerMode: 'count_up',
+      taskText: '专注',
+      status: 'running',
+      startedAt: clock(),
+    });
+    current += 100_000;
+    const result = await service.endStudySession(session.id, {
+      expectedVersion: session.version,
+    });
+    expect(result.status).toBe('completed');
+    expect(result.actualDurationSeconds).toBe(100);
+    expect(result.pausedDurationSeconds).toBe(0);
+    expect(result.plannedDurationSeconds).toBeNull();
+  });
+
+  it('ends a paused session and settles the current pause interval', async () => {
+    let current = Date.parse(T0);
+    const clock = () => new Date(current).toISOString();
+    const { service, studySessionRepository } = setup(clock);
+    const session = await seedSession(studySessionRepository, {
+      status: 'paused',
+      startedAt: T0,
+      pausedAt: new Date(current + 60_000).toISOString(), // T0+60s
+      pausedDurationSeconds: 0,
+    });
+    current += 125_900; // 墙钟 125.9 → 125；当前暂停 = 125.9 - 60 → 65；实际 60
+    const result = await service.endStudySession(session.id, {
+      expectedVersion: session.version,
+    });
+    expect(result.status).toBe('completed');
+    expect(result.pausedAt).toBeNull();
+    expect(result.pausedDurationSeconds).toBe(65);
+    expect(result.actualDurationSeconds).toBe(60);
+  });
+
+  it('ends a paused session on top of prior accumulated pauses', async () => {
+    let current = Date.parse(T0);
+    const clock = () => new Date(current).toISOString();
+    const { service, studySessionRepository } = setup(clock);
+    const session = await seedSession(studySessionRepository, {
+      status: 'paused',
+      startedAt: T0,
+      pausedAt: new Date(current + 100_000).toISOString(), // T0+100s
+      pausedDurationSeconds: 30,
+    });
+    current += 200_000; // 墙钟 200；当前暂停 = 200-100 → 100；累计 130；实际 70
+    const result = await service.endStudySession(session.id, {
+      expectedVersion: session.version,
+    });
+    expect(result.pausedDurationSeconds).toBe(130);
+    expect(result.actualDurationSeconds).toBe(70);
+    expect(result.pausedAt).toBeNull();
+  });
+
+  it('rejects ending a created session', async () => {
+    const { service, studySessionRepository } = setup();
+    const session = await seedSession(studySessionRepository, { status: 'created' });
+    await expect(
+      service.endStudySession(session.id, { expectedVersion: session.version }),
+    ).rejects.toBeInstanceOf(StudySessionStatusConflictError);
+  });
+
+  it('rejects ending an already completed session without rewriting endedAt or durations', async () => {
+    const { service, studySessionRepository } = setup();
+    const session = await seedSession(studySessionRepository, {
+      status: 'completed',
+      startedAt: T0,
+      endedAt: '2026-01-01T08:30:00.000Z',
+      actualDurationSeconds: 1800,
+      pausedDurationSeconds: 60,
+    });
+    await expect(
+      service.endStudySession(session.id, { expectedVersion: session.version }),
+    ).rejects.toBeInstanceOf(StudySessionStatusConflictError);
+    const latest = await studySessionRepository.findById(session.id);
+    expect(latest!.status).toBe('completed');
+    expect(latest!.endedAt).toBe('2026-01-01T08:30:00.000Z');
+    expect(latest!.actualDurationSeconds).toBe(1800);
+    expect(latest!.version).toBe(session.version);
+  });
+
+  it('throws a version conflict on a stale expectedVersion', async () => {
+    const { service, studySessionRepository } = setup();
+    const session = await seedSession(studySessionRepository, {
+      status: 'running',
+      startedAt: T0,
+    });
+    await expect(
+      service.endStudySession(session.id, { expectedVersion: session.version + 99 }),
+    ).rejects.toBeInstanceOf(StudySessionVersionConflictError);
+  });
+
+  it('rejects ending when startedAt is missing (time corruption) and keeps the store unchanged', async () => {
+    const { service, studySessionRepository } = setup();
+    const session = await seedSession(studySessionRepository, { status: 'running' });
+    await expect(
+      service.endStudySession(session.id, { expectedVersion: session.version }),
+    ).rejects.toBeInstanceOf(StudySessionTimeCorruptionError);
+    const latest = await studySessionRepository.findById(session.id);
+    expect(latest!.status).toBe('running');
+    expect(latest!.version).toBe(session.version);
+  });
+
+  it('rejects ending when the server clock is unparseable (time corruption) and keeps the store unchanged', async () => {
+    const { service, studySessionRepository } = setup(() => 'not-a-time');
+    const session = await seedSession(studySessionRepository, {
+      status: 'running',
+      startedAt: T0,
+    });
+    await expect(
+      service.endStudySession(session.id, { expectedVersion: session.version }),
+    ).rejects.toBeInstanceOf(StudySessionTimeCorruptionError);
+    const latest = await studySessionRepository.findById(session.id);
+    expect(latest!.version).toBe(session.version);
+    expect(latest!.endedAt).toBeNull();
+  });
+
+  it('rejects ending when the server clock is earlier than startedAt (time corruption)', async () => {
+    const { service, studySessionRepository } = setup(() => '2026-01-01T07:00:00.000Z');
+    const session = await seedSession(studySessionRepository, {
+      status: 'running',
+      startedAt: '2026-01-01T08:00:00.000Z',
+    });
+    await expect(
+      service.endStudySession(session.id, { expectedVersion: session.version }),
+    ).rejects.toBeInstanceOf(StudySessionTimeCorruptionError);
+  });
+
+  it('rejects ending a running session that carries a pausedAt (time corruption)', async () => {
+    const { service, studySessionRepository } = setup(() => FIXED_NOW);
+    const session = await seedSession(studySessionRepository, {
+      status: 'running',
+      startedAt: T0,
+      pausedAt: T0,
+    });
+    await expect(
+      service.endStudySession(session.id, { expectedVersion: session.version }),
+    ).rejects.toBeInstanceOf(StudySessionTimeCorruptionError);
+  });
+
+  it('rejects ending a paused session without a pausedAt (time corruption)', async () => {
+    const { service, studySessionRepository } = setup(() => FIXED_NOW);
+    const session = await seedSession(studySessionRepository, {
+      status: 'paused',
+      startedAt: T0,
+    });
+    await expect(
+      service.endStudySession(session.id, { expectedVersion: session.version }),
+    ).rejects.toBeInstanceOf(StudySessionTimeCorruptionError);
+  });
+
+  it('rejects ending when pausedAt is before startedAt (time corruption)', async () => {
+    const { service, studySessionRepository } = setup(() => FIXED_NOW);
+    const session = await seedSession(studySessionRepository, {
+      status: 'paused',
+      startedAt: '2026-01-01T09:00:00.000Z',
+      pausedAt: '2026-01-01T08:00:00.000Z',
+    });
+    await expect(
+      service.endStudySession(session.id, { expectedVersion: session.version }),
+    ).rejects.toBeInstanceOf(StudySessionTimeCorruptionError);
+  });
+
+  it('rejects ending when pausedAt is after the server clock (time corruption)', async () => {
+    let current = Date.parse(T0);
+    const clock = () => new Date(current).toISOString();
+    const { service, studySessionRepository } = setup(clock);
+    const session = await seedSession(studySessionRepository, {
+      status: 'paused',
+      startedAt: T0,
+      pausedAt: '2026-01-01T08:05:00.000Z',
+    });
+    current = Date.parse('2026-01-01T08:04:00.000Z'); // 服务器时间早于 pausedAt
+    await expect(
+      service.endStudySession(session.id, { expectedVersion: session.version }),
+    ).rejects.toBeInstanceOf(StudySessionTimeCorruptionError);
+  });
+
+  it('rejects ending when accumulated paused seconds is not a non-negative integer (time corruption)', async () => {
+    for (const pausedDurationSeconds of [NaN, -1, 1.5]) {
+      const { service, studySessionRepository } = setup(() => FIXED_NOW);
+      const session = await seedSession(studySessionRepository, {
+        status: 'running',
+        startedAt: T0,
+        pausedDurationSeconds,
+      });
+      await expect(
+        service.endStudySession(session.id, { expectedVersion: session.version }),
+      ).rejects.toBeInstanceOf(StudySessionTimeCorruptionError);
+    }
+  });
+
+  it('rejects ending when paused seconds exceed the wall clock (time corruption) and keeps the store unchanged', async () => {
+    const { service, studySessionRepository } = setup(() => FIXED_NOW);
+    const session = await seedSession(studySessionRepository, {
+      status: 'running',
+      startedAt: '2026-01-01T08:00:00.000Z',
+      pausedDurationSeconds: 200, // 墙钟仅 0 秒，暂停总数大于墙钟
+    });
+    await expect(
+      service.endStudySession(session.id, { expectedVersion: session.version }),
+    ).rejects.toBeInstanceOf(StudySessionTimeCorruptionError);
+    const latest = await studySessionRepository.findById(session.id);
+    expect(latest!.status).toBe('running');
+    expect(latest!.endedAt).toBeNull();
+    expect(latest!.version).toBe(session.version);
+  });
+
+  it('samples the server clock exactly once on a successful end', async () => {
+    let calls = 0;
+    const clock = () => {
+      calls += 1;
+      return FIXED_NOW;
+    };
+    const { service, studySessionRepository } = setup(clock);
+    const session = await seedSession(studySessionRepository, {
+      status: 'running',
+      startedAt: '2026-01-01T08:00:00.000Z',
+    });
+    await service.endStudySession(session.id, { expectedVersion: session.version });
+    expect(calls).toBe(1);
+  });
+
+  it('20 concurrent ends with the same expectedVersion: exactly one succeeds', async () => {
+    const { service, studySessionRepository } = setup(() => FIXED_NOW);
+    const session = await seedSession(studySessionRepository, {
+      status: 'running',
+      startedAt: '2026-01-01T08:00:00.000Z',
+    });
+    const results = await Promise.all(
+      Array.from({ length: 20 }, () =>
+        service
+          .endStudySession(session.id, { expectedVersion: session.version })
+          .then(() => 'ok')
+          .catch((e) =>
+            e instanceof StudySessionVersionConflictError ? 'conflict' : 'other',
+          ),
+      ),
+    );
+    expect(results.filter((r) => r === 'ok')).toHaveLength(1);
+    expect(results.filter((r) => r === 'conflict')).toHaveLength(19);
+    const latest = await studySessionRepository.findById(session.id);
+    expect(latest!.status).toBe('completed');
+    expect(latest!.endedAt).toBe(FIXED_NOW);
+    expect(latest!.version).toBe(session.version + 1);
+  });
+});

@@ -1,5 +1,6 @@
 import type {
   CreateStudySessionInput,
+  EndStudySessionInput,
   PauseStudySessionInput,
   ResumeStudySessionInput,
   SetCountdownInput,
@@ -256,6 +257,91 @@ export class StudySessionService {
       status: 'running',
       pausedAt: null,
       pausedDurationSeconds: existing.pausedDurationSeconds + elapsedSeconds,
+      updatedAt: nowIso,
+      version: existing.version + 1,
+    };
+    const result = await this.repository.updateIfVersion(updated, input.expectedVersion);
+    if (!result) {
+      throw new StudySessionVersionConflictError(id, input.expectedVersion);
+    }
+    return result;
+  }
+
+  /**
+   * 结束 Session：running → completed 或 paused → completed。v0.1 结束规则：
+   * - Session 不存在 → 404；status 不是 running / paused → 409（created 尚未开始不能结束，
+   *   已完成或其他状态重复调用返回状态冲突，不重写 endedAt / 时长结果）；
+   * - 服务器单次采样 now，在任何算术与写入前校验时间与数据完整性：
+   *   startedAt 与 now 均可解析且 now >= startedAt；running 必须 pausedAt = null；
+   *   paused 必须有可解析 pausedAt 且 startedAt <= pausedAt <= now；
+   *   已累计 pausedDurationSeconds 必须是非负整数；
+   *   最终暂停秒数不得大于总墙钟秒数、最终实际学习秒数不得为负；
+   *   任一不满足抛 StudySessionTimeCorruptionError（受控 500，不改仓储，不回显时间 / 时长）；
+   *   不用 Math.max(0, ...) 静默掩盖损坏数据；
+   * - 结算（整秒向下取整）：wallSeconds = floor((endedAt - startedAt) / 1000)；
+   *   running 结束：pausedAt 必须为空，actualDurationSeconds = wallSeconds - pausedDurationSeconds；
+   *   paused 结束：先把 floor((endedAt - pausedAt) / 1000) 加入 pausedDurationSeconds，
+   *   再从 wallSeconds 中扣除，完成后清空 pausedAt；
+   * - 成功保存 status=completed、endedAt=now、pausedAt=null、最终 pausedDurationSeconds、
+   *   最终 actualDurationSeconds、version+1、刷新 updatedAt；startedAt 保持首次开始时间不变；
+   * - 仓储 CAS 失败（陈旧 expectedVersion）→ 409，20 路并发结束只有一次成功。
+   */
+  async endStudySession(id: string, input: EndStudySessionInput): Promise<StudySession> {
+    const existing = await this.repository.findById(id);
+    if (!existing) {
+      throw new StudySessionNotFoundError(id);
+    }
+    if (existing.status !== 'running' && existing.status !== 'paused') {
+      throw new StudySessionStatusConflictError(id, existing.status);
+    }
+    const nowIso = this.now();
+    // 第一步：基础时间可解析与先后顺序（任何算术之前）。
+    if (!isValidIsoTime(existing.startedAt) || !isValidIsoTime(nowIso)) {
+      throw new StudySessionTimeCorruptionError(id);
+    }
+    const startedAtMs = Date.parse(existing.startedAt);
+    const nowMs = Date.parse(nowIso);
+    if (nowMs < startedAtMs) {
+      throw new StudySessionTimeCorruptionError(id);
+    }
+    // 第二步：已累计暂停秒数必须是非负整数，NaN / 负数 / 小数均视为损坏。
+    if (!Number.isInteger(existing.pausedDurationSeconds) || existing.pausedDurationSeconds < 0) {
+      throw new StudySessionTimeCorruptionError(id);
+    }
+    // 第三步：按状态校验 pausedAt。running 必须为空；paused 必须有可解析
+    // pausedAt 且 startedAt <= pausedAt <= now。
+    let pausedAtMs: number | null = null;
+    if (existing.status === 'running') {
+      if (existing.pausedAt !== null) {
+        throw new StudySessionTimeCorruptionError(id);
+      }
+    } else if (!isValidIsoTime(existing.pausedAt)) {
+      throw new StudySessionTimeCorruptionError(id);
+    } else {
+      pausedAtMs = Date.parse(existing.pausedAt);
+      if (pausedAtMs < startedAtMs || nowMs < pausedAtMs) {
+        throw new StudySessionTimeCorruptionError(id);
+      }
+    }
+    // 结算：墙钟秒（整秒向下取整）。
+    const wallSeconds = Math.floor((nowMs - startedAtMs) / 1000);
+    let finalPausedSeconds = existing.pausedDurationSeconds;
+    if (pausedAtMs !== null) {
+      // 当前尚未累计的本次暂停秒数加入累计。
+      finalPausedSeconds += Math.floor((nowMs - pausedAtMs) / 1000);
+    }
+    const actualSeconds = wallSeconds - finalPausedSeconds;
+    // 最终一致性：暂停总数不得大于墙钟，实际学习秒数不得为负；不静默掩盖。
+    if (finalPausedSeconds > wallSeconds || actualSeconds < 0) {
+      throw new StudySessionTimeCorruptionError(id);
+    }
+    const updated: StudySession = {
+      ...existing,
+      status: 'completed',
+      endedAt: nowIso,
+      pausedAt: null,
+      pausedDurationSeconds: finalPausedSeconds,
+      actualDurationSeconds: actualSeconds,
       updatedAt: nowIso,
       version: existing.version + 1,
     };

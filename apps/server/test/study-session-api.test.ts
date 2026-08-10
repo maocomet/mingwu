@@ -1085,3 +1085,252 @@ describe('POST /api/v1/study-sessions/:id/resume', () => {
     expect(latest.json().version).toBe(paused.version + 1);
   });
 });
+
+describe('POST /api/v1/study-sessions/:id/end', () => {
+  const FIXED_NOW = '2026-01-01T08:00:00.000Z';
+
+  async function createRunning(app: App): Promise<StudySession> {
+    const id = uuid();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/study-sessions',
+      payload: { id, timerMode: 'count_down', taskText: '任务', plannedDurationSeconds: 600 },
+    });
+    const session = res.json();
+    const started = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${id}/start`,
+      payload: { expectedVersion: session.version },
+    });
+    return started.json();
+  }
+
+  it('ends a running session with accumulated pauses (125.9s wall / 65s paused → 60s actual)', async () => {
+    let current = Date.parse(FIXED_NOW);
+    const clock = () => new Date(current).toISOString();
+    const { app, services } = setup(clock);
+    const running = makeStudySession({
+      timerMode: 'count_down',
+      taskText: '任务',
+      plannedDurationSeconds: 600,
+      status: 'running',
+      startedAt: FIXED_NOW,
+      pausedDurationSeconds: 65,
+    });
+    await services.studySessionRepository.createIfAbsent(running);
+    current += 125_900;
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${running.id}/end`,
+      payload: { expectedVersion: running.version },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.status).toBe('completed');
+    expect(body.endedAt).toBe(clock());
+    expect(body.pausedAt).toBeNull();
+    expect(body.actualDurationSeconds).toBe(60);
+    expect(body.pausedDurationSeconds).toBe(65);
+    expect(body.startedAt).toBe(FIXED_NOW);
+    expect(body.version).toBe(running.version + 1);
+  });
+
+  it('ends a paused session and settles the current pause interval', async () => {
+    let current = Date.parse(FIXED_NOW);
+    const clock = () => new Date(current).toISOString();
+    const { app, services } = setup(clock);
+    const paused = makeStudySession({
+      status: 'paused',
+      startedAt: FIXED_NOW,
+      pausedAt: new Date(current + 60_000).toISOString(),
+      pausedDurationSeconds: 0,
+    });
+    await services.studySessionRepository.createIfAbsent(paused);
+    current += 125_900;
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${paused.id}/end`,
+      payload: { expectedVersion: paused.version },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.status).toBe('completed');
+    expect(body.pausedAt).toBeNull();
+    expect(body.pausedDurationSeconds).toBe(65);
+    expect(body.actualDurationSeconds).toBe(60);
+  });
+
+  it('returns a stable status-conflict 409 for a created session', async () => {
+    const { app } = setup();
+    const id = uuid();
+    await app.inject({
+      method: 'POST',
+      url: '/api/v1/study-sessions',
+      payload: { id, timerMode: 'count_down', taskText: '任务', plannedDurationSeconds: 600 },
+    });
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${id}/end`,
+      payload: { expectedVersion: 1 },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe('study_session_status_conflict');
+  });
+
+  it('returns a stable status-conflict 409 for an already completed session without rewriting results', async () => {
+    const { app, services } = setup();
+    const session = makeStudySession({
+      status: 'completed',
+      startedAt: FIXED_NOW,
+      endedAt: '2026-01-01T08:30:00.000Z',
+      actualDurationSeconds: 1800,
+      pausedDurationSeconds: 60,
+    });
+    await services.studySessionRepository.createIfAbsent(session);
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${session.id}/end`,
+      payload: { expectedVersion: session.version },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe('study_session_status_conflict');
+    const latest = await app.inject({ method: 'GET', url: `/api/v1/study-sessions/${session.id}` });
+    expect(latest.json().endedAt).toBe('2026-01-01T08:30:00.000Z');
+    expect(latest.json().actualDurationSeconds).toBe(1800);
+    expect(latest.json().version).toBe(session.version);
+  });
+
+  it('returns a controlled 500 and does not leak raw times when the server clock is unparseable', async () => {
+    const { app, services } = setup(() => 'not-a-time');
+    const session = makeStudySession({ status: 'running', startedAt: FIXED_NOW });
+    await services.studySessionRepository.createIfAbsent(session);
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${session.id}/end`,
+      payload: { expectedVersion: session.version },
+    });
+    expect(res.statusCode).toBe(500);
+    expect(res.json().error).toBe('study_session_time_corrupt');
+    expect(JSON.stringify(res.json())).not.toContain('not-a-time');
+    const latest = await app.inject({ method: 'GET', url: `/api/v1/study-sessions/${session.id}` });
+    expect(latest.json().status).toBe('running');
+    expect(latest.json().endedAt).toBeNull();
+  });
+
+  it('returns a controlled 500 when a running session carries a pausedAt (time corruption)', async () => {
+    const { app, services } = setup(() => FIXED_NOW);
+    const session = makeStudySession({
+      status: 'running',
+      startedAt: FIXED_NOW,
+      pausedAt: FIXED_NOW,
+    });
+    await services.studySessionRepository.createIfAbsent(session);
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${session.id}/end`,
+      payload: { expectedVersion: session.version },
+    });
+    expect(res.statusCode).toBe(500);
+    expect(res.json().error).toBe('study_session_time_corrupt');
+  });
+
+  it('returns a controlled 500 when a paused session lacks a pausedAt (time corruption)', async () => {
+    const { app, services } = setup(() => FIXED_NOW);
+    const session = makeStudySession({ status: 'paused', startedAt: FIXED_NOW });
+    await services.studySessionRepository.createIfAbsent(session);
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${session.id}/end`,
+      payload: { expectedVersion: session.version },
+    });
+    expect(res.statusCode).toBe(500);
+    expect(res.json().error).toBe('study_session_time_corrupt');
+  });
+
+  it('returns a controlled 500 and keeps the store unchanged when paused seconds exceed the wall clock', async () => {
+    const { app, services } = setup(() => FIXED_NOW);
+    const session = makeStudySession({
+      status: 'running',
+      startedAt: FIXED_NOW,
+      pausedDurationSeconds: 200,
+    });
+    await services.studySessionRepository.createIfAbsent(session);
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${session.id}/end`,
+      payload: { expectedVersion: session.version },
+    });
+    expect(res.statusCode).toBe(500);
+    expect(res.json().error).toBe('study_session_time_corrupt');
+    const latest = await app.inject({ method: 'GET', url: `/api/v1/study-sessions/${session.id}` });
+    expect(latest.json().status).toBe('running');
+    expect(latest.json().endedAt).toBeNull();
+    expect(latest.json().version).toBe(session.version);
+  });
+
+  it('returns a stable 409 on a stale expectedVersion', async () => {
+    const { app } = setup();
+    const running = await createRunning(app);
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${running.id}/end`,
+      payload: { expectedVersion: 99 },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe('study_session_version_conflict');
+  });
+
+  it('returns 404 for an unknown session', async () => {
+    const { app } = setup();
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${uuid()}/end`,
+      payload: { expectedVersion: 1 },
+    });
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error).toBe('study_session_not_found');
+  });
+
+  it('rejects unknown fields in the body', async () => {
+    const { app } = setup();
+    const running = await createRunning(app);
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${running.id}/end`,
+      payload: { expectedVersion: running.version, endedAt: FIXED_NOW },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe('validation_failed');
+  });
+
+  it('rejects a string expectedVersion as a strict type violation', async () => {
+    const { app } = setup();
+    const running = await createRunning(app);
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${running.id}/end`,
+      payload: { expectedVersion: '1' },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe('validation_failed');
+  });
+
+  it('concurrent end with the same expectedVersion: exactly one succeeds', async () => {
+    const { app } = setup(() => FIXED_NOW);
+    const running = await createRunning(app);
+    const results = await Promise.all(
+      Array.from({ length: 20 }, () =>
+        app.inject({
+          method: 'POST',
+          url: `/api/v1/study-sessions/${running.id}/end`,
+          payload: { expectedVersion: running.version },
+        }),
+      ),
+    );
+    expect(results.filter((r) => r.statusCode === 200)).toHaveLength(1);
+    expect(results.filter((r) => r.statusCode === 409)).toHaveLength(19);
+    const latest = await app.inject({ method: 'GET', url: `/api/v1/study-sessions/${running.id}` });
+    expect(latest.json().status).toBe('completed');
+    expect(latest.json().version).toBe(running.version + 1);
+  });
+});
