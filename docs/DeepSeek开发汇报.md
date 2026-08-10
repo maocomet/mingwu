@@ -2977,3 +2977,364 @@ PUT 使用严格白名单请求体：
 - “查询单次 Session 完整详情”继续保持未勾选。
 
 **检查点 #12 已完成，可以进入下一批。**
+
+---
+
+## 小喵任务 #13 · AI 学习报告追加存储基础 · 2026-08-10
+
+### 本批唯一候选计划项
+
+- [ ] 多个 AI 报告互不覆盖
+
+本批只建立 `StudyParticipant` 与追加式 `StudyReport` 的领域 / 存储基础，并用“受信任认证上下文”作为服务层身份入口。由于真实 OAuth / MCP Actor 认证尚未接入，本批不得申报“AI 追加自己的报告”或 MCP `study_append_report`。
+
+### 一、身份边界
+
+定义最小只读 `AuthenticatedAiActorContext`（名称可等价），至少包含：
+
+- `actorId`
+- `actorCode`
+- `actorType`
+
+规则：
+
+- 此对象只允许由未来认证中间件 / MCP 授权层传给应用服务；
+- StudyReport 的 `actorId` 必须由该上下文写入，不能出现在公开请求输入契约中；
+- 本批不创建任何接受 `actorId / actorCode / author / createdBy` 的 HTTP 或 MCP 写入口；
+- MCP 临时 Session ID 不能充当 Actor 身份；
+- 测试可以构造受信上下文，但代码注释必须明确这不等于真实认证已经完成。
+
+### 二、StudyParticipant
+
+建立独立模型与仓储，至少包含：
+
+- `studySessionId`
+- `actorId`
+- `joinedAt`
+- `lastActiveAt`
+
+规则：
+
+- `(studySessionId, actorId)` 唯一；
+- 只有实际追加学习报告的 AI 才在本批自动创建 / 更新参与记录；
+- 首次追加时写入 `joinedAt`，后续追加只刷新 `lastActiveAt`，不得产生第二条 Participant；
+- 不参与的 AI 不创建记录，不显示“未提交”；
+- 仓储返回深拷贝。
+
+### 三、StudyReport
+
+建立追加式模型与输入契约，至少包含：
+
+- `id`：调用方为幂等重试生成的 UUID；
+- `studySessionId`
+- `actorId`：仅服务端从认证上下文写入；
+- `sequenceNumber`
+- `content`
+- `submittedAt`
+
+规则：
+
+- 报告只能追加，仓储接口不得提供修改、覆盖或删除正式报告的方法；
+- 同一 Actor 在同一 Session 内的 `sequenceNumber` 从 1 开始连续递增；
+- 不同 Actor 各自拥有独立序列，例如 xiaomiao #1、xiaoke #1；
+- 对 `(studySessionId, actorId, sequenceNumber)` 保证仓储级原子唯一；
+- `id` 全局唯一并作为幂等键：同 id、同 Session、同认证 Actor、同规范化正文重试返回已有报告；同 id 搭配不同语义返回受控冲突，绝不覆盖；
+- 正文 trim 后非空，使用与 JSON Schema 一致的 Unicode code point 上限语义与共享常量；
+- Session 不存在返回受控 404；本批允许在已开始的 Session（running / paused）及终态 Session 追加，不允许 `created` 草稿 Session；请将规则写入源码并测试；
+- Report 与 StudySummary 必须是独立模型 / 仓储，任何追加都不得修改 Summary。
+
+### 四、应用服务
+
+实现内部应用服务方法（名称可等价）：
+
+- `appendReport(authContext, input)`
+- `listParticipants(studySessionId)`
+- `listReports(studySessionId)`
+
+其中公开 `input` 只能包含：
+
+- `id`
+- `studySessionId`
+- `content`
+
+追加需要原子完成“分配当前 Actor 的下一个 sequenceNumber + 插入报告”；20 个同 Actor 不同 id 并发追加必须全部成功，并得到唯一、连续的 `1..20`。Participant 的唯一性和时间更新也必须在竞争下保持正确。若当前内存实现用单个同步临界区完成，请明确 PostgreSQL 阶段需要事务、唯一约束与冲突重试。
+
+报告成功保存后再 upsert Participant；如 Participant 更新失败，不得让接口假装全部成功。请为跨仓储一致性定义本批内存阶段的明确策略，并写明 PostgreSQL 阶段必须使用同一事务。
+
+### 五、测试与验收
+
+覆盖契约、两个仓储与应用服务，至少包括：
+
+- 同一 AI 追加 #1、#2，旧报告永久保留；
+- xiaomiao 与 xiaoke 各自从 #1 开始，互不覆盖；
+- 报告按 `submittedAt ASC, actorId ASC, sequenceNumber ASC` 或另一套明确稳定顺序返回；
+- 20 个同 Actor 并发追加得到唯一连续序号；
+- 同 id 同语义幂等重试不新增，异义重试受控冲突；
+- Participant 首次创建、后续只刷新、不同 AI 分开、未参与 AI 不出现；
+- created Session 被拒绝，running / paused / completed 被允许，未知 Session 404；
+- emoji 正文边界、空白 trim、非法 / 受保护身份字段契约；
+- 返回深拷贝，外部修改不污染仓储；
+- 追加报告不改变已有 StudySummary；
+- 运行 `npm run typecheck`、`npm test`、`git diff --check`。
+
+### 本批明确不做
+
+- 不注册 HTTP 写路由；
+- 不实现或申报 MCP `study_append_report`；
+- 不申报“AI 追加自己的报告”；真实 Actor 认证接入前不能勾选；
+- 不实现 OAuth、Token、MCPConnection、凭据存储或真实预设 Actor；
+- 不申报“查询单次 Session 完整详情”；
+- 不修改计划文档复选框；
+- 不执行 Git / GitHub / VPS 或其他外部操作；
+- 不读取或修改 `.claude/`、`ui素材mingwu/` 等无关目录。
+
+完成后把“检查点 #13”追加到本文件末尾，列出候选完成项、身份边界、并发 / 幂等策略、文件清单、真实测试结果与 PostgreSQL 事务风险，然后立即暂停等待小喵审核。
+
+---
+
+## 检查点 #13 · AI 学习报告追加存储基础 · 2026-08-10
+
+### 本批次目标
+
+建立“多个 AI 报告互不覆盖”的基础存储：新增 `StudyParticipant` 与 `StudyReport` 两个独立模型、内存仓储、领域错误与应用服务，用原子 next-sequence 分配保证同一 Session 内每个 AI 的序号各自从 #1 独立编号、互不覆盖；明确同 id 同语义幂等重试与异义受控冲突；报告成功保存后再 upsert Participant，失败如实返回失败。**本批不注册 HTTP 写路由、不实现 / 不申报 MCP `study_append_report`，不申报“AI 追加自己的报告”。**
+
+### 候选完成的计划项（原文，未打勾）
+
+- [ ] 多个 AI 报告互不覆盖（docs/project-plan-v0.1.md 对应项）
+
+### 实际完成内容
+
+- 契约层：`packages/contracts/src/study-actor.ts`（`AuthenticatedAiActorContext`：actorId / actorCode / actorType，仅由服务端认证层构造）、`study-participant.ts`（`StudyParticipant` + `studyParticipantJsonSchema`）、`study-report.ts`（`StudyReport`、`AppendStudyReportInput`、`appendStudyReportInputSchema`、`studyReportJsonSchema`、`STUDY_REPORT_CONTENT_MAX_LENGTH = 5000`）。
+- 领域层：`apps/server/src/domain/study-report/`（4 个受控错误 + `StudyReportRepository` 接口，只有 appendReport / listBySession，无 update / delete）、`apps/server/src/domain/study-participant/`（`StudyParticipantUpdateError` + `StudyParticipantRepository` 接口）。
+- 应用层：`StudyReportService`（appendReport / listParticipants / listReports；服务端 id、trim、Unicode code point 长度、状态校验、幂等与跨仓储一致性）。
+- 仓储：`InMemoryStudyReportRepository`（byId Map 幂等键 + 嵌套 Map 的 next-sequence 分配）与 `InMemoryStudyParticipantRepository`（嵌套 Map upsert）。
+- 测试：契约 / 两个仓储 / 服务共 45 个新测试（`study-report-contract`、`study-report-repository`、`study-participant-repository`、`study-report-service`）。
+- `test/helpers.ts` 增加 `makeStudyParticipant / makeStudyReport / makeActorContext`，`makeServices` 增加两个新仓储与 `studyReportService`。
+
+### 新增、修改、删除的文件清单
+
+新增：
+- packages/contracts/src/study-actor.ts
+- packages/contracts/src/study-participant.ts
+- packages/contracts/src/study-report.ts
+- apps/server/src/domain/study-report/errors.ts
+- apps/server/src/domain/study-report/repository.ts
+- apps/server/src/domain/study-participant/errors.ts
+- apps/server/src/domain/study-participant/repository.ts
+- apps/server/src/infrastructure/repositories/in-memory-study-report-repository.ts
+- apps/server/src/infrastructure/repositories/in-memory-study-participant-repository.ts
+- apps/server/src/application/study-report/study-report-service.ts
+- apps/server/test/study-report-contract.test.ts
+- apps/server/test/study-report-repository.test.ts
+- apps/server/test/study-participant-repository.test.ts
+- apps/server/test/study-report-service.test.ts
+
+修改：
+- packages/contracts/src/index.ts（导出 study-actor / study-participant / study-report）
+- apps/server/test/helpers.ts（makeServices 装配 + 三个新工厂）
+
+删除：无。
+
+### 关键设计决定及其依据
+
+1. **身份边界**：公开 `input` 只含 `id / studySessionId / content`，schema strict 拒绝 actorId / actorCode / actorType / author / createdBy / sequenceNumber / submittedAt（400）。`actorId` 只从 `AuthenticatedAiActorContext` 读取，该上下文只能由未来认证中间件 / MCP 授权层构造；MCP 临时 Session ID 不是身份；测试构造的受信上下文不意味着真实认证已完成（代码注释明示）。
+2. **原子序号分配（互不覆盖的核心）**：内存阶段用嵌套 `Map<sessionId, Map<actorId, next>>`，JS 单线程下同步读写构成原子临界区，20 个同 Actor 不同 id 并发追加全部成功、序号唯一连续 1..20；不同 Actor 各自从 #1 开始互不影响。PostgreSQL 阶段必须在同一事务内“分配序号 + 插入报告”，靠 `(study_session_id, actor_id, sequence_number)` 唯一约束 + `ON CONFLICT DO NOTHING` + 冲突重试（已在仓储接口注释写明）。
+3. **幂等重试**：`byId` Map 作为幂等键；同 id + 同 Session + 同认证 Actor + 同 trim 后正文 → 返回已有报告（created=false，不推进序号）；同 id 异义（内容 / Session / Actor 任一不同）→ 受控 409 `study_report_idempotency_conflict`，绝不覆盖已有报告。
+4. **跨仓储一致性**：报告先写入，成功后 upsert Participant（首次写 joinedAt，后续只刷新 lastActiveAt、保留 joinedAt）；若 Participant 更新失败，如实抛 `StudyParticipantUpdateError`（接口返回 500，不假装成功）；内存阶段已写入的报告不回滚，PostgreSQL 阶段必须把三步放进同一事务、失败整体回滚。
+5. **状态与 404**：created 草稿 Session → 409 `study_report_session_not_active`；running / paused / completed / cancelled / interrupted 允许追加；未知 Session 复用 `study_session_not_found` 404。
+6. **Unicode 长度**：正文 trim 后按 code point 计数（`countCodePoints`，即 `Array.from(content).length`），与 JSON Schema `maxLength` 语义一致；`STUDY_REPORT_CONTENT_MAX_LENGTH = 5000` 单一常量来源，契约 / 服务共用；5000 个 emoji 通过、5001 个拒绝。
+7. **稳定顺序**：listReports 按 `submittedAt ASC, actorId ASC, sequenceNumber ASC`；listParticipants 按 `joinedAt ASC, actorId ASC`。
+8. **防御性拷贝**：仓储返回深拷贝，外部修改不污染存储。
+9. **append-only**：仓储接口不暴露 update / delete / remove 方法，测试断言结构保证只读 + 追加。
+
+### 执行过的测试或检查、命令与真实结果
+
+- `cd apps/server && npm run typecheck`：通过（tsc --noEmit 无错误）。
+- `cd apps/server && npx vitest run test/study-report-contract.test.ts test/study-participant-repository.test.ts test/study-report-repository.test.ts test/study-report-service.test.ts`：4 个文件 **45/45 通过**。
+- `cd apps/server && npx vitest run`（全量）：27 个测试文件 **573/573 通过**（上批 528 + 本批 45）。
+- 真实 NUL 字节扫描（node 脚本遍历 apps/server 与 packages/contracts 全部 .ts）：**TOTAL NUL: 0**。
+- `git diff --check`：exit 0，除 Windows LF→CRLF 提示外无空白错误。
+
+### 未完成内容、已知问题和风险
+
+- 内存仓储为接口开发用；PostgreSQL 阶段需要“分配序号 + 插入报告 + upsert Participant”同一事务、三重唯一约束（id、sequence、participant 主键）与冲突重试，本批不创建数据库迁移。
+- 真实身份认证未接入：`actorId` 目前来自测试构造的受信上下文，不代表真实认证；MCP 写入完成前不得勾选“AI 追加自己的报告”。
+- 未注册 HTTP 写路由、未实现 / 未申报 MCP `study_append_report`、未申报“查询单次 Session 完整详情”。
+- `StudyParticipantUpdateError` 内存阶段已写入的报告不回滚（接口如实失败）；PostgreSQL 阶段必须同事务回滚。
+- 工作区另有上批“检查点 #12 返修”汇报未提交（归属小喵提交决策），本批未触碰。
+
+### 是否涉及数据库、身份权限、密钥、外部服务或破坏性变化
+
+- 数据库 / Migration：否（仅注明 PostgreSQL 阶段要求，未建迁移）。
+- 身份认证 / 权限 / 密钥：否（身份边界仅注释，未新增可由客户端指定的身份字段）。
+- 外部服务 / VPS / 部署：否。
+- 破坏性变化：否（保留工作区既有修改，未触碰 `.claude/`、`ui素材mingwu/` 等无关目录）。
+
+### 建议下一批任务
+
+由小喵审核后决定。候选方向：接入真实认证后注册 HTTP 追加路由或 MCP `study_append_report`（届时再验收“AI 追加自己的报告”）；或等 Summary、Participant、Report 聚合齐备后申报“查询单次 Session 完整详情”。
+
+### 等待小喵审核
+
+等待小喵审核。
+
+---
+
+## 小喵审核结果 #13 · 需要返修 · 2026-08-10
+
+### 审核结论
+
+追加式报告仓储、按 Session + Actor 独立序号、幂等键冲突、20 并发连续序号、深拷贝与 Summary 隔离的主体实现正确。小喵独立执行：
+
+- `npm run typecheck`：通过；
+- `npm test`：27 个测试文件，**573/573 通过**；
+- server / contracts 全部 `.ts` 文件真实 NUL 字节计数为 0；
+- `git diff --check`：除 Windows LF→CRLF 提示外无空白错误。
+
+但身份模型与既定设计不兼容，Participant 的幂等时间语义也有实际错误，因此暂不验收、暂不勾选“多个 AI 报告互不覆盖”。
+
+### 必须返修 1：与第二关既定 AIActor 模型对齐
+
+第二关卡报告已经明确：
+
+- `AIActor.id` 是 UUID；
+- `actor_code` 才是 `xiaomiao / xiaoke` 这类不可变代码；
+- `actor_type` 是 `resident_ai | temporary_ai | reviewer`。
+
+当前实现却把 `AI_ACTOR_TYPES` 定义成单一 `ai`，并在大量服务测试中直接用字符串 `xiaomiao / xiaoke` 作为 `actorId`。这会让第三关数据基础与未来第六关 Actor 外键、认证上下文无法兼容。
+
+请：
+
+- 将 Actor 类型与既定枚举对齐为 `resident_ai | temporary_ai | reviewer`，不得另造单一 `ai` 类型；权限是否允许提交报告留给未来 permission profile / 授权层，本批不擅自用 actorType 代替权限系统；
+- 将 `AuthenticatedAiActorContext` 字段声明为只读；
+- `StudyParticipant.actorId` 与 `StudyReport.actorId` 的响应 Schema 使用 UUID pattern，不得只校验非空；
+- 服务层在写入前防守性验证受信上下文至少包含合法 UUID actorId、非空受控长度 actorCode 与合法 actorType；非法上下文不得写入报告或 Participant，并使用不泄露秘密的内部受控错误；
+- 所有测试使用 UUID 作为 actorId，另用 actorCode 表示 `xiaomiao / xiaoke`；独立序列仍以 UUID actorId 为键；
+- 输入契约继续严格拒绝所有三种真实 actorType 值及 actorId / actorCode 等身份字段。
+
+### 必须返修 2：幂等重试不能伪造 Participant 活跃时间
+
+当前服务忽略仓储返回的 `created`，无论本次是真正新增报告还是命中已有报告，都用“本次重试时间”刷新 Participant。小喵实测：08:00 创建报告，09:00 使用同 id 同内容幂等重试后，报告仍只有一份，但 Participant 的 `lastActiveAt` 被改成 09:00。该字段定义为“最近一次追加学习报告的时间”，幂等重试没有追加新报告，不应推进它。
+
+请调整为以仓储返回的真实 `report.submittedAt` 作为 Participant 活动时间，并确保 Participant upsert 的时间单调：
+
+- 真正创建新报告时，按该报告 `submittedAt` 创建 / 刷新 Participant；
+- 幂等命中已有报告时，不得把 `lastActiveAt` 刷新为重试请求时间；
+- 对已有 Participant，`lastActiveAt` 只能取现值与传入报告时间中的较晚者，旧报告重试不得使时间倒退；
+- 若首次 Participant upsert 失败，随后用同一 report id 重试，应能以原报告 `submittedAt` 补建 Participant，报告仍只有一份、序号不推进；
+- 明确记录内存阶段的恢复约定：收到 Participant 失败后调用方必须使用同一幂等 id 重试；PostgreSQL 阶段仍必须使用同一事务整体回滚。
+
+新增服务 / 仓储回归测试至少覆盖：
+
+- 同 id 晚一小时重试，`lastActiveAt` 不变化；
+- 先有 #1、#2 后再重试 #1，`lastActiveAt` 不倒退；
+- Participant 首次失败后同 id 重试可补建，joinedAt / lastActiveAt 等于原报告提交时间，报告数与序号均不增加。
+
+### 边界要求
+
+- 只返修以上两组问题，不开始下一批；
+- 不注册 HTTP / MCP 写入口，不申报“AI 追加自己的报告”；
+- 不修改计划文档复选框；
+- 不执行 Git / GitHub / VPS 操作；
+- 不读取或修改 `.claude/`、`ui素材mingwu/` 等无关目录；
+- 完成后在本文件末尾追加“检查点 #13 返修”，列出身份模型对齐、时间 / 恢复语义与真实测试结果，然后暂停等待复验。
+
+---
+
+## 检查点 #13 返修 · 身份模型对齐 + Participant 时间语义 · 2026-08-10
+
+### 返修目标
+
+按小喵审核意见修正两组问题：(1) 身份模型与第二关既定 AIActor 模型对齐（UUID actorId、独立 actorCode、三种正式 actorType、服务端防守性校验）；(2) 幂等重试不得伪造 Participant 活跃时间（以仓储返回的真实 report.submittedAt 为准、lastActiveAt 单调、Participant 首次失败后同 id 重试可补建）。不新增任何功能、不注册 HTTP / MCP 写入口。
+
+### 修改内容
+
+1. **Actor 类型对齐**：`AI_ACTOR_TYPES` 由单一 `'ai'` 改为第二关既定的 `['resident_ai', 'temporary_ai', 'reviewer']`；新增 `AI_ACTOR_CODE_MAX_LENGTH = 64`（actorCode 受控长度上限）。`AuthenticatedAiActorContext` 三个字段全部声明为 `readonly`。本批不做 actorType 权限过滤——权限留给未来 permission profile / 授权层。
+2. **响应 Schema 的 actorId 校验**：`studyParticipantJsonSchema` 与 `studyReportJsonSchema` 的 `actorId` 从 `minLength: 1` 改为 `pattern: UUID_PATTERN`，与第二关 `AIActor.id` 为 UUID 一致。
+3. **服务端防守性校验**：`StudyReportService.appendReport` 在写入前调用新增的 `assertValidActorContext`：actorId 必须是合法 UUID、actorCode trim 后非空且长度 ≤ `AI_ACTOR_CODE_MAX_LENGTH`、actorType 必须命中三种既定类型之一；校验失败抛新增 `StudyActorContextInvalidError`（`apps/server/src/domain/study-actor/errors.ts`，消息不回显 actorId / actorCode 等身份值），不写入任何报告或 Participant。
+4. **Participant 时间语义修复**：
+   - upsert 的 `joinedAt / lastActiveAt` 改用仓储返回的真实 `report.submittedAt`（新增报告 = 本次提交时间；幂等命中 = 原报告提交时间），不再使用“重试请求时间”；
+   - `InMemoryStudyParticipantRepository.upsert` 的 `lastActiveAt` 改为单调：已存在参与记录只取现值与传入时间的较晚者，旧报告重试不得倒退；PostgreSQL 注释同步为 `GREATEST(study_participants.last_active_at, EXCLUDED.last_active_at)`；
+   - 恢复约定写入代码注释：Participant 失败后调用方必须用同一幂等 id 重试，重试命中已有报告后以原 submittedAt 补建，报告数与序号不增；PostgreSQL 阶段仍必须同一事务整体回滚。
+5. **测试全面改用 UUID actorId**：`makeActorContext` 默认 `actorType` 改为 `'resident_ai'`，actorId 默认已是 UUID；服务 / 仓储 / 契约测试中所有 `actorId: 'xiaomiao' / 'xiaoke'` 字符串改为 UUID（用 `actorCode` 表示代号），独立序列仍以 UUID actorId 为键。
+6. **新增回归测试**（服务 / 仓储共 5 个）：
+   - 非法受信上下文（非 UUID actorId、空 / 超长 actorCode、非法 actorType `'ai'` / `'human'`）全部抛 `StudyActorContextInvalidError`，且不写入任何报告或 Participant；
+   - 同 id 晚一小时幂等重试：返回原 submittedAt，Participant `lastActiveAt` 不变；
+   - 先有 #1、#2 后再重试 #1：Participant `lastActiveAt` 既不倒退也不等于重试时间；
+   - Participant 首次 upsert 失败后同 id 重试：以原报告 submittedAt 补建 Participant，joinedAt / lastActiveAt 等于原提交时间，报告仍只有一份、序号仍为 1；
+   - 仓储层 upsert 传入更早时间时 `lastActiveAt` 不倒退。
+
+### 新增、修改、删除的文件清单
+
+新增：
+- apps/server/src/domain/study-actor/errors.ts（StudyActorContextInvalidError）
+
+修改：
+- packages/contracts/src/study-actor.ts（AI_ACTOR_TYPES 三类型、AI_ACTOR_CODE_MAX_LENGTH、context 字段 readonly）
+- packages/contracts/src/study-participant.ts（actorId 响应 Schema 用 UUID pattern）
+- packages/contracts/src/study-report.ts（actorId 响应 Schema 用 UUID pattern）
+- apps/server/src/application/study-report/study-report-service.ts（assertValidActorContext、Participant 时间改用 report.submittedAt、恢复约定注释）
+- apps/server/src/infrastructure/repositories/in-memory-study-participant-repository.ts（lastActiveAt 单调取较晚者）
+- apps/server/test/helpers.ts（makeActorContext 默认 actorType 改 resident_ai）
+- apps/server/test/study-report-contract.test.ts（三类型断言、actorType 严格拒绝、actorId UUID 校验）
+- apps/server/test/study-participant-repository.test.ts（UUID actorId、单调时间测试）
+- apps/server/test/study-report-repository.test.ts（UUID actorId）
+- apps/server/test/study-report-service.test.ts（UUID actorId + 四个新回归测试）
+
+删除：无。
+
+### 执行过的测试或检查、命令与真实结果
+
+- `cd apps/server && npm run typecheck`：通过（contracts + server 两个包 tsc --noEmit 均无错误）。
+- `cd apps/server && npx vitest run test/study-report-contract.test.ts test/study-participant-repository.test.ts test/study-report-repository.test.ts test/study-report-service.test.ts`：4 个文件 **50/50 通过**（上批 45 + 本批新增 5）。
+- `cd apps/server && npx vitest run`（全量）：27 个测试文件 **578/578 通过**（上批 573 + 本批 5）。
+- 真实 NUL 字节扫描（node 脚本遍历 apps/server 与 packages/contracts 全部 .ts）：**TOTAL NUL: 0**。
+- `git diff --check`：exit 0，除 Windows LF→CRLF 提示外无空白错误。
+
+### 未完成内容、已知问题和风险
+
+- PostgreSQL 阶段仍需“分配序号 + 插入报告 + upsert Participant”同一事务、三重唯一约束与冲突重试，本批未创建数据库迁移。
+- 真实认证 / OAuth / MCP Actor 认证仍未接入：测试构造的受信上下文不意味着真实认证完成；MCP 写入完成前不得勾选“AI 追加自己的报告”。
+- 未注册 HTTP / MCP 写入口，未申报“查询单次 Session 完整详情”。
+- 工作区仍保留上批“检查点 #12 返修”汇报未提交内容（归属小喵提交决策）。
+
+### 是否涉及数据库、身份权限、密钥、外部服务或破坏性变化
+
+- 数据库 / Migration：否（仅同步 PostgreSQL 阶段注释，未建迁移）。
+- 身份认证 / 权限 / 密钥：否（身份模型对齐仅契约与防守性校验，未接入真实认证，未新增任何可由客户端指定的身份字段）。
+- 外部服务 / VPS / 部署：否。
+- 破坏性变化：否（保留工作区既有修改，未触碰 `.claude/`、`ui素材mingwu/` 等无关目录）。
+
+### 等待小喵审核
+
+等待小喵审核。
+
+---
+
+## 小喵复验结果 #13 · 通过 · 2026-08-10
+
+### 验收结论
+
+检查点 #13 及其身份 / Participant 时间返修已通过，计划项“多个 AI 报告互不覆盖”由小喵正式勾选。
+
+小喵独立复验结果：
+
+- `npm run typecheck`：通过；
+- `npm test`：27 个测试文件，**578/578 通过**；
+- server / contracts 全部 `.ts` 文件真实 NUL 字节计数为 0；
+- `git diff --check`：除 Windows LF→CRLF 提示外无空白错误；
+- UUID actorId、独立 actorCode、三种既定 actorType 与只读认证上下文已对齐第二关设计；
+- 非法认证上下文不会写入报告或 Participant；
+- 同一 Session 内不同 Actor 的序号独立，同 Actor 20 并发序号唯一连续；
+- 幂等重试不刷新 Participant 活跃时间，旧报告重试不倒退，首次 Participant 失败可用同 id 补建；
+- StudyReport 保持 append-only，并与 StudySummary 完全独立。
+
+### 验收边界
+
+- 本次只验收“多个 AI 报告互不覆盖”的领域 / 存储保证；
+- 真实 OAuth / MCP Actor 认证尚未接入，测试构造上下文不等于身份认证完成；
+- 未注册 HTTP / MCP 写入口，因此“AI 追加自己的报告”与 MCP `study_append_report` 继续保持未勾选；
+- “查询单次 Session 完整详情”继续保持未勾选；
+- PostgreSQL 阶段仍必须使用同一事务完成序号分配、报告插入与 Participant upsert。
+
+**检查点 #13 已完成，可以进入下一批。**

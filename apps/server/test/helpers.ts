@@ -1,7 +1,10 @@
 import type {
+  AuthenticatedAiActorContext,
   Project,
   ProjectStage,
   ProjectTask,
+  StudyParticipant,
+  StudyReport,
   StudySession,
   StudySummary,
 } from '@mingwu/contracts';
@@ -11,11 +14,14 @@ import { ProjectTaskService } from '../src/application/project-task/project-task
 import { ProjectStatusService } from '../src/application/project-status/project-status-service.js';
 import { StudySessionService } from '../src/application/study-session/study-session-service.js';
 import { StudySummaryService } from '../src/application/study-summary/study-summary-service.js';
+import { StudyReportService } from '../src/application/study-report/study-report-service.js';
 import { InMemoryProjectRepository } from '../src/infrastructure/repositories/in-memory-project-repository.js';
 import { InMemoryStageRepository } from '../src/infrastructure/repositories/in-memory-stage-repository.js';
 import { InMemoryProjectTaskRepository } from '../src/infrastructure/repositories/in-memory-project-task-repository.js';
 import { InMemoryStudySessionRepository } from '../src/infrastructure/repositories/in-memory-study-session-repository.js';
 import { InMemoryStudySummaryRepository } from '../src/infrastructure/repositories/in-memory-study-summary-repository.js';
+import { InMemoryStudyReportRepository } from '../src/infrastructure/repositories/in-memory-study-report-repository.js';
+import { InMemoryStudyParticipantRepository } from '../src/infrastructure/repositories/in-memory-study-participant-repository.js';
 
 /** 共享同一组仓储，保证项目 / 关卡 / 任务 / 学习会话写入互相可见。 */
 export function makeServices() {
@@ -24,6 +30,8 @@ export function makeServices() {
   const taskRepository = new InMemoryProjectTaskRepository();
   const studySessionRepository = new InMemoryStudySessionRepository();
   const studySummaryRepository = new InMemoryStudySummaryRepository();
+  const studyReportRepository = new InMemoryStudyReportRepository();
+  const studyParticipantRepository = new InMemoryStudyParticipantRepository();
   const projectService = new ProjectService(projectRepository);
   const stageService = new StageService(stageRepository, projectRepository);
   const taskService = new ProjectTaskService(taskRepository, stageRepository, projectRepository);
@@ -37,18 +45,26 @@ export function makeServices() {
     studySummaryRepository,
     studySessionRepository,
   );
+  const studyReportService = new StudyReportService(
+    studyReportRepository,
+    studyParticipantRepository,
+    studySessionRepository,
+  );
   return {
     projectRepository,
     stageRepository,
     taskRepository,
     studySessionRepository,
     studySummaryRepository,
+    studyReportRepository,
+    studyParticipantRepository,
     projectService,
     stageService,
     taskService,
     projectStatusService,
     studySessionService,
     studySummaryService,
+    studyReportService,
   };
 }
 
@@ -146,5 +162,39 @@ export function makeStudySummary(overrides: Partial<StudySummary> = {}): StudySu
     confirmedByUserAt: overrides.confirmedByUserAt ?? now,
     createdAt: overrides.createdAt ?? now,
     updatedAt: overrides.updatedAt ?? now,
+  };
+}
+
+export function makeStudyParticipant(
+  overrides: Partial<StudyParticipant> = {},
+): StudyParticipant {
+  const now = new Date().toISOString();
+  return {
+    studySessionId: overrides.studySessionId ?? uuid(),
+    actorId: overrides.actorId ?? uuid(),
+    joinedAt: overrides.joinedAt ?? now,
+    lastActiveAt: overrides.lastActiveAt ?? now,
+  };
+}
+
+export function makeStudyReport(overrides: Partial<StudyReport> = {}): StudyReport {
+  const now = new Date().toISOString();
+  return {
+    id: overrides.id ?? uuid(),
+    studySessionId: overrides.studySessionId ?? uuid(),
+    actorId: overrides.actorId ?? uuid(),
+    sequenceNumber: overrides.sequenceNumber ?? 1,
+    content: overrides.content ?? 'AI 学习报告',
+    submittedAt: overrides.submittedAt ?? now,
+  };
+}
+
+export function makeActorContext(
+  overrides: Partial<AuthenticatedAiActorContext> = {},
+): AuthenticatedAiActorContext {
+  return {
+    actorId: overrides.actorId ?? uuid(),
+    actorCode: overrides.actorCode ?? 'ai-actor',
+    actorType: overrides.actorType ?? 'resident_ai',
   };
 }
