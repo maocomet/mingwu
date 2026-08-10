@@ -11,6 +11,7 @@ function setup() {
     taskService,
     projectStatusService,
     studySessionService,
+    studySessionDetailService,
     studySummaryService,
   } = makeServices();
   const app = buildApp({
@@ -20,6 +21,7 @@ function setup() {
     taskService,
     projectStatusService,
     studySessionService,
+    studySessionDetailService,
     studySummaryService,
   });
   return { app, config };
@@ -64,6 +66,7 @@ describe('health endpoints', () => {
     taskService,
     projectStatusService,
     studySessionService,
+    studySessionDetailService,
     studySummaryService,
   } = makeServices();
     const app = buildApp({
@@ -73,6 +76,7 @@ describe('health endpoints', () => {
       taskService,
       projectStatusService,
       studySessionService,
+      studySessionDetailService,
       studySummaryService,
       readinessChecks: [
         { name: 'database', check: async () => ({ ok: true }) },
@@ -94,6 +98,7 @@ describe('health endpoints', () => {
     taskService,
     projectStatusService,
     studySessionService,
+    studySessionDetailService,
     studySummaryService,
   } = makeServices();
     const app = buildApp({
@@ -103,6 +108,7 @@ describe('health endpoints', () => {
       taskService,
       projectStatusService,
       studySessionService,
+      studySessionDetailService,
       studySummaryService,
       readinessChecks: [
         { name: 'database', check: async () => ({ ok: true }) },
@@ -129,6 +135,7 @@ describe('health endpoints', () => {
     taskService,
     projectStatusService,
     studySessionService,
+    studySessionDetailService,
     studySummaryService,
   } = makeServices();
     const app = buildApp({
@@ -138,6 +145,7 @@ describe('health endpoints', () => {
       taskService,
       projectStatusService,
       studySessionService,
+      studySessionDetailService,
       studySummaryService,
       readinessChecks: [
         { name: 'database', check: async () => ({ ok: true }) },
@@ -167,6 +175,7 @@ describe('health endpoints', () => {
     taskService,
     projectStatusService,
     studySessionService,
+    studySessionDetailService,
     studySummaryService,
   } = makeServices();
     const app = buildApp({
@@ -176,6 +185,7 @@ describe('health endpoints', () => {
       taskService,
       projectStatusService,
       studySessionService,
+      studySessionDetailService,
       studySummaryService,
       readinessChecks: [
         { name: 'database', check: async () => ({ ok: true }) },
@@ -202,6 +212,7 @@ describe('health endpoints', () => {
     taskService,
     projectStatusService,
     studySessionService,
+    studySessionDetailService,
     studySummaryService,
   } = makeServices();
     const app = buildApp({
@@ -211,6 +222,7 @@ describe('health endpoints', () => {
       taskService,
       projectStatusService,
       studySessionService,
+      studySessionDetailService,
       studySummaryService,
       readyzTimeoutMs: 50,
       readinessChecks: [

@@ -13,6 +13,7 @@ import { StageService } from '../src/application/stage/stage-service.js';
 import { ProjectTaskService } from '../src/application/project-task/project-task-service.js';
 import { ProjectStatusService } from '../src/application/project-status/project-status-service.js';
 import { StudySessionService } from '../src/application/study-session/study-session-service.js';
+import { StudySessionDetailService } from '../src/application/study-session-detail/study-session-detail-service.js';
 import { StudySummaryService } from '../src/application/study-summary/study-summary-service.js';
 import { StudyReportService } from '../src/application/study-report/study-report-service.js';
 import { InMemoryProjectRepository } from '../src/infrastructure/repositories/in-memory-project-repository.js';
@@ -50,6 +51,11 @@ export function makeServices() {
     studyParticipantRepository,
     studySessionRepository,
   );
+  const studySessionDetailService = new StudySessionDetailService(
+    studySessionService,
+    studySummaryRepository,
+    studyReportService,
+  );
   return {
     projectRepository,
     stageRepository,
@@ -63,6 +69,7 @@ export function makeServices() {
     taskService,
     projectStatusService,
     studySessionService,
+    studySessionDetailService,
     studySummaryService,
     studyReportService,
   };

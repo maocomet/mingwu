@@ -5,7 +5,12 @@ import { buildApp, type AppDeps } from '../src/app.js';
 import type { ProjectStatusService } from '../src/application/project-status/project-status-service.js';
 import { loadConfig } from '../src/config.js';
 import type { McpSessionRegistry } from '../src/mcp/mcp-sessions.js';
-import { makeServices, uuid } from './helpers.js';
+import {
+  makeServices,
+  makeStudyParticipant,
+  makeStudySummary,
+  uuid,
+} from './helpers.js';
 
 type App = ReturnType<typeof buildApp>;
 
@@ -24,6 +29,7 @@ function setup(logger?: AppDeps['logger']) {
     taskService: services.taskService,
     projectStatusService: services.projectStatusService,
     studySessionService: services.studySessionService,
+    studySessionDetailService: services.studySessionDetailService,
     studySummaryService: services.studySummaryService,
     logger,
   });
@@ -114,7 +120,7 @@ async function createProjectWithData(app: App): Promise<{ projectId: string; sta
 }
 
 describe('MCP Streamable HTTP via /mcp', () => {
-  it('initialize establishes a session; tools/list exposes exactly three read-only tools', async () => {
+  it('initialize establishes a session; tools/list exposes exactly four read-only tools', async () => {
     const { app } = setup();
     try {
       const { sessionId, protocolVersion } = await initialize(app);
@@ -136,6 +142,7 @@ describe('MCP Streamable HTTP via /mcp', () => {
         'project_get_stage',
         'project_get_status',
         'project_list_stages',
+        'study_get_session',
       ]);
       for (const tool of tools) {
         expect(tool.description).toContain('只读');
@@ -202,6 +209,78 @@ describe('MCP Streamable HTTP via /mcp', () => {
       });
       const stage = JSON.parse(get.json().result.content[0].text) as { id: string };
       expect(stage.id).toBe(stageId);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('study_get_session returns the aggregated study data and controlled errors over HTTP', async () => {
+    const { app, studySummaryRepository, studyReportRepository, studyParticipantRepository } = setup();
+    try {
+      // 通过 App API 创建会话（MCP 与 App 共享同一仓储，互相可见）。
+      const created = await app.inject({
+        method: 'POST',
+        url: '/api/v1/study-sessions',
+        payload: { id: uuid(), timerMode: 'count_up' },
+      });
+      expect(created.statusCode).toBe(201);
+      const studySessionId = (created.json() as { id: string }).id;
+      const actorA = uuid();
+      await studyReportRepository.appendReport({
+        id: uuid(),
+        studySessionId,
+        actorId: actorA,
+        content: 'HTTP 学习报告',
+        submittedAt: '2026-01-01T08:00:00.000Z',
+      });
+      await studyParticipantRepository.upsert(
+        makeStudyParticipant({
+          studySessionId,
+          actorId: actorA,
+          joinedAt: '2026-01-01T08:00:00.000Z',
+          lastActiveAt: '2026-01-01T08:00:00.000Z',
+        }),
+      );
+      await studySummaryRepository.createIfAbsent(
+        makeStudySummary({ studySessionId, content: 'HTTP 正式总结' }),
+      );
+
+      const init = await initialize(app);
+      const call = await mcpPost(app, init.sessionId, init.protocolVersion, {
+        jsonrpc: '2.0',
+        id: 15,
+        method: 'tools/call',
+        params: { name: 'study_get_session', arguments: { session_id: studySessionId } },
+      });
+      expect(call.statusCode).toBe(200);
+      const parsed = JSON.parse(call.json().result.content[0].text) as {
+        session: { id: string };
+        summary: unknown;
+        participants: unknown[];
+        reports: unknown[];
+      };
+      expect(parsed.session.id).toBe(studySessionId);
+      expect(parsed.summary).toBeTruthy();
+      expect(parsed.participants).toHaveLength(1);
+      expect(parsed.reports).toHaveLength(1);
+
+      const unknown = await mcpPost(app, init.sessionId, init.protocolVersion, {
+        jsonrpc: '2.0',
+        id: 16,
+        method: 'tools/call',
+        params: { name: 'study_get_session', arguments: { session_id: uuid() } },
+      });
+      expect(unknown.json().result.isError).toBe(true);
+      expect(unknown.json().result.content[0].text).toBe('自习记录不存在');
+
+      const invalid = await mcpPost(app, init.sessionId, init.protocolVersion, {
+        jsonrpc: '2.0',
+        id: 17,
+        method: 'tools/call',
+        params: { name: 'study_get_session', arguments: { session_id: 'not-a-uuid' } },
+      });
+      expect(invalid.json().result.isError).toBe(true);
+      expect(invalid.json().result.content[0].text).toContain('Invalid uuid');
     } finally {
       await app.close();
     }
@@ -477,6 +556,7 @@ describe('MCP Streamable HTTP via /mcp', () => {
       taskService: services.taskService,
       projectStatusService: throwingStatus,
       studySessionService: services.studySessionService,
+      studySessionDetailService: services.studySessionDetailService,
     studySummaryService: services.studySummaryService,
       logger: capture.logger,
     });
@@ -514,6 +594,7 @@ describe('MCP Streamable HTTP via /mcp', () => {
       taskService: services.taskService,
       projectStatusService: services.projectStatusService,
       studySessionService: services.studySessionService,
+      studySessionDetailService: services.studySessionDetailService,
     studySummaryService: services.studySummaryService,
       logger: { level: 'silent' },
     });

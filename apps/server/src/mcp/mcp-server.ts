@@ -2,8 +2,10 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { ProjectStatusService } from '../application/project-status/project-status-service.js';
 import type { StageService } from '../application/stage/stage-service.js';
+import type { StudySessionDetailService } from '../application/study-session-detail/study-session-detail-service.js';
 import { ProjectNotFoundError } from '../domain/project/errors.js';
 import { StageNotFoundError } from '../domain/stage/errors.js';
+import { StudySessionNotFoundError } from '../domain/study-session/errors.js';
 
 /**
  * 服务日志最小接口。只记录脱敏信息，绝不输出完整请求头或客户端提交的秘密。
@@ -15,6 +17,7 @@ export interface McpLogger {
 export interface McpServerDeps {
   projectStatusService: ProjectStatusService;
   stageService: StageService;
+  studySessionDetailService: StudySessionDetailService;
   serviceName: string;
   serviceVersion: string;
   logger: McpLogger;
@@ -25,6 +28,7 @@ const uuidField = (description: string) => z.string().uuid().describe(descriptio
 const statusInputSchema = z.object({ project_id: uuidField('项目 UUID') }).strict();
 const listStagesInputSchema = z.object({ project_id: uuidField('项目 UUID') }).strict();
 const getStageInputSchema = z.object({ stage_id: uuidField('关卡 UUID') }).strict();
+const getStudySessionInputSchema = z.object({ session_id: uuidField('学习会话 UUID') }).strict();
 
 /** 业务错误转换为稳定、不泄露堆栈/内部配置/请求头的 MCP 错误结果。 */
 function toolErrorResult(message: string) {
@@ -49,7 +53,7 @@ function textContent(value: unknown) {
 }
 
 /**
- * 构建一个全新的 MCP Server 实例并注册本批三个只读工具。
+ * 构建一个全新的 MCP Server 实例并注册本批四个只读工具。
  * 每个 MCP session 都必须使用独立的 Server 实例（SDK 的 Server 一次只安全地
  * 连接一个 transport，不能跨 session 共享临时协议状态）；本工厂只依赖共享的
  * 只读应用服务，不复制业务算法、不回调自身 HTTP 接口。
@@ -113,6 +117,28 @@ export function buildMcpServer(deps: McpServerDeps): McpServer {
       } catch (err) {
         if (err instanceof StageNotFoundError) {
           return toolErrorResult('关卡不存在');
+        }
+        return unexpectedError(deps, err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'study_get_session',
+    {
+      title: 'Get study session detail',
+      description:
+        '只读：返回单次学习会话的当前数据聚合（会话、用户总结、参与 AI 参与者、AI 学习报告）。' +
+        '会话不存在时明确报错；尚无总结时 summary 为 null，无参与者 / 无报告时为空数组。不会修改任何学习数据。',
+      inputSchema: getStudySessionInputSchema,
+    },
+    async ({ session_id }) => {
+      try {
+        const detail = await deps.studySessionDetailService.getDetail(session_id);
+        return textContent(detail);
+      } catch (err) {
+        if (err instanceof StudySessionNotFoundError) {
+          return toolErrorResult('自习记录不存在');
         }
         return unexpectedError(deps, err);
       }

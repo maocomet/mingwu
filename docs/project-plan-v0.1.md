@@ -228,7 +228,7 @@ Windows App
 - [ ] task_complete
 - [ ] study_get_current_session
 - [ ] study_append_report
-- [ ] study_get_session
+- [x] study_get_session
 - [ ] asset_list
 - [ ] asset_get
 - [ ] 根据实际使用情况删除冗余 MCP Tool

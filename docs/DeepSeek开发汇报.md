@@ -3338,3 +3338,255 @@ PUT 使用严格白名单请求体：
 - PostgreSQL 阶段仍必须使用同一事务完成序号分配、报告插入与 Participant upsert。
 
 **检查点 #13 已完成，可以进入下一批。**
+
+---
+
+## 小喵下发任务 #14 · MCP `study_get_session` 只读查询 · 2026-08-10
+
+### 本批唯一候选计划项
+
+- [ ] `study_get_session`
+
+本批只实现一个只读 MCP 工具：按 `Session ID` 查询已有的 Study Session 及当前已经具备的关联数据。不要实现报告写入，不要申报“AI 追加自己的报告”，也不要申报“查询单次 Session 完整详情”。
+
+### 实现范围
+
+1. 在现有 MCP Server 中注册 `study_get_session`：
+   - 输入只允许 `{ session_id: UUID }`，必须沿用严格 schema，拒绝未知字段与非 UUID；
+   - 不接受 `actorId`、`actorCode`、`actorType`、token、session identity 等任何身份字段；
+   - MCP session id 继续只表示临时协议连接，不得当作 AI Actor 身份。
+2. 返回当前已经实现的数据聚合：
+   - `session`：完整 StudySession；
+   - `summary`：已有则返回 StudySummary，没有则明确返回 `null`；
+   - `participants`：StudyParticipant 数组，排序必须稳定为 `joinedAt ASC, actorId ASC`；
+   - `reports`：StudyReport 数组，排序必须稳定为 `submittedAt ASC, actorId ASC, sequenceNumber ASC`。
+3. 聚合必须复用现有应用服务 / 领域仓储语义，不通过 HTTP 回调自己，不复制 Session、Summary、Report 的业务算法：
+   - 必须先确认 Session 存在；未知 Session 返回受控 MCP `isError` 结果“自习记录不存在”；
+   - Summary 不存在是正常状态，返回 `null`，不能把它当错误；
+   - 未知异常沿用现有脱敏策略：响应只给通用内部错误，日志不得输出原始 message、堆栈、请求正文、身份或秘密。
+4. 将 Study Session / Summary / Report 所需服务正确装配进每个独立 MCP Server 实例；生产入口与测试 helper 必须共享同一组内存仓储，不能为了 MCP 另建一套看不见现有数据的仓储。
+5. 保持本工具绝对只读：调用前后所有相关仓储内容、revision / version、时间戳与报告序号均不得改变。
+
+### 契约边界
+
+- 本批可以新增一个清晰的 `StudySessionMcpDetail`（或等价命名）响应契约，但只包含目前真实存在的四部分；不要伪造音乐记录、AI 显示名、报告提交状态或其他尚未实现的数据。
+- `participants` 只代表真实参与过的 Actor；没有参与者 / 报告时返回空数组。
+- 本批验收通过后最多只勾选 MCP 工具项 `study_get_session`。
+- UI 计划项“查询单次 Session 完整详情”仍保持未勾选，因为音乐关联、Actor 展示信息等完整详情尚未完成。
+- `AI 追加自己的报告` 与 MCP `study_append_report` 仍保持未勾选；不得新增任何公开写入口。
+
+### 必须测试
+
+- 官方 MCP Client + InMemoryTransport：工具列表由 3 个变为准确的 4 个，并包含 `study_get_session`；
+- 已有 Session 且四部分数据齐全时，返回内容与稳定排序正确；
+- Summary 缺失返回 `null`；无参与者 / 报告返回空数组；
+- 未知 Session 返回受控 `isError`；非 UUID、未知字段严格拒绝；
+- 注入含连接串 / 密码文字的未知异常，响应与日志均不泄露秘密；
+- 连续调用及并发只读调用不修改任何仓储数据；
+- `/mcp` 真实 HTTP 冒烟覆盖初始化、工具发现、调用、关闭，并确认连接关闭后 session registry 清理；
+- 既有三个 MCP 工具、项目 / 关卡 / 任务 / Study Session / Summary / Report 测试全部无回归。
+
+### 边界要求
+
+- 只做本批；不要开始 `study_append_report`、认证、OAuth、数据库、Migration、前端、部署或 VPS 工作；
+- 不修改计划文档复选框，由小喵验收后统一勾选；
+- 不执行 Git / GitHub 操作；
+- 不读取或修改 `.claude/`、`ui素材mingwu/` 等无关目录；
+- 完成后在本文件末尾追加“检查点 #14”，列出候选项、设计、文件清单、真实测试与未完成边界，然后暂停等待小喵审核。
+
+---
+
+## 检查点 #14 · MCP `study_get_session` 只读查询 · 2026-08-10
+
+### 本批次目标
+
+在现有 MCP Server 中注册第四个只读工具 `study_get_session`：按 `{ session_id: UUID }` 查询已有 Study Session 及当前已具备的关联数据（完整 Session、可为 null 的 Summary、按稳定顺序排列的 Participants 与 Reports）。本批只做只读聚合，不实现报告写入、不申报“AI 追加自己的报告”、不申报“查询单次 Session 完整详情”。
+
+### 候选完成的计划项（原文，未打勾）
+
+- [ ] `study_get_session`（docs/project-plan-v0.1.md line 231）
+
+### 实际完成内容
+
+- 契约层：新增 `packages/contracts/src/study-session-detail.ts`（`StudySessionDetail` 接口 + `studySessionDetailJsonSchema`，组合 studySessionJsonSchema / studySummaryJsonSchema / studyParticipantJsonSchema / studyReportJsonSchema；summary 用 `anyOf` 显式允许 `null`），并从 `packages/contracts/src/index.ts` 导出。
+- 应用层：新增 `StudySessionDetailService`（`apps/server/src/application/study-session-detail/`）：先 `sessionService.getById`（先确认 Session 存在，未知抛 `StudySessionNotFoundError`），再 `summaryRepository.findByStudySessionId`（无总结返回 null），再 `reportService.listParticipants / listReports`（稳定排序复用既有实现）。只调用只读方法与 null 查询，不回调自身 HTTP、不复制业务算法。
+- MCP 层：`mcp-server.ts` 的 `McpServerDeps` 增加 `studySessionDetailService`，注册 `study_get_session`（`getStudySessionInputSchema = z.object({ session_id: uuidField }).strict()`）；`StudySessionNotFoundError` → 受控 `isError`“自习记录不存在”，其余未知异常走既有 `unexpectedError`（响应“内部错误”，日志只记 `errType`）。
+- 装配：`app.ts` AppDeps 增加字段并传入 `McpSessionRegistry`；`index.ts` 生产入口补齐 StudyReport / Participant 仓储与服务并构造 detail service；`test/helpers.ts` `makeServices` 同步装配并返回；全部 buildApp 调用方与 buildMcpServer 测试统一注入。
+- 测试：新增 detail 服务（6）与 detail 契约（4）测试；mcp-protocol 8→14、mcp-http 16→17、smoke 工具数 3→4 且真实 socket 调用 study_get_session。
+
+### 新增、修改、删除的文件清单
+
+新增：
+- packages/contracts/src/study-session-detail.ts
+- apps/server/src/application/study-session-detail/study-session-detail-service.ts
+- apps/server/test/study-session-detail-service.test.ts
+- apps/server/test/study-session-detail-contract.test.ts
+
+修改：
+- packages/contracts/src/index.ts
+- apps/server/src/mcp/mcp-server.ts
+- apps/server/src/app.ts
+- apps/server/src/index.ts
+- apps/server/test/helpers.ts
+- apps/server/test/mcp-protocol.test.ts
+- apps/server/test/mcp-http.test.ts
+- apps/server/test/mcp-http-smoke.test.ts
+- apps/server/test/health.test.ts
+- apps/server/test/project-api.test.ts
+- apps/server/test/project-status-api.test.ts
+- apps/server/test/project-task-api.test.ts
+- apps/server/test/stage-api.test.ts
+- apps/server/test/study-session-api.test.ts
+- apps/server/test/study-summary-api.test.ts
+
+删除：无。
+
+### 关键设计决定及其依据
+
+1. **新响应契约 `StudySessionDetail`（等价任务允许的 `StudySessionMcpDetail`）**：只含 session / summary / participants / reports 四部分，全部来自现有真实数据模型；不伪造音乐记录、AI 显示名、报告提交状态等尚未实现的数据。
+2. **复用而非复制**：Session 存在性、Summary 查询、Participants / Reports 稳定排序全部复用 `StudySessionService.getById`、`StudySummaryRepository.findByStudySessionId`、`StudyReportService.listParticipants / listReports`，不通过 HTTP 回调自己，不复制业务算法；顺序语义与既有 Report / Participant 服务保持一致。
+3. **Summary 缺失不是错误**：只有 Session 存在性决定工具成败；无总结返回 `null`，无参与者 / 报告返回空数组。
+4. **严格输入**：`{ session_id: UUID }`，`.strict()` 拒绝未知字段（含 `actorId / actorCode / actorType / token` 等身份字段）；MCP session id 继续只表示临时协议连接，绝非 AI Actor 身份。
+5. **脱敏不变式**：未知异常沿用既有 `unexpectedError`，日志只记录 `errType`，响应只给通用“内部错误”；测试注入含 `password=TEST_SECRET` 的异常，响应与日志均不泄露。
+6. **绝对只读**：detail 服务只调用只读查询；仓储返回防御性拷贝；测试断言调用前后 Session / Summary / Participant / Report 仓储内容、version / revision、时间戳与报告序号不变（含并发调用）。
+7. **装配一致性**：生产入口与测试 helper 共享同一组内存仓储，每个独立 MCP Server 实例都注入同一批服务，避免“MCP 看不到 App 写入的数据”。
+
+### 执行过的测试或检查、命令与真实结果
+
+- `cd apps/server && npm run typecheck`：通过（tsc --noEmit 无错误）。
+- 新增测试：
+  - `npx vitest run test/study-session-detail-service.test.ts`：**6/6 通过**（聚合 / summary null / 空数组 / 404 / 参与排序 / 报告排序 / 只读并发）。
+  - `npx vitest run test/study-session-detail-contract.test.ts`：**4/4 通过**。
+- `cd apps/server && npx vitest run`（全量）：29 个测试文件 **595/595 通过**（上批 578 + 本批 17）。
+- 真实 HTTP 冒烟：`npx vitest run test/mcp-http-smoke.test.ts`：**1/1 通过**（真实 socket 完成 initialize / tools/list 4 个工具 / 调用 project 与 study 工具 / 双客户端 session 隔离 / DELETE 清理 / app.close 后 registry 清空）。
+- 真实 NUL 字节扫描（node 脚本遍历 apps/server 与 packages/contracts 全部 .ts）：**TOTAL NUL: 0**。
+- `git diff --check`：exit 0，除 Windows LF→CRLF 提示外无空白错误。
+
+### 未完成内容、已知问题和风险
+
+- 未注册任何报告写入入口：`study_append_report` 与“AI 追加自己的报告”继续保持未勾选。
+- “查询单次 Session 完整详情”继续保持未勾选：音乐关联、AI 展示信息等完整详情尚未实现，本批只返回四部分现有数据。
+- 真实 OAuth / MCP Actor 认证未接入：`actorId` 目前来自测试构造的受信上下文，不代表真实认证。
+- 内存仓储为接口开发用；PostgreSQL 阶段与数据库迁移未在本批进行。
+- 工作区另有上批汇报与 `ui素材mingwu/` 等既有未提交内容，本批未触碰（保留原状）。
+
+### 是否涉及数据库、身份权限、密钥、外部服务或破坏性变化
+
+- 数据库 / Migration：否（未建迁移）。
+- 身份认证 / 权限 / 密钥：否（工具不接受任何身份字段，未新增写权限或密钥处理）。
+- 外部服务 / VPS / 部署：否。
+- 破坏性变化：否（保留既有修改，未读取或修改 `.claude/`、`ui素材mingwu/` 等无关目录）。
+
+### 建议下一批任务
+
+由小喵审核后决定。候选方向：接入真实认证后注册 HTTP 追加路由或 MCP `study_append_report`（届时再验收“AI 追加自己的报告”）；或等 Summary / Participant / Report 聚合与展示信息齐备后申报“查询单次 Session 完整详情”。
+
+### 等待小喵审核
+
+等待小喵审核。
+
+---
+
+## 小喵审核结果 #14 · 需要小返修 · 2026-08-10
+
+### 审核结论
+
+主体实现符合任务边界：`study_get_session` 是严格只读工具，输入只接受 `session_id`，与 App 共用仓储；Session / Summary / Participant / Report 四部分聚合、缺失 Summary 返回 null、受控 404、未知异常脱敏以及独立 MCP session 装配均已落实。未发现 `study_append_report`、认证、数据库、前端或 VPS 越界改动。
+
+小喵独立复验结果：
+
+- `npm run typecheck`：通过；
+- `npm test`：29 个测试文件中 **28 个通过、1 个失败；594/595 通过**；
+- 真实 MCP HTTP 冒烟测试通过；
+- server / contracts 全部 `.ts` 文件真实 NUL 字节计数为 0；
+- `git diff --check`：除 Windows LF→CRLF 提示外无空白错误。
+
+因此本轮暂不勾选 `study_get_session`，也不执行 Git 提交或推送。
+
+### 必须返修：排序测试使用随机 UUID，导致结果不稳定
+
+失败用例：`apps/server/test/study-session-detail-service.test.ts` 的 `returns participants sorted by joinedAt ASC then actorId ASC`。
+
+生产代码确实按 `joinedAt ASC, actorId ASC` 排序，但测试用 `uuid()` 随机生成 actorA / actorC，却固定断言 actorA 一定排在 actorC 前。UUID 的字典序随机，本次实际顺序与断言相反，导致全量测试失败；DS 上一次恰好通过只是随机值碰巧满足该顺序。
+
+返修要求：
+
+1. 将该测试改为确定性的排序断言：可以使用三个固定合法 UUID 明确控制字典序，或从同时间参与者的 actorId 计算期望字典序；不得削弱生产排序规则。
+2. 检查本批新增测试中是否还有“随机 UUID 却假定固定字典序”的同类写法，一并修正。
+3. 至少连续运行该目标测试多次，并重新运行 `npm run typecheck` 与全量 `npm test`，确保不再随机失败。
+4. 只返修测试稳定性；不要开始下一批，不修改计划复选框，不做 Git / GitHub / VPS 操作。
+5. 完成后在本文件末尾追加“检查点 #14 返修”，写明修改、重复测试次数与真实结果，然后暂停等待小喵复验。
+
+---
+
+## 检查点 #14 返修 · 排序测试确定性 · 2026-08-10
+
+### 返修目标
+
+修复 `apps/server/test/study-session-detail-service.test.ts` 中 `returns participants sorted by joinedAt ASC then actorId ASC` 测试的偶发失败：测试用随机 UUID 生成 actorA / actorC，却固定断言 actorA 排在 actorC 前，依赖 UUID 字典序巧合，导致全量测试偶发失败。
+
+### 实际修改内容
+
+- 仅修改 `apps/server/test/study-session-detail-service.test.ts` 的 participants 排序测试：
+  - 将随机 `uuid()` 生成的 actorA / actorB / actorC 改为固定合法 UUID（`00000000-0000-4000-8000-000000000001 / 002 / 003`），明确控制字典序（001 < 002 < 003），期望顺序仍为 `[actorA, actorC, actorB]`，与“同时加入按 actorId 升序、更晚加入排后”语义一致。
+  - 补充注释说明为何不能使用随机 uuid()。
+- 生产代码零改动：生产排序逻辑本就正确（按 joinedAt ASC, actorId ASC）。
+
+### 同类写法排查
+
+- 本批新增/修改的 study 相关测试中，其余均无“随机 UUID 却假定固定字典序”的写法：
+  - `returns reports sorted by submittedAt ASC then actorId ASC then sequenceNumber ASC`：r1/r3 同 actorId 同时间戳靠 sequenceNumber 区分，r2 时间戳更晚，排序结果不依赖 actorId 字典序 → 稳定。
+  - `mcp-protocol.test.ts` 的 seedFullStudySession、`mcp-http.test.ts` 与 `mcp-http-smoke.test.ts` 的 study_get_session 测试均为单 actor 或 `toHaveLength(1)`，无排序假设。
+  - `study-session-detail-contract.test.ts` 单 participant / report，无排序断言。
+
+### 执行过的测试或检查、命令与真实结果
+
+- 目标测试连续运行 20 次：`npx vitest run test/study-session-detail-service.test.ts` 每次 **6/6 通过**（20 次无一失败）。
+- `npm run typecheck`：通过（tsc --noEmit 无错误）。
+- 全量测试 `npx vitest run`：29 个测试文件 **595/595 通过**。
+- NUL 字节扫描（git diff 涉及的 .ts 文件）：**TOTAL NUL: 0**。
+- `git diff --check`：exit 0，仅 Windows LF→CRLF 无害提示。
+
+### 未修改项 / 边界
+
+- 仅修测试稳定性，生产代码未动；未勾选任何计划复选框；未执行 Git/GitHub 提交、推送；未触碰 `.claude/`、`ui素材mingwu/`、VPS、数据库。
+- `study_get_session` 仍待小喵复验通过后才可勾选。
+
+### 等待小喵复验
+
+等待小喵复验。
+
+---
+
+## 小喵复验结果 #14 · 通过 · 2026-08-10
+
+### 验收结论
+
+检查点 #14 与排序测试返修通过，计划项 MCP `study_get_session` 由小喵正式勾选。
+
+小喵独立复验结果：
+
+- 目标测试 `study-session-detail-service.test.ts` 连续运行 **5 次，均为 6/6 通过**；
+- `npm run typecheck`：通过；
+- `npm test`：29 个测试文件，**595/595 通过**；
+- 真实 MCP HTTP 冒烟通过；
+- server / contracts 全部 `.ts` 文件真实 NUL 字节计数为 0；
+- `git diff --check`：除 Windows LF→CRLF 提示外无空白错误。
+
+### 验收确认
+
+- `study_get_session` 输入严格限制为 `{ session_id: UUID }`，不接收客户端身份字段；
+- MCP 与 App 共享同一组仓储，可读到已有 Session / Summary / Participant / Report；
+- Summary 缺失返回 null，参与者和报告为空时返回空数组；
+- 参与者与报告排序稳定，返修后的测试不再依赖随机 UUID 字典序；
+- 查询保持只读，重复与并发调用不会改变正式数据；
+- 未知 Session 与未知内部错误均为受控、脱敏结果；
+- 未新增 `study_append_report` 或其他写入口。
+
+### 验收边界
+
+- 本次只勾选 MCP `study_get_session`；
+- “AI 追加自己的报告”、MCP `study_append_report` 与“查询单次 Session 完整详情”继续保持未勾选；
+- 真实 Actor 认证、OAuth、PostgreSQL、前端与部署均未完成。
+
+**检查点 #14 已完成，可以进入下一批。**
