@@ -35,6 +35,7 @@ describe('MCP Streamable HTTP real-HTTP smoke (127.0.0.1, ephemeral port)', () =
       projectStatusService: services.projectStatusService,
       studySessionService: services.studySessionService,
       studySessionDetailService: services.studySessionDetailService,
+    studySessionCurrentService: services.studySessionCurrentService,
     studySummaryService: services.studySummaryService,
     });
     await app.listen({ host: '127.0.0.1', port: 0 });
@@ -95,7 +96,9 @@ describe('MCP Streamable HTTP real-HTTP smoke (127.0.0.1, ephemeral port)', () =
       expect(stageRes.status).toBe(201);
       const stage = (await stageRes.json()) as { id: string };
 
-      // 真实 HTTP 建学习会话（MCP 与 App 共享同一仓储），播种报告 / 参与 / 总结。
+      // 真实 HTTP 建学习会话（MCP 与 App 共享同一仓储）。创建后是 created 草稿，
+      // 先经真实 socket 验证 study_get_current_session 返回 null；稍后再由服务启动
+      // 为 running 并播种报告 / 参与 / 总结，验证聚合。
       const studyRes = await fetch(`${baseUrl}/api/v1/study-sessions`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -104,24 +107,6 @@ describe('MCP Streamable HTTP real-HTTP smoke (127.0.0.1, ephemeral port)', () =
       expect(studyRes.status).toBe(201);
       const studySessionId = ((await studyRes.json()) as { id: string }).id;
       const actorA = uuid();
-      await services.studyReportRepository.appendReport({
-        id: uuid(),
-        studySessionId,
-        actorId: actorA,
-        content: '冒烟学习报告',
-        submittedAt: '2026-01-01T08:00:00.000Z',
-      });
-      await services.studyParticipantRepository.upsert(
-        makeStudyParticipant({
-          studySessionId,
-          actorId: actorA,
-          joinedAt: '2026-01-01T08:00:00.000Z',
-          lastActiveAt: '2026-01-01T08:00:00.000Z',
-        }),
-      );
-      await services.studySummaryRepository.createIfAbsent(
-        makeStudySummary({ studySessionId, content: '冒烟正式总结' }),
-      );
 
       const mcpUrl = `${baseUrl}/mcp`;
 
@@ -135,6 +120,7 @@ describe('MCP Streamable HTTP real-HTTP smoke (127.0.0.1, ephemeral port)', () =
         'project_get_stage',
         'project_get_status',
         'project_list_stages',
+        'study_get_current_session',
         'study_get_session',
       ]);
 
@@ -158,7 +144,60 @@ describe('MCP Streamable HTTP real-HTTP smoke (127.0.0.1, ephemeral port)', () =
       const stages = JSON.parse(firstText(listResult)) as Array<{ name: string }>;
       expect(stages.map((s) => s.name)).toEqual(['第一关']);
 
-      // 经真实 MCP socket 读取学习会话聚合，App 写入的数据立刻可见。
+      // 会话还是 created 草稿：study_get_current_session 返回 JSON null（正常结果）。
+      const currentNull = await a.client.callTool({
+        name: 'study_get_current_session',
+        arguments: {},
+      });
+      expect(currentNull.isError).not.toBe(true);
+      expect(firstText(currentNull)).toBe('null');
+
+      // 通过应用服务启动为 running 并播种报告 / 参与 / 总结（与 App 共享同一仓储）。
+      let smokeSession = await services.studySessionService.getById(studySessionId);
+      smokeSession = await services.studySessionService.setTask(studySessionId, {
+        expectedVersion: smokeSession.version,
+        taskText: '冒烟学习任务',
+      });
+      await services.studySessionService.startStudySession(studySessionId, {
+        expectedVersion: smokeSession.version,
+      });
+      await services.studyReportRepository.appendReport({
+        id: uuid(),
+        studySessionId,
+        actorId: actorA,
+        content: '冒烟学习报告',
+        submittedAt: '2026-01-01T08:00:00.000Z',
+      });
+      await services.studyParticipantRepository.upsert(
+        makeStudyParticipant({
+          studySessionId,
+          actorId: actorA,
+          joinedAt: '2026-01-01T08:00:00.000Z',
+          lastActiveAt: '2026-01-01T08:00:00.000Z',
+        }),
+      );
+      await services.studySummaryRepository.createIfAbsent(
+        makeStudySummary({ studySessionId, content: '冒烟正式总结' }),
+      );
+
+      // 经真实 MCP socket：study_get_current_session 现在返回 running 会话的四部分聚合。
+      const currentResult = await a.client.callTool({
+        name: 'study_get_current_session',
+        arguments: {},
+      });
+      const current = JSON.parse(firstText(currentResult)) as {
+        session: { id: string; status: string };
+        summary: unknown;
+        participants: unknown[];
+        reports: unknown[];
+      };
+      expect(current.session.id).toBe(studySessionId);
+      expect(current.session.status).toBe('running');
+      expect(current.summary).toBeTruthy();
+      expect(current.participants).toHaveLength(1);
+      expect(current.reports).toHaveLength(1);
+
+      // 经真实 MCP socket 读取指定会话聚合，App 写入的数据立刻可见。
       const studyResult = await a.client.callTool({
         name: 'study_get_session',
         arguments: { session_id: studySessionId },
@@ -183,7 +222,7 @@ describe('MCP Streamable HTTP real-HTTP smoke (127.0.0.1, ephemeral port)', () =
 
       // B 可独立读取数据。
       const bList = await b.client.listTools();
-      expect(bList.tools).toHaveLength(4);
+      expect(bList.tools).toHaveLength(5);
 
       // DELETE 结束 A 的 session；A 立即失效，B 不受影响。
       await a.transport.terminateSession();
@@ -191,7 +230,7 @@ describe('MCP Streamable HTTP real-HTTP smoke (127.0.0.1, ephemeral port)', () =
       expect((app as unknown as { mcpSessions: { size: number } }).mcpSessions.size).toBe(1);
 
       const bAfter = await b.client.listTools();
-      expect(bAfter.tools).toHaveLength(4);
+      expect(bAfter.tools).toHaveLength(5);
 
       await b.client.close();
     } finally {

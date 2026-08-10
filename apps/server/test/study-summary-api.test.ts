@@ -27,6 +27,7 @@ function setup(now?: () => string) {
         )
       : services.studySummaryService,
     studySessionDetailService: services.studySessionDetailService,
+  studySessionCurrentService: services.studySessionCurrentService,
   });
   return { app, services };
 }

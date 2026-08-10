@@ -30,6 +30,7 @@ function setup(logger?: AppDeps['logger']) {
     projectStatusService: services.projectStatusService,
     studySessionService: services.studySessionService,
     studySessionDetailService: services.studySessionDetailService,
+    studySessionCurrentService: services.studySessionCurrentService,
     studySummaryService: services.studySummaryService,
     logger,
   });
@@ -120,7 +121,7 @@ async function createProjectWithData(app: App): Promise<{ projectId: string; sta
 }
 
 describe('MCP Streamable HTTP via /mcp', () => {
-  it('initialize establishes a session; tools/list exposes exactly four read-only tools', async () => {
+  it('initialize establishes a session; tools/list exposes exactly five read-only tools', async () => {
     const { app } = setup();
     try {
       const { sessionId, protocolVersion } = await initialize(app);
@@ -142,12 +143,18 @@ describe('MCP Streamable HTTP via /mcp', () => {
         'project_get_stage',
         'project_get_status',
         'project_list_stages',
+        'study_get_current_session',
         'study_get_session',
       ]);
       for (const tool of tools) {
         expect(tool.description).toContain('只读');
         expect(tool.inputSchema.type).toBe('object');
         expect(tool.inputSchema.additionalProperties).toBe(false);
+      }
+      // 无参工具（严格空对象）没有必填字段；其余工具各有一个必填 UUID 字段。
+      const currentTool = tools.find((t) => t.name === 'study_get_current_session')!;
+      expect(currentTool.inputSchema.required ?? []).toEqual([]);
+      for (const tool of tools.filter((t) => t.name !== 'study_get_current_session')) {
         expect(tool.inputSchema.required).toHaveLength(1);
       }
     } finally {
@@ -557,6 +564,7 @@ describe('MCP Streamable HTTP via /mcp', () => {
       projectStatusService: throwingStatus,
       studySessionService: services.studySessionService,
       studySessionDetailService: services.studySessionDetailService,
+    studySessionCurrentService: services.studySessionCurrentService,
     studySummaryService: services.studySummaryService,
       logger: capture.logger,
     });
@@ -595,6 +603,7 @@ describe('MCP Streamable HTTP via /mcp', () => {
       projectStatusService: services.projectStatusService,
       studySessionService: services.studySessionService,
       studySessionDetailService: services.studySessionDetailService,
+    studySessionCurrentService: services.studySessionCurrentService,
     studySummaryService: services.studySummaryService,
       logger: { level: 'silent' },
     });
@@ -682,5 +691,84 @@ describe('MCP Streamable HTTP via /mcp', () => {
     expect(registryOf(app).size).toBe(2);
     await app.close();
     expect(registryOf(app).size).toBe(0);
+  });
+
+  it('study_get_current_session returns the running aggregation or null over HTTP', async () => {
+    const { app, studySessionService, studyReportRepository, studyParticipantRepository, studySummaryRepository } =
+      setup();
+    try {
+      const init = await initialize(app);
+
+      // 尚无进行中的 Session → JSON null（正常成功结果）。
+      const nullRes = await mcpPost(app, init.sessionId, init.protocolVersion, {
+        jsonrpc: '2.0',
+        id: 21,
+        method: 'tools/call',
+        params: { name: 'study_get_current_session', arguments: {} },
+      });
+      expect(nullRes.statusCode).toBe(200);
+      expect(nullRes.json().result.content[0].text).toBe('null');
+
+      // 通过应用服务创建一个 running Session，并播种聚合数据。
+      let session = (
+        await studySessionService.createStudySession({ id: uuid(), timerMode: 'count_up' })
+      ).studySession;
+      session = await studySessionService.setTask(session.id, {
+        expectedVersion: session.version,
+        taskText: '背单词',
+      });
+      session = await studySessionService.startStudySession(session.id, {
+        expectedVersion: session.version,
+      });
+      await studyReportRepository.appendReport({
+        id: uuid(),
+        studySessionId: session.id,
+        actorId: uuid(),
+        content: 'HTTP 当前报告',
+        submittedAt: '2026-01-01T08:00:00.000Z',
+      });
+      await studyParticipantRepository.upsert(
+        makeStudyParticipant({
+          studySessionId: session.id,
+          actorId: uuid(),
+          joinedAt: '2026-01-01T08:00:00.000Z',
+          lastActiveAt: '2026-01-01T08:00:00.000Z',
+        }),
+      );
+      await studySummaryRepository.createIfAbsent(
+        makeStudySummary({ studySessionId: session.id, content: 'HTTP 当前总结' }),
+      );
+
+      const call = await mcpPost(app, init.sessionId, init.protocolVersion, {
+        jsonrpc: '2.0',
+        id: 22,
+        method: 'tools/call',
+        params: { name: 'study_get_current_session', arguments: {} },
+      });
+      expect(call.statusCode).toBe(200);
+      const parsed = JSON.parse(call.json().result.content[0].text) as {
+        session: { id: string; status: string };
+        summary: unknown;
+        participants: unknown[];
+        reports: unknown[];
+      };
+      expect(parsed.session.id).toBe(session.id);
+      expect(parsed.session.status).toBe('running');
+      expect(parsed.summary).toBeTruthy();
+      expect(parsed.participants).toHaveLength(1);
+      expect(parsed.reports).toHaveLength(1);
+
+      // 严格空对象：任何多余字段（含身份字段）都被拒绝。
+      const forged = await mcpPost(app, init.sessionId, init.protocolVersion, {
+        jsonrpc: '2.0',
+        id: 23,
+        method: 'tools/call',
+        params: { name: 'study_get_current_session', arguments: { actorId: 'forged' } },
+      });
+      expect(forged.json().result.isError).toBe(true);
+      expect(forged.json().result.content[0].text).toContain('Unrecognized key');
+    } finally {
+      await app.close();
+    }
   });
 });

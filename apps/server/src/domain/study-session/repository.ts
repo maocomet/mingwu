@@ -25,4 +25,11 @@ export interface StudySessionRepository {
    * ORDER BY endedAt DESC, id DESC LIMIT n`），而不是全表载入后排序。
    */
   listTerminal(): Promise<StudySession[]>;
+  /**
+   * 列出全部“进行中”的 Session（running / paused），返回深拷贝，顺序不保证。
+   * 稳定选择规则（startedAt DESC → updatedAt DESC → id DESC）由应用服务负责；
+   * PostgreSQL 阶段应改为数据库端 `WHERE status IN ('running', 'paused')` 查询，
+   * 而不是全表载入后过滤。
+   */
+  listInProgress(): Promise<StudySession[]>;
 }

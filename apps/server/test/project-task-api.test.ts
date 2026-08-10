@@ -15,6 +15,7 @@ function setup() {
     projectStatusService,
     studySessionService,
     studySessionDetailService,
+    studySessionCurrentService,
     studySummaryService,
   } = makeServices();
   const app = buildApp({
@@ -25,6 +26,7 @@ function setup() {
     projectStatusService,
     studySessionService,
     studySessionDetailService,
+    studySessionCurrentService,
     studySummaryService,
   });
   return { app, taskRepository };

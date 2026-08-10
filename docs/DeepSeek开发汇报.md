@@ -3590,3 +3590,292 @@ PUT 使用严格白名单请求体：
 - 真实 Actor 认证、OAuth、PostgreSQL、前端与部署均未完成。
 
 **检查点 #14 已完成，可以进入下一批。**
+
+---
+
+## 小喵下发任务 #15 · MCP `study_get_current_session` · 2026-08-10
+
+### 本批唯一候选计划项
+
+- [ ] `study_get_current_session`
+
+本批只增加“查询当前正在自习的 Session”这一项只读能力，不实现报告写入、认证或其他 MCP Tool。
+
+### v0.1 当前 Session 语义
+
+- 只有 `running` 与 `paused` 属于“当前进行中”；`created` 只是未开始草稿，终态 Session 也不属于当前。
+- 没有进行中的 Session 时返回 `null`，这是正常成功结果，不是 404。
+- 现有 API 尚未禁止同时存在多条 running / paused Session。为保持本批只读，不修改开始流程；若出现多条，按 `startedAt DESC → updatedAt DESC → id DESC` 选择最近开始 / 最近更新的那一条，规则必须写进契约注释和测试，不能依赖 Map 插入顺序。
+- running / paused 候选必须拥有可解析的 `startedAt`；脏数据不得被静默选中，应转为受控、脱敏的内部错误。
+
+### 实现范围
+
+1. 为 StudySessionRepository 增加只读的活动 Session 查询能力；内存实现返回防御性拷贝且顺序不作保证，排序与选择规则放在应用服务。
+2. 在应用层实现当前 Session 选择：
+   - 只筛选 running / paused；
+   - 按上述三级规则稳定选择；
+   - 无活动 Session 返回 null；
+   - 选中后复用 `StudySessionDetailService.getDetail(id)` 返回与 `study_get_session` 相同的四部分聚合，不复制 Summary / Participant / Report 逻辑。
+3. 注册 MCP `study_get_current_session`：
+   - 输入必须是严格空对象 `{}`，拒绝任意未知字段，包括身份字段；
+   - 返回 `StudySessionDetail | null`；
+   - 不把 MCP session id 当作 Actor 身份；
+   - 未知异常继续使用现有脱敏策略。
+4. 生产入口、App、每个独立 MCP Server 与测试 helper 必须继续共享同一套仓储 / 服务，不创建平行数据副本。
+5. 保持绝对只读：重复与并发查询不能改变 Session version、时间戳、Summary revision、Participant 或 Report 序号。
+
+### 必须测试
+
+- 官方 MCP Client + InMemoryTransport：工具列表由 4 个变为准确的 5 个；新工具 description 明确“只读”；
+- 严格空输入成功，任何多余字段 / 身份字段均被拒绝；
+- 无活动 Session 返回 JSON `null`；只有 created 或终态时仍返回 null；
+- running 与 paused 均可成为当前 Session，并返回完整四部分现有聚合；
+- 多活动 Session 用固定 UUID 与固定时间覆盖三级排序，证明结果不依赖随机 UUID 或插入顺序；
+- 活动 Session 的 startedAt 非法 / 缺失时返回受控内部错误，响应和日志不泄露内部值；
+- 重复及并发查询前后所有仓储内容完全不变；
+- 真实 `/mcp` HTTP 冒烟覆盖工具发现、无当前返回 null、有当前返回对应聚合、session registry 清理；
+- 既有 4 个 MCP 工具和全量测试无回归。
+
+### 边界要求
+
+- 本批只申报 MCP `study_get_current_session`；不要勾选“查询单次 Session 完整详情”；
+- 不实现 `study_append_report`、“AI 追加自己的报告”、单活动 Session 写入约束、认证、OAuth、数据库、Migration、前端或部署；
+- 不修改计划文档复选框，由小喵验收后统一勾选；
+- 不执行 Git / GitHub / VPS 操作；
+- 不读取或修改 `.claude/`、`ui素材mingwu/` 等无关目录；
+- 完成后在本文件末尾追加“检查点 #15”，列出候选项、选择规则、文件清单、真实测试及边界，然后暂停等待小喵审核。
+
+---
+
+## 检查点 #15 · MCP `study_get_current_session` 只读查询 · 2026-08-10
+
+### 本批次目标
+
+在现有 MCP Server 中注册第五个只读工具 `study_get_current_session`：无输入参数，返回当前正在进行的 Session（running / paused）的四部分聚合；当前没有进行中的 Session 时返回 `null`（正常成功结果，不是错误）。只实现只读“当前 Session”查询，不实现报告写入、单活动写入约束或认证。
+
+### 候选完成的计划项（原文，未打勾）
+
+- [ ] `study_get_current_session`（docs/project-plan-v0.1.md line 231 之后的候选原文）
+
+### 实际完成内容
+
+- 契约：`packages/contracts/src/study-session-detail.ts` 新增 `studySessionCurrentDetailJsonSchema`（`anyOf: [studySessionDetailJsonSchema, { type: 'null' }]`），从 contracts 导出。
+- 领域：`StudySessionRepository` 新增只读 `listInProgress()`（内存实现返回 running / paused 的深拷贝、顺序不保证；PostgreSQL 阶段改 DB 端 `WHERE status IN ('running','paused')`）。
+- 应用：新增 `StudySessionCurrentService`（`apps/server/src/application/study-session-current/`）：
+  - 只筛选 running / paused；created 只是草稿、终态不属于当前；
+  - 无活动 Session 返回 null；
+  - running / paused 候选必须拥有可解析的 startedAt，否则抛 `StudySessionTimeCorruptionError`（受控内部错误，不静默跳过或选中脏数据）；
+  - 多活动按 `startedAt DESC → updatedAt DESC → id DESC` 稳定选择，规则写死在服务且不依赖 Map 插入顺序 / 随机 UUID；
+  - 选中后复用 `StudySessionDetailService.getDetail` 返回四部分聚合，不复制 Summary / Participant / Report 逻辑。
+- MCP：注册 `study_get_current_session`，输入为严格空对象 `z.object({}).strict()`（拒绝任何多余字段，含身份字段）；返回 `StudySessionDetail | null`；未知异常沿用 `unexpectedError` 脱敏（响应通用“内部错误”，日志只记 `errType`）。
+- 装配：`AppDeps` / `McpServerDeps` 增加 `studySessionCurrentService`；生产入口 `index.ts` 与测试 `helpers.ts` 构造并共享同一仓储与服务；全部 buildApp / buildMcpServer 调用点统一注入。
+
+### 新增、修改、删除的文件清单
+
+新增：
+- apps/server/src/application/study-session-current/study-session-current-service.ts
+- apps/server/test/study-session-current-service.test.ts
+
+修改：
+- packages/contracts/src/study-session-detail.ts
+- apps/server/src/domain/study-session/repository.ts
+- apps/server/src/infrastructure/repositories/in-memory-study-session-repository.ts
+- apps/server/src/mcp/mcp-server.ts
+- apps/server/src/app.ts
+- apps/server/src/index.ts
+- apps/server/test/helpers.ts
+- apps/server/test/mcp-protocol.test.ts
+- apps/server/test/mcp-http.test.ts
+- apps/server/test/mcp-http-smoke.test.ts
+- apps/server/test/health.test.ts
+- apps/server/test/project-api.test.ts
+- apps/server/test/project-status-api.test.ts
+- apps/server/test/stage-api.test.ts
+- apps/server/test/project-task-api.test.ts
+- apps/server/test/study-session-api.test.ts
+- apps/server/test/study-summary-api.test.ts
+- apps/server/test/study-session-detail-contract.test.ts
+
+删除：无。
+
+### 关键设计决定及其依据
+
+1. **当前 Session 语义**：只有 running / paused 属于“当前进行中”；created 只是未开始草稿，终态 Session 不属于当前；无进行中返回 `null`，这是正常成功结果，不是 404。
+2. **多活动稳定选择**：v0.1 未禁止多条 running / paused，本批保持只读不改开始流程；出现多条时按 `startedAt DESC → updatedAt DESC → id DESC` 选择最近开始 / 最近更新的那一条，规则写死并用固定 UUID + 固定时间测试覆盖，不依赖随机值或 Map 插入顺序。
+3. **脏数据处理**：running / paused 候选必须拥有可解析的 startedAt；任一候选缺失或非法即视为服务端数据损坏，抛受控内部错误（MCP 层转通用“内部错误”，日志只记 errType），绝不静默丢弃损坏记录或选中脏数据。
+4. **仓储职责收窄**：`listInProgress` 只返回深拷贝、顺序不保证；筛选状态后的排序与校验全部放应用服务，PostgreSQL 阶段改为数据库端查询。
+5. **严格空输入**：工具不需要任何参数，输入 schema 为严格空对象，任何多余字段（含 actorId / actorType / token 等身份字段）都被拒绝；MCP session id 只表示临时协议连接，绝非 AI Actor 身份。
+6. **复用而非复制**：选中后复用 `StudySessionDetailService.getDetail` 返回与 `study_get_session` 相同的四部分聚合，不复制 Summary / Participant / Report 逻辑、不回调自身 HTTP。
+7. **装配一致性**：生产入口、App、每个独立 MCP Server 与测试 helper 共享同一组内存仓储 / 服务，不创建平行数据副本；绝对只读，重复与并发查询不改变任何 version / revision / 时间戳 / 序号。
+
+### 执行过的测试或检查、命令与真实结果
+
+- `cd apps/server && npm run typecheck`：通过（tsc --noEmit 无错误）。
+- 新增测试：
+  - `npx vitest run test/study-session-current-service.test.ts`：**9/9 通过**（无会话 null / 仅 created+终态 null / running 聚合 / paused 选中 / 三级排序 / id 兜底 / startedAt 非法 / startedAt null / 只读并发）。
+  - `npx vitest run test/study-session-detail-contract.test.ts`：**5/5 通过**（新增 current nullable 契约校验）。
+- `cd apps/server && npx vitest run`（全量）：30 个测试文件 **612/612 通过**（上批 595 + 本批 17：current-service +9、detail-contract +1、mcp-protocol +6、mcp-http +1）。
+- MCP 协议（官方 Client + InMemoryTransport）：工具列表 4→5，含 study_get_current_session；严格空输入成功 / 多余字段与身份字段拒绝 / 无活动返回 JSON null / running 返回四部分聚合 / 多活动固定 UUID+时间三级排序 / startedAt 非法返回受控内部错误且日志不泄露 / 只读并发不变。
+- 真实 HTTP 冒烟（`mcp-http-smoke.test.ts`）：真实 socket 完成 initialize / tools/list 5 个工具 / 无当前返回 null / 启动为 running 后返回对应四部分聚合 / 双客户端 session 隔离 / DELETE 清理 / app.close 后 registry 清空。
+- 真实 NUL 字节扫描（git diff 涉及的 .ts 文件）：**TOTAL NUL: 0**。
+- `git diff --check`：exit 0，仅 Windows LF→CRLF 无害提示。
+
+### 未完成内容、已知问题和风险
+
+- 未注册任何报告写入入口：`study_append_report` 与“AI 追加自己的报告”继续保持未勾选。
+- 未实现“单活动 Session 写入约束”：v0.1 只做只读选择最近一条，不禁止同时存在多条 running / paused 的开始流程（保持本批只读）。
+- “查询单次 Session 完整详情”继续保持未勾选：音乐关联、AI 展示信息等完整详情尚未实现。
+- 真实 OAuth / MCP Actor 认证未接入：`actorId` 目前来自测试构造的受信上下文。
+- 内存仓储为接口开发用；PostgreSQL 阶段 `listInProgress` 应改为数据库端 `WHERE status IN ('running','paused')` 查询。
+
+### 是否涉及数据库、身份权限、密钥、外部服务或破坏性变化
+
+- 数据库 / Migration：否（未建迁移）。
+- 身份认证 / 权限 / 密钥：否（工具不接受任何身份字段，未新增写权限或密钥处理）。
+- 外部服务 / VPS / 部署：否。
+- 破坏性变化：否（保留既有修改，未读取或修改 `.claude/`、`ui素材mingwu/` 等无关目录）。
+
+### 建议下一批任务
+
+由小喵审核后决定。候选方向：接入真实认证后注册 HTTP 追加路由或 MCP `study_append_report`（届时再验收“AI 追加自己的报告”）；或等 Summary / Participant / Report 聚合与展示信息齐备后申报“查询单次 Session 完整详情”；或实现单活动写入约束 / 认证中间件。
+
+### 等待小喵审核
+
+等待小喵审核。
+
+---
+
+## 小喵审核结果 #15 · 需要小返修 · 2026-08-10
+
+### 审核结论
+
+本批主体边界正确：`study_get_current_session` 是严格空输入的只读工具；running / paused、无当前返回 null、四部分聚合复用、共享仓储、脏 startedAt 脱敏与 MCP session 隔离均已实现，未出现报告写入、认证、数据库、前端或 VPS 越界。
+
+小喵独立复验结果：
+
+- `npm run typecheck`：通过；
+- `npm test`：30 个测试文件，**612/612 通过**；
+- 真实 MCP HTTP 冒烟通过；
+- server / contracts 全部 `.ts` 文件真实 NUL 字节计数为 0；
+- `git diff --check`：除 Windows LF→CRLF 提示外无空白错误。
+
+但当前选择排序存在一个会选错 Session 的未覆盖边界，因此暂不勾选 `study_get_current_session`，不执行 Git 提交或推送。
+
+### 必须返修：时间字段不能按字符串字典序比较
+
+`StudySessionCurrentService.compareCurrentByNewestFirst` 当前先确认 `startedAt` 可被 `Date.parse` 解析，随后却直接用字符串 `<` 比较 `startedAt` / `updatedAt`。
+
+合法时间字符串的字典序不等于真实时间先后。例如：
+
+- A：`2026-01-01T10:00:00+02:00`，真实时刻为 08:00Z；
+- B：`2026-01-01T09:00:00Z`，真实时刻为 09:00Z。
+
+当前字符串比较会把 A 的 `10:00` 误判为比 B 的 `09:00` 更新，从而返回错误的当前 Session。同一时刻使用不同 offset / 精度表示时，也无法正确进入 updatedAt 与 id 的兜底规则。
+
+### 返修要求
+
+1. 使用 `Date.parse(...)` 得到的 epoch 毫秒比较 `startedAt DESC`，不得比较原始字符串。
+2. `updatedAt DESC` 同样按 epoch 毫秒比较；既然它参与正式选择，必须先验证可解析，非法值按受控时间损坏处理，不能靠字典序或静默兜底。
+3. 两个时间代表同一真实时刻时才进入下一级比较，最终仍以 `id DESC` 稳定兜底。
+4. 增加确定性测试，至少覆盖：
+   - 带时区 offset 的 startedAt 与 Z 时间字典序、时间序相反；
+   - startedAt 为同一真实时刻的不同表示，正确进入 updatedAt；
+   - updatedAt 带 offset，按真实时刻选择；
+   - 非法 updatedAt 返回 `StudySessionTimeCorruptionError`，MCP 响应与日志保持脱敏。
+5. 复验类型检查、目标测试、MCP 协议测试与全量测试；只返修此问题，不开始下一批，不修改计划复选框，不执行 Git / GitHub / VPS 操作。
+6. 完成后在本文件末尾追加“检查点 #15 返修”，写明时间比较方式、测试与真实结果，然后暂停等待小喵复验。
+
+---
+
+## 检查点 #15 返修 · 时间比较改为 epoch 毫秒 · 2026-08-10
+
+### 本批次目标
+
+修复小喵指出的时间比较缺陷：`StudySessionCurrentService.compareCurrentByNewestFirst` 不能再按字符串字典序比较 `startedAt` / `updatedAt`，必须用 `Date.parse(...)` 得到的 epoch 毫秒比较真实时刻；`updatedAt` 参与正式选择，必须先验证可解析。只返修此问题，不开始下一批。
+
+### 候选完成的计划项（原文，未打勾）
+
+- [ ] `study_get_current_session`（docs/project-plan-v0.1.md line 231 之后的候选原文，与检查点 #15 相同；是否勾选仍由小喵验收后决定）
+
+### 实际完成内容
+
+- `apps/server/src/application/study-session-current/study-session-current-service.ts`：
+  - 校验循环扩展：`startedAt` 与 `updatedAt` 都必须可被 `Date.parse` 解析，任一缺失 / 非法即抛 `StudySessionTimeCorruptionError`（受控内部错误），不再只校验 startedAt；
+  - 排序改为按 `Date.parse(...)` epoch 毫秒比较真实时刻：`startedAtMs DESC → updatedAtMs DESC → id DESC`；
+  - 只有两个时间产生相同 epoch 毫秒值（同一真实时刻）时才进入下一级比较，最终以 `id DESC` 稳定兜底；
+  - 排序用 `{ id, startedAtMs, updatedAtMs }` 扁平候选，不污染 `StudySession` 领域对象。
+- 测试新增 5 个（service 层 4 个 + MCP 协议层 1 个），全部固定 UUID 与固定时间、确定性。
+
+### 新增、修改、删除的文件清单
+
+修改：
+- apps/server/src/application/study-session-current/study-session-current-service.ts
+- apps/server/test/study-session-current-service.test.ts（新增 4 个测试）
+- apps/server/test/mcp-protocol.test.ts（新增 1 个测试）
+
+新增：无。删除：无。
+
+### 关键设计决定及其依据
+
+1. **真实时刻优先于字符串字典序**：合法时间字符串的字典序不等于真实时间先后（如 `10:00+02:00` 真实为 08:00Z，早于 `09:00Z`）。排序一律以 `Date.parse` 的 epoch 毫秒为准，同一真实时刻的不同 offset / 精度表示视为平局，才进入下一级比较。
+2. **updatedAt 同等级校验**：updatedAt 与 startedAt 一样参与正式选择，因此同样先验证可解析；非法值按受控时间损坏处理（抛 `StudySessionTimeCorruptionError`），不靠字典序、不静默兜底、不选脏数据。
+3. **id DESC 保持最终兜底**：startedAt 与 updatedAt 都代表同一真实时刻时才进入 id 比较，id 唯一保证全序，选择稳定且不依赖 Map 插入顺序 / 随机 UUID。
+4. **脱敏不变**：受控错误仍经 MCP 层 `unexpectedError` 转通用“内部错误”，日志只记 `errType`，不输出原始 message / 非法时间值 / 身份。
+
+### 执行过的测试或检查、命令与真实结果
+
+- `npm run typecheck -w apps/server`：通过（`tsc --noEmit` 无错误）。
+- `npx vitest run test/study-session-current-service.test.ts test/mcp-protocol.test.ts`：2 个文件 34/34 通过（current-service 13、mcp-protocol 21）。
+- `npm test -w apps/server`（全量）：30 个文件 617/617 通过（612 + 新增 5）。
+- NUL 字节扫描：0 bad files。
+- `git diff --check`：exit 0，仅 Windows LF→CRLF 提示（无害）。
+
+### 未完成内容、已知问题和风险
+
+- 仅返修时间比较；未开始下一批，未修改任何计划复选框。
+- 未执行 Git / GitHub / VPS 操作；未改动 `docs/project-plan-v0.1.md`、`第一关卡完成报告.txt`、`第二关卡报告.txt`。
+
+### 是否涉及数据库、身份权限、密钥、外部服务或破坏性变化
+
+否。纯应用服务排序逻辑与测试修正，不涉及数据库 / Migration、身份认证 / 权限 / 密钥、外部服务或破坏性变化。
+
+### 建议下一批任务
+
+等待小喵复验本返修。复验通过后再由小喵决定是否勾选 `study_get_current_session` 并提交推送；后续批次由小喵在计划 / 汇报中指定。
+
+等待小喵复验。
+
+---
+
+## 小喵复验结果 #15 · 通过 · 2026-08-10
+
+### 验收结论
+
+检查点 #15 与 epoch 时间排序返修通过，计划项 MCP `study_get_current_session` 由小喵正式勾选。
+
+小喵独立复验结果：
+
+- 目标测试与 MCP 协议测试：2 个文件，**34/34 通过**；
+- `npm run typecheck`：通过；
+- `npm test`：30 个测试文件，**617/617 通过**；
+- 真实 MCP HTTP 冒烟通过；
+- server / contracts 全部 `.ts` 文件真实 NUL 字节计数为 0；
+- `git diff --check`：除 Windows LF→CRLF 提示外无空白错误。
+
+### 验收确认
+
+- 当前 Session 只从 running / paused 中选择；created 与终态不参与；
+- 无当前 Session 返回 null；严格空输入拒绝全部多余字段与伪造身份字段；
+- 多活动 Session 按 `startedAt epoch DESC → updatedAt epoch DESC → id DESC` 稳定选择；
+- offset / Z / 不同表示均按真实时刻排序，同一真实时刻才进入下一级；
+- startedAt 或 updatedAt 非法均转为受控、脱敏的时间损坏错误；
+- 选中后复用 `StudySessionDetailService`，重复与并发读取不修改正式数据；
+- 未新增 `study_append_report`、认证或其他写入口。
+
+### 验收边界
+
+- 本次只勾选 MCP `study_get_current_session`；
+- “AI 追加自己的报告”、MCP `study_append_report` 与“查询单次 Session 完整详情”继续保持未勾选；
+- 单活动 Session 写入约束、真实 Actor 认证、OAuth、PostgreSQL、前端与部署仍未实现。
+
+**检查点 #15 已完成，可以进入下一批。**

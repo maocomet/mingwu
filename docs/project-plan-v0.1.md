@@ -226,7 +226,7 @@ Windows App
 - [ ] task_create
 - [ ] task_update
 - [ ] task_complete
-- [ ] study_get_current_session
+- [x] study_get_current_session
 - [ ] study_append_report
 - [x] study_get_session
 - [ ] asset_list

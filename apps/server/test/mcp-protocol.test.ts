@@ -8,6 +8,7 @@ import { buildMcpServer } from '../src/mcp/mcp-server.js';
 import {
   makeServices,
   makeStudyParticipant,
+  makeStudySession,
   makeStudySummary,
   makeTask,
   uuid,
@@ -19,6 +20,7 @@ function buildTestServer() {
     projectStatusService: services.projectStatusService,
     stageService: services.stageService,
     studySessionDetailService: services.studySessionDetailService,
+    studySessionCurrentService: services.studySessionCurrentService,
     serviceName: 'mingwu-server',
     serviceVersion: '0.1.0',
     logger: { error: () => undefined },
@@ -48,7 +50,7 @@ function firstText(result: {
 }
 
 describe('MCP protocol (official Client + InMemoryTransport)', () => {
-  it('initialize succeeds and exposes exactly the four read-only tools with strict schemas', async () => {
+  it('initialize succeeds and exposes exactly the five read-only tools with strict schemas', async () => {
     const { server } = buildTestServer();
     const client = await connectClient(server);
     try {
@@ -57,27 +59,36 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
         'project_get_stage',
         'project_get_status',
         'project_list_stages',
+        'study_get_current_session',
         'study_get_session',
       ]);
       // 每个工具都明确只读。
       for (const tool of tools) {
         expect(tool.description).toContain('只读');
       }
-      // 严格 input schema：禁止未知字段、只允许指定 UUID 字段。
-      const fieldByTool: Record<string, string> = {
+      // 严格 input schema：禁止未知字段。需要 UUID 字段的工具只允许指定字段；
+      // study_get_current_session 是严格空对象（无任何输入参数）。
+      const fieldByTool: Record<string, string | null> = {
         project_get_stage: 'stage_id',
         project_get_status: 'project_id',
         project_list_stages: 'project_id',
         study_get_session: 'session_id',
+        study_get_current_session: null,
       };
       for (const tool of tools) {
-        const field = fieldByTool[tool.name]!;
         expect(tool.inputSchema.type).toBe('object');
         expect(tool.inputSchema.additionalProperties).toBe(false);
-        expect(tool.inputSchema.required).toEqual([field]);
-        const prop = tool.inputSchema.properties?.[field] as Record<string, unknown> | undefined;
-        expect(prop?.type).toBe('string');
-        expect(prop?.format).toBe('uuid');
+        const field = fieldByTool[tool.name]!;
+        if (field === null) {
+          // 严格空对象：SDK 生成 JSON Schema 时会省略空 required 数组。
+          expect(tool.inputSchema.required ?? []).toEqual([]);
+          expect(tool.inputSchema.properties ?? {}).toEqual({});
+        } else {
+          expect(tool.inputSchema.required).toEqual([field]);
+          const prop = tool.inputSchema.properties?.[field] as Record<string, unknown> | undefined;
+          expect(prop?.type).toBe('string');
+          expect(prop?.format).toBe('uuid');
+        }
       }
       // 不存在任何写工具。
       const names = tools.map((t) => t.name);
@@ -343,6 +354,7 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
       projectStatusService: services.projectStatusService,
       stageService: services.stageService,
       studySessionDetailService: throwingDetail,
+      studySessionCurrentService: services.studySessionCurrentService,
       serviceName: 'mingwu-server',
       serviceVersion: '0.1.0',
       logger,
@@ -411,6 +423,7 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
       projectStatusService: throwingStatus,
       stageService: services.stageService,
       studySessionDetailService: services.studySessionDetailService,
+      studySessionCurrentService: services.studySessionCurrentService,
       serviceName: 'mingwu-server',
       serviceVersion: '0.1.0',
       logger,
@@ -468,5 +481,262 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
     expect(await services.projectRepository.findById(project.id)).toEqual(before.project);
     expect(await services.stageRepository.findById(stage.id)).toEqual(before.stage);
     expect(await services.taskRepository.findById(task.id)).toEqual(before.task);
+  });
+
+  /** 直接向仓储播种一条 running / paused 会话，返回 sessionId；固定时间用于确定性排序。 */
+  async function seedInProgress(
+    services: ReturnType<typeof makeServices>,
+    overrides: Parameters<typeof makeStudySession>[0] = {},
+  ): Promise<string> {
+    const defaults = {
+      status: 'running' as const,
+      startedAt: '2026-01-01T08:00:00.000Z',
+      updatedAt: '2026-01-01T08:00:00.000Z',
+    };
+    const { studySession } = await services.studySessionRepository.createIfAbsent(
+      makeStudySession({ ...defaults, ...overrides }),
+    );
+    return studySession.id;
+  }
+
+  it('study_get_current_session returns JSON null when no session is in progress', async () => {
+    const { server, services } = buildTestServer();
+    // 只有 created 草稿与终态，不算进行中。
+    await services.studySessionService.createStudySession({ id: uuid(), timerMode: 'count_up' });
+    const client = await connectClient(server);
+    try {
+      const result = await client.callTool({
+        name: 'study_get_current_session',
+        arguments: {},
+      });
+      expect(result.isError).not.toBe(true);
+      expect(firstText(result)).toBe('null');
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it('study_get_current_session rejects any input fields (strict empty object)', async () => {
+    const { server } = buildTestServer();
+    const client = await connectClient(server);
+    try {
+      const withSessionId = await client.callTool({
+        name: 'study_get_current_session',
+        arguments: { session_id: uuid() },
+      });
+      expect(withSessionId.isError).toBe(true);
+      expect(firstText(withSessionId)).toContain('Unrecognized key');
+
+      const forgedIdentity = await client.callTool({
+        name: 'study_get_current_session',
+        arguments: { actorId: 'forged', actorType: 'resident_ai' },
+      });
+      expect(forgedIdentity.isError).toBe(true);
+      expect(firstText(forgedIdentity)).toContain('Unrecognized key');
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it('study_get_current_session returns the running session four-part aggregation', async () => {
+    const { server, services } = buildTestServer();
+    const sessionId = await seedInProgress(services);
+    const actorId = uuid();
+    await services.studyReportRepository.appendReport({
+      id: uuid(),
+      studySessionId: sessionId,
+      actorId,
+      content: '当前会话报告',
+      submittedAt: '2026-01-01T08:00:00.000Z',
+    });
+    await services.studyParticipantRepository.upsert(
+      makeStudyParticipant({
+        studySessionId: sessionId,
+        actorId,
+        joinedAt: '2026-01-01T08:00:00.000Z',
+        lastActiveAt: '2026-01-01T08:00:00.000Z',
+      }),
+    );
+    await services.studySummaryRepository.createIfAbsent(
+      makeStudySummary({ studySessionId: sessionId, content: '当前总结' }),
+    );
+    const client = await connectClient(server);
+    try {
+      const result = await client.callTool({
+        name: 'study_get_current_session',
+        arguments: {},
+      });
+      expect(result.isError).not.toBe(true);
+      const parsed = JSON.parse(firstText(result)) as {
+        session: { id: string; status: string };
+        summary: unknown;
+        participants: unknown[];
+        reports: unknown[];
+      };
+      expect(parsed.session.id).toBe(sessionId);
+      expect(parsed.session.status).toBe('running');
+      expect(parsed.summary).toBeTruthy();
+      expect(parsed.participants).toHaveLength(1);
+      expect(parsed.reports).toHaveLength(1);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it('study_get_current_session picks the newest by startedAt DESC then updatedAt DESC then id DESC', async () => {
+    const { server, services } = buildTestServer();
+    // 全部固定 UUID 与固定时间：结果不依赖随机值或 Map 插入顺序。
+    await seedInProgress(services, {
+      id: '00000000-0000-4000-8000-000000000001',
+      startedAt: '2026-01-01T08:00:00.000Z',
+      updatedAt: '2026-01-01T08:30:00.000Z',
+    });
+    await seedInProgress(services, {
+      id: '00000000-0000-4000-8000-000000000002',
+      startedAt: '2026-01-01T08:00:00.000Z',
+      updatedAt: '2026-01-01T09:00:00.000Z',
+    });
+    await seedInProgress(services, {
+      id: '00000000-0000-4000-8000-000000000003',
+      status: 'paused',
+      startedAt: '2026-01-01T07:00:00.000Z',
+      updatedAt: '2026-01-01T07:00:00.000Z',
+    });
+    const client = await connectClient(server);
+    try {
+      const result = await client.callTool({
+        name: 'study_get_current_session',
+        arguments: {},
+      });
+      expect(result.isError).not.toBe(true);
+      const parsed = JSON.parse(firstText(result)) as { session: { id: string } };
+      expect(parsed.session.id).toBe('00000000-0000-4000-8000-000000000002');
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it('study_get_current_session surfaces dirty in-progress sessions as a sanitized internal error', async () => {
+    const services = makeServices();
+    const messages: unknown[][] = [];
+    const logger = { error: (...args: unknown[]) => void messages.push(args) };
+    await services.studySessionRepository.createIfAbsent(
+      makeStudySession({
+        id: uuid(),
+        status: 'running',
+        startedAt: 'not-a-time',
+        updatedAt: '2026-01-01T08:00:00.000Z',
+      }),
+    );
+    const server = buildMcpServer({
+      projectStatusService: services.projectStatusService,
+      stageService: services.stageService,
+      studySessionDetailService: services.studySessionDetailService,
+      studySessionCurrentService: services.studySessionCurrentService,
+      serviceName: 'mingwu-server',
+      serviceVersion: '0.1.0',
+      logger,
+    });
+    const client = await connectClient(server);
+    try {
+      const result = await client.callTool({
+        name: 'study_get_current_session',
+        arguments: {},
+      });
+      expect(result.isError).toBe(true);
+      expect(firstText(result)).toBe('内部错误');
+      expect(firstText(result)).not.toContain('not-a-time');
+    } finally {
+      await client.close();
+      await server.close();
+    }
+    const logText = JSON.stringify(messages);
+    expect(logText).toContain('mcp tool internal error');
+    expect(logText).toContain('errType');
+    expect(logText).not.toContain('not-a-time');
+  });
+
+  it('study_get_current_session surfaces an in-progress session with unparseable updatedAt as a sanitized internal error', async () => {
+    const services = makeServices();
+    const messages: unknown[][] = [];
+    const logger = { error: (...args: unknown[]) => void messages.push(args) };
+    // startedAt 合法、updatedAt 非法：updatedAt 参与正式选择，脏数据按受控内部错误处理，
+    // MCP 响应与日志都不得回显非法值本身。
+    await services.studySessionRepository.createIfAbsent(
+      makeStudySession({
+        id: uuid(),
+        status: 'running',
+        startedAt: '2026-01-01T08:00:00.000Z',
+        updatedAt: 'not-a-time',
+      }),
+    );
+    const server = buildMcpServer({
+      projectStatusService: services.projectStatusService,
+      stageService: services.stageService,
+      studySessionDetailService: services.studySessionDetailService,
+      studySessionCurrentService: services.studySessionCurrentService,
+      serviceName: 'mingwu-server',
+      serviceVersion: '0.1.0',
+      logger,
+    });
+    const client = await connectClient(server);
+    try {
+      const result = await client.callTool({
+        name: 'study_get_current_session',
+        arguments: {},
+      });
+      expect(result.isError).toBe(true);
+      expect(firstText(result)).toBe('内部错误');
+      expect(firstText(result)).not.toContain('not-a-time');
+    } finally {
+      await client.close();
+      await server.close();
+    }
+    const logText = JSON.stringify(messages);
+    expect(logText).toContain('mcp tool internal error');
+    expect(logText).toContain('errType');
+    expect(logText).not.toContain('not-a-time');
+  });
+
+  it('study_get_current_session is read-only: repeated and concurrent calls never mutate', async () => {
+    const { server, services } = buildTestServer();
+    const sessionId = await seedInProgress(services);
+    await services.studyReportRepository.appendReport({
+      id: uuid(),
+      studySessionId: sessionId,
+      actorId: uuid(),
+      content: '只读报告',
+      submittedAt: '2026-01-01T08:00:00.000Z',
+    });
+    const before = {
+      session: await services.studySessionRepository.findById(sessionId),
+      summary: await services.studySummaryRepository.findByStudySessionId(sessionId),
+      participants: await services.studyParticipantRepository.listBySession(sessionId),
+      reports: await services.studyReportRepository.listBySession(sessionId),
+    };
+    const client = await connectClient(server);
+    try {
+      await Promise.all([
+        client.callTool({ name: 'study_get_current_session', arguments: {} }),
+        client.callTool({ name: 'study_get_current_session', arguments: {} }),
+        client.callTool({ name: 'study_get_current_session', arguments: {} }),
+      ]);
+      await client.callTool({ name: 'study_get_current_session', arguments: {} });
+    } finally {
+      await client.close();
+      await server.close();
+    }
+    expect(await services.studySessionRepository.findById(sessionId)).toEqual(before.session);
+    expect(await services.studySummaryRepository.findByStudySessionId(sessionId)).toEqual(
+      before.summary,
+    );
+    expect(await services.studyParticipantRepository.listBySession(sessionId)).toEqual(
+      before.participants,
+    );
+    expect(await services.studyReportRepository.listBySession(sessionId)).toEqual(before.reports);
   });
 });

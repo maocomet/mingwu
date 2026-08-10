@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { ProjectStatusService } from '../application/project-status/project-status-service.js';
 import type { StageService } from '../application/stage/stage-service.js';
+import type { StudySessionCurrentService } from '../application/study-session-current/study-session-current-service.js';
 import type { StudySessionDetailService } from '../application/study-session-detail/study-session-detail-service.js';
 import { ProjectNotFoundError } from '../domain/project/errors.js';
 import { StageNotFoundError } from '../domain/stage/errors.js';
@@ -18,6 +19,7 @@ export interface McpServerDeps {
   projectStatusService: ProjectStatusService;
   stageService: StageService;
   studySessionDetailService: StudySessionDetailService;
+  studySessionCurrentService: StudySessionCurrentService;
   serviceName: string;
   serviceVersion: string;
   logger: McpLogger;
@@ -29,6 +31,8 @@ const statusInputSchema = z.object({ project_id: uuidField('项目 UUID') }).str
 const listStagesInputSchema = z.object({ project_id: uuidField('项目 UUID') }).strict();
 const getStageInputSchema = z.object({ stage_id: uuidField('关卡 UUID') }).strict();
 const getStudySessionInputSchema = z.object({ session_id: uuidField('学习会话 UUID') }).strict();
+/** 当前 Session 工具不需要任何输入参数：严格空对象，任何多余字段（含身份字段）都被拒绝。 */
+const getCurrentStudySessionInputSchema = z.object({}).strict();
 
 /** 业务错误转换为稳定、不泄露堆栈/内部配置/请求头的 MCP 错误结果。 */
 function toolErrorResult(message: string) {
@@ -140,6 +144,26 @@ export function buildMcpServer(deps: McpServerDeps): McpServer {
         if (err instanceof StudySessionNotFoundError) {
           return toolErrorResult('自习记录不存在');
         }
+        return unexpectedError(deps, err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'study_get_current_session',
+    {
+      title: 'Get current study session detail',
+      description:
+        '只读：返回当前正在进行的学习会话（running / paused）的四部分数据聚合' +
+        '（会话、用户总结、参与 AI 参与者、AI 学习报告）。' +
+        '当前没有进行中的学习会话时返回 null（正常结果，不是错误）。不会修改任何学习数据。',
+      inputSchema: getCurrentStudySessionInputSchema,
+    },
+    async () => {
+      try {
+        const detail = await deps.studySessionCurrentService.getCurrentDetail();
+        return textContent(detail);
+      } catch (err) {
         return unexpectedError(deps, err);
       }
     },

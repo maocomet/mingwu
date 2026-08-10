@@ -5,6 +5,7 @@ import { StageService } from './application/stage/stage-service.js';
 import { ProjectTaskService } from './application/project-task/project-task-service.js';
 import { ProjectStatusService } from './application/project-status/project-status-service.js';
 import { StudySessionService } from './application/study-session/study-session-service.js';
+import { StudySessionCurrentService } from './application/study-session-current/study-session-current-service.js';
 import { StudySessionDetailService } from './application/study-session-detail/study-session-detail-service.js';
 import { StudySummaryService } from './application/study-summary/study-summary-service.js';
 import { StudyReportService } from './application/study-report/study-report-service.js';
@@ -48,6 +49,10 @@ async function main(): Promise<void> {
     studySummaryRepository,
     studyReportService,
   );
+  const studySessionCurrentService = new StudySessionCurrentService(
+    studySessionRepository,
+    studySessionDetailService,
+  );
   const app = buildApp({
     config,
     projectService,
@@ -56,6 +61,7 @@ async function main(): Promise<void> {
     projectStatusService,
     studySessionService,
     studySessionDetailService,
+    studySessionCurrentService,
     studySummaryService,
   });
 

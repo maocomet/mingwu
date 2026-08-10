@@ -37,3 +37,12 @@ export const studySessionDetailJsonSchema = {
     reports: { type: 'array', items: studyReportJsonSchema },
   },
 } as const;
+
+/**
+ * “当前正在进行的 Session”响应契约：与 study_get_session 相同的四部分聚合，
+ * 或 null（当前没有 running / paused 的 Session，是正常成功结果，不是错误）。
+ * 供 MCP 只读工具 study_get_current_session 使用。
+ */
+export const studySessionCurrentDetailJsonSchema = {
+  anyOf: [studySessionDetailJsonSchema, { type: 'null' }],
+} as const;

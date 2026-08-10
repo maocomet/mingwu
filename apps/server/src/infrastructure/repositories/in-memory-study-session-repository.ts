@@ -43,4 +43,11 @@ export class InMemoryStudySessionRepository implements StudySessionRepository {
       )
       .map((s) => structuredClone(s));
   }
+
+  /** 进行中（running / paused）Session 的只读查询：返回深拷贝，顺序不保证。 */
+  async listInProgress(): Promise<StudySession[]> {
+    return [...this.sessions.values()]
+      .filter((s) => s.status === 'running' || s.status === 'paused')
+      .map((s) => structuredClone(s));
+  }
 }

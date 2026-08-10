@@ -1,6 +1,9 @@
 import { createRequire } from 'node:module';
 import { describe, expect, it } from 'vitest';
-import { studySessionDetailJsonSchema } from '@mingwu/contracts';
+import {
+  studySessionCurrentDetailJsonSchema,
+  studySessionDetailJsonSchema,
+} from '@mingwu/contracts';
 import {
   makeStudyParticipant,
   makeStudyReport,
@@ -57,6 +60,14 @@ describe('StudySessionDetail contract schema', () => {
     const { reports, ...missingReports } = detail();
     expect(validate(missingReports)).toBe(false);
     expect(validate(detail({ extra: 1 }))).toBe(false);
+  });
+
+  it('accepts a full detail or null as the current-session response', () => {
+    const validate = compile({ ...studySessionCurrentDetailJsonSchema });
+    expect(validate(detail())).toBe(true);
+    expect(validate(null)).toBe(true);
+    expect(validate(undefined)).toBe(false);
+    expect(validate({})).toBe(false);
   });
 
   it('rejects invalid nested values: bad uuid session and malformed summary / participant / report', () => {

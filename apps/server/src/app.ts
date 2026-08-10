@@ -9,6 +9,7 @@ import type { StageService } from './application/stage/stage-service.js';
 import type { ProjectTaskService } from './application/project-task/project-task-service.js';
 import type { ProjectStatusService } from './application/project-status/project-status-service.js';
 import type { StudySessionService } from './application/study-session/study-session-service.js';
+import type { StudySessionCurrentService } from './application/study-session-current/study-session-current-service.js';
 import type { StudySessionDetailService } from './application/study-session-detail/study-session-detail-service.js';
 import type { StudySummaryService } from './application/study-summary/study-summary-service.js';
 import {
@@ -71,6 +72,7 @@ export interface AppDeps {
   projectStatusService: ProjectStatusService;
   studySessionService: StudySessionService;
   studySessionDetailService: StudySessionDetailService;
+  studySessionCurrentService: StudySessionCurrentService;
   studySummaryService: StudySummaryService;
   readinessChecks?: ReadinessCheck[];
   /** readyz 单项检查超时毫秒数，默认 2000，测试可注入小值。 */
@@ -133,6 +135,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     projectStatusService: deps.projectStatusService,
     stageService: deps.stageService,
     studySessionDetailService: deps.studySessionDetailService,
+    studySessionCurrentService: deps.studySessionCurrentService,
     serviceName: deps.config.serviceName,
     serviceVersion: deps.config.serviceVersion,
     logger: app.log,
