@@ -109,6 +109,7 @@ export function makeStudySession(overrides: Partial<StudySession> = {}): StudySe
     timerMode: overrides.timerMode ?? 'count_down',
     plannedDurationSeconds: overrides.plannedDurationSeconds ?? null,
     startedAt: overrides.startedAt ?? null,
+    pausedAt: overrides.pausedAt ?? null,
     endedAt: overrides.endedAt ?? null,
     actualDurationSeconds: overrides.actualDurationSeconds ?? 0,
     pausedDurationSeconds: overrides.pausedDurationSeconds ?? 0,

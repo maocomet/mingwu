@@ -708,3 +708,380 @@ describe('POST /api/v1/study-sessions/:id/start', () => {
     expect(latest.json().version).toBe(2);
   });
 });
+
+describe('POST /api/v1/study-sessions/:id/pause', () => {
+  const FIXED_NOW = '2026-01-01T08:00:00.000Z';
+
+  async function createRunning(app: App): Promise<StudySession> {
+    const id = uuid();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/study-sessions',
+      payload: { id, timerMode: 'count_down', taskText: '任务', plannedDurationSeconds: 600 },
+    });
+    const session = res.json();
+    const started = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${id}/start`,
+      payload: { expectedVersion: session.version },
+    });
+    return started.json();
+  }
+
+  it('pauses a running session and writes server-side pausedAt', async () => {
+    const { app } = setup(() => FIXED_NOW);
+    const running = await createRunning(app);
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${running.id}/pause`,
+      payload: { expectedVersion: running.version },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.status).toBe('paused');
+    expect(body.pausedAt).toBe(FIXED_NOW);
+    expect(body.version).toBe(running.version + 1);
+    expect(body.startedAt).toBe(FIXED_NOW);
+  });
+
+  it('returns a stable status-conflict 409 for a non-running session', async () => {
+    const { app } = setup();
+    const id = uuid();
+    await app.inject({
+      method: 'POST',
+      url: '/api/v1/study-sessions',
+      payload: { id, timerMode: 'count_down', taskText: '任务', plannedDurationSeconds: 600 },
+    });
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${id}/pause`,
+      payload: { expectedVersion: 1 },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe('study_session_status_conflict');
+  });
+
+  it('returns a controlled 500 when startedAt is missing (time corruption)', async () => {
+    const { app, services } = setup();
+    const session = makeStudySession({ status: 'running' });
+    await services.studySessionRepository.createIfAbsent(session);
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${session.id}/pause`,
+      payload: { expectedVersion: session.version },
+    });
+    expect(res.statusCode).toBe(500);
+    expect(res.json().error).toBe('study_session_time_corrupt');
+  });
+
+  it('returns a controlled 500 and does not leak the raw bad clock when the server clock is unparseable', async () => {
+    const { app, services } = setup(() => 'not-a-time');
+    const session = makeStudySession({
+      status: 'running',
+      startedAt: '2026-01-01T08:00:00.000Z',
+    });
+    await services.studySessionRepository.createIfAbsent(session);
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${session.id}/pause`,
+      payload: { expectedVersion: session.version },
+    });
+    expect(res.statusCode).toBe(500);
+    expect(res.json().error).toBe('study_session_time_corrupt');
+    expect(JSON.stringify(res.json())).not.toContain('not-a-time');
+  });
+
+  it('returns a stable 409 on a stale expectedVersion', async () => {
+    const { app } = setup();
+    const running = await createRunning(app);
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${running.id}/pause`,
+      payload: { expectedVersion: 99 },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe('study_session_version_conflict');
+  });
+
+  it('returns 404 for an unknown session', async () => {
+    const { app } = setup();
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${uuid()}/pause`,
+      payload: { expectedVersion: 1 },
+    });
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error).toBe('study_session_not_found');
+  });
+
+  it('rejects unknown fields in the body', async () => {
+    const { app } = setup();
+    const running = await createRunning(app);
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${running.id}/pause`,
+      payload: { expectedVersion: running.version, actorId: 'x' },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe('validation_failed');
+  });
+
+  it('rejects a string expectedVersion as a strict type violation', async () => {
+    const { app } = setup();
+    const running = await createRunning(app);
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${running.id}/pause`,
+      payload: { expectedVersion: '1' },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe('validation_failed');
+  });
+
+  it('concurrent pause with the same expectedVersion: exactly one succeeds', async () => {
+    const { app } = setup(() => FIXED_NOW);
+    const running = await createRunning(app);
+    const results = await Promise.all(
+      Array.from({ length: 20 }, () =>
+        app.inject({
+          method: 'POST',
+          url: `/api/v1/study-sessions/${running.id}/pause`,
+          payload: { expectedVersion: running.version },
+        }),
+      ),
+    );
+    expect(results.filter((r) => r.statusCode === 200)).toHaveLength(1);
+    expect(results.filter((r) => r.statusCode === 409)).toHaveLength(19);
+    const latest = await app.inject({ method: 'GET', url: `/api/v1/study-sessions/${running.id}` });
+    expect(latest.json().status).toBe('paused');
+    expect(latest.json().pausedAt).toBe(FIXED_NOW);
+    expect(latest.json().version).toBe(running.version + 1);
+  });
+});
+
+describe('POST /api/v1/study-sessions/:id/resume', () => {
+  const FIXED_NOW = '2026-01-01T08:00:00.000Z';
+
+  async function createPaused(app: App): Promise<StudySession> {
+    const id = uuid();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/study-sessions',
+      payload: { id, timerMode: 'count_down', taskText: '任务', plannedDurationSeconds: 600 },
+    });
+    const session = res.json();
+    const started = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${id}/start`,
+      payload: { expectedVersion: session.version },
+    });
+    const running = started.json();
+    const paused = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${id}/pause`,
+      payload: { expectedVersion: running.version },
+    });
+    return paused.json();
+  }
+
+  it('resumes a paused session and accumulates whole paused seconds', async () => {
+    let current = Date.parse(FIXED_NOW);
+    const clock = () => new Date(current).toISOString();
+    const { app } = setup(clock);
+    const paused = await createPaused(app);
+    expect(paused.pausedAt).toBe(FIXED_NOW);
+    current += 65_900; // 暂停 65.9 秒 → 整秒 65
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${paused.id}/resume`,
+      payload: { expectedVersion: paused.version },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.status).toBe('running');
+    expect(body.pausedAt).toBeNull();
+    expect(body.pausedDurationSeconds).toBe(65);
+    expect(body.startedAt).toBe(FIXED_NOW);
+    expect(body.version).toBe(paused.version + 1);
+  });
+
+  it('accumulates across multiple pause/resume rounds through the HTTP API', async () => {
+    let current = Date.parse(FIXED_NOW);
+    const clock = () => new Date(current).toISOString();
+    const { app } = setup(clock);
+    const id = uuid();
+    await app.inject({
+      method: 'POST',
+      url: '/api/v1/study-sessions',
+      payload: { id, timerMode: 'count_down', taskText: '任务', plannedDurationSeconds: 600 },
+    });
+    await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${id}/start`,
+      payload: { expectedVersion: 1 },
+    });
+    // 第 1 轮：暂停 65.9 秒 → 65
+    await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${id}/pause`,
+      payload: { expectedVersion: 2 },
+    });
+    current += 65_900;
+    let s = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${id}/resume`,
+      payload: { expectedVersion: 3 },
+    });
+    expect(s.json().pausedDurationSeconds).toBe(65);
+    // 第 2 轮：暂停 60 秒 → 累计 125
+    await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${id}/pause`,
+      payload: { expectedVersion: s.json().version },
+    });
+    current += 60_000;
+    s = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${id}/resume`,
+      payload: { expectedVersion: s.json().version + 1 },
+    });
+    expect(s.statusCode).toBe(200);
+    expect(s.json().pausedDurationSeconds).toBe(125);
+    expect(s.json().startedAt).toBe(FIXED_NOW);
+  });
+
+  it('returns a stable status-conflict 409 for a non-paused session', async () => {
+    const { app } = setup();
+    const running = await (async () => {
+      const id = uuid();
+      await app.inject({
+        method: 'POST',
+        url: '/api/v1/study-sessions',
+        payload: { id, timerMode: 'count_down', taskText: '任务', plannedDurationSeconds: 600 },
+      });
+      const started = await app.inject({
+        method: 'POST',
+        url: `/api/v1/study-sessions/${id}/start`,
+        payload: { expectedVersion: 1 },
+      });
+      return started.json();
+    })();
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${running.id}/resume`,
+      payload: { expectedVersion: running.version },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe('study_session_status_conflict');
+  });
+
+  it('returns a controlled 500 and keeps the store unchanged when pausedAt is before startedAt', async () => {
+    const { app, services } = setup(() => FIXED_NOW);
+    const session = makeStudySession({
+      status: 'paused',
+      startedAt: '2026-01-01T09:00:00.000Z',
+      pausedAt: '2026-01-01T08:00:00.000Z',
+    });
+    await services.studySessionRepository.createIfAbsent(session);
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${session.id}/resume`,
+      payload: { expectedVersion: session.version },
+    });
+    expect(res.statusCode).toBe(500);
+    expect(res.json().error).toBe('study_session_time_corrupt');
+    const latest = await app.inject({ method: 'GET', url: `/api/v1/study-sessions/${session.id}` });
+    expect(latest.json().status).toBe('paused');
+    expect(latest.json().pausedAt).toBe('2026-01-01T08:00:00.000Z');
+    expect(latest.json().version).toBe(session.version);
+  });
+
+  it('returns a controlled 500 and keeps the store unchanged when the server clock is unparseable', async () => {
+    const { app, services } = setup(() => 'not-a-time');
+    const session = makeStudySession({
+      status: 'paused',
+      startedAt: FIXED_NOW,
+      pausedAt: FIXED_NOW,
+    });
+    await services.studySessionRepository.createIfAbsent(session);
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${session.id}/resume`,
+      payload: { expectedVersion: session.version },
+    });
+    expect(res.statusCode).toBe(500);
+    expect(res.json().error).toBe('study_session_time_corrupt');
+    expect(JSON.stringify(res.json())).not.toContain('not-a-time');
+    const latest = await app.inject({ method: 'GET', url: `/api/v1/study-sessions/${session.id}` });
+    expect(latest.json().status).toBe('paused');
+    expect(latest.json().pausedDurationSeconds).toBe(0);
+    expect(latest.json().version).toBe(session.version);
+  });
+
+  it('returns a stable 409 on a stale expectedVersion', async () => {
+    const { app } = setup();
+    const paused = await createPaused(app);
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${paused.id}/resume`,
+      payload: { expectedVersion: 99 },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe('study_session_version_conflict');
+  });
+
+  it('returns 404 for an unknown session', async () => {
+    const { app } = setup();
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${uuid()}/resume`,
+      payload: { expectedVersion: 1 },
+    });
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error).toBe('study_session_not_found');
+  });
+
+  it('rejects unknown fields in the body', async () => {
+    const { app } = setup();
+    const paused = await createPaused(app);
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${paused.id}/resume`,
+      payload: { expectedVersion: paused.version, status: 'running' },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe('validation_failed');
+  });
+
+  it('rejects a string expectedVersion as a strict type violation', async () => {
+    const { app } = setup();
+    const paused = await createPaused(app);
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${paused.id}/resume`,
+      payload: { expectedVersion: '1' },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe('validation_failed');
+  });
+
+  it('concurrent resume with the same expectedVersion: exactly one succeeds', async () => {
+    const { app } = setup(() => FIXED_NOW);
+    const paused = await createPaused(app);
+    const results = await Promise.all(
+      Array.from({ length: 20 }, () =>
+        app.inject({
+          method: 'POST',
+          url: `/api/v1/study-sessions/${paused.id}/resume`,
+          payload: { expectedVersion: paused.version },
+        }),
+      ),
+    );
+    expect(results.filter((r) => r.statusCode === 200)).toHaveLength(1);
+    expect(results.filter((r) => r.statusCode === 409)).toHaveLength(19);
+    const latest = await app.inject({ method: 'GET', url: `/api/v1/study-sessions/${paused.id}` });
+    expect(latest.json().status).toBe('running');
+    expect(latest.json().pausedAt).toBeNull();
+    expect(latest.json().version).toBe(paused.version + 1);
+  });
+});

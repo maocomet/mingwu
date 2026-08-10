@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import {
   TASK_TEXT_MAX_LENGTH,
   createStudySessionBodySchema,
+  pauseStudySessionBodySchema,
+  resumeStudySessionBodySchema,
   setCountdownBodySchema,
   setTaskBodySchema,
   startStudySessionBodySchema,
@@ -184,6 +186,36 @@ describe('StudySession contract schemas', () => {
     });
   });
 
+  describe('pauseStudySessionBodySchema', () => {
+    it('accepts a valid pause request', () => {
+      const validate = compile({ ...pauseStudySessionBodySchema });
+      expect(validate({ expectedVersion: 1 })).toBe(true);
+    });
+
+    it('requires expectedVersion >= 1 and rejects extra fields and a string version', () => {
+      const validate = compile({ ...pauseStudySessionBodySchema });
+      expect(validate({})).toBe(false);
+      expect(validate({ expectedVersion: 0 })).toBe(false);
+      expect(validate({ expectedVersion: '1' })).toBe(false);
+      expect(validate({ expectedVersion: 1, actorId: 'x' })).toBe(false);
+    });
+  });
+
+  describe('resumeStudySessionBodySchema', () => {
+    it('accepts a valid resume request', () => {
+      const validate = compile({ ...resumeStudySessionBodySchema });
+      expect(validate({ expectedVersion: 1 })).toBe(true);
+    });
+
+    it('requires expectedVersion >= 1 and rejects extra fields and a string version', () => {
+      const validate = compile({ ...resumeStudySessionBodySchema });
+      expect(validate({})).toBe(false);
+      expect(validate({ expectedVersion: 0 })).toBe(false);
+      expect(validate({ expectedVersion: '1' })).toBe(false);
+      expect(validate({ expectedVersion: 1, status: 'running' })).toBe(false);
+    });
+  });
+
   describe('studySessionJsonSchema', () => {
     function session(overrides: Record<string, unknown> = {}): Record<string, unknown> {
       const now = new Date().toISOString();
@@ -193,6 +225,7 @@ describe('StudySession contract schemas', () => {
         timerMode: 'count_down',
         plannedDurationSeconds: null,
         startedAt: null,
+        pausedAt: null,
         endedAt: null,
         actualDurationSeconds: 0,
         pausedDurationSeconds: 0,

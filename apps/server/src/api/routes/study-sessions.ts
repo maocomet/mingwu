@@ -1,11 +1,15 @@
 import type {
   CreateStudySessionInput,
+  PauseStudySessionInput,
+  ResumeStudySessionInput,
   SetCountdownInput,
   SetTaskInput,
   StartStudySessionInput,
 } from '@mingwu/contracts';
 import {
   createStudySessionBodySchema,
+  pauseStudySessionBodySchema,
+  resumeStudySessionBodySchema,
   setCountdownBodySchema,
   setTaskBodySchema,
   startStudySessionBodySchema,
@@ -102,6 +106,41 @@ export const studySessionRoutes: FastifyPluginAsync<{
       const { id } = request.params as { id: string };
       const input = request.body as StartStudySessionInput;
       return studySessionService.startStudySession(id, input);
+    },
+  );
+
+  // 暂停 Session：running → paused。pausedAt 由服务端单次采样写入，客户端不能提交时间。
+  app.post(
+    '/study-sessions/:id/pause',
+    {
+      schema: {
+        params: studySessionParamsSchema,
+        body: pauseStudySessionBodySchema,
+        response: { 200: studySessionJsonSchema },
+      },
+    },
+    async (request) => {
+      const { id } = request.params as { id: string };
+      const input = request.body as PauseStudySessionInput;
+      return studySessionService.pauseStudySession(id, input);
+    },
+  );
+
+  // 恢复 Session：paused → running。服务端单次采样时间并累计本次暂停整秒到
+  // pausedDurationSeconds；pausedAt 清空、startedAt 保持不变。
+  app.post(
+    '/study-sessions/:id/resume',
+    {
+      schema: {
+        params: studySessionParamsSchema,
+        body: resumeStudySessionBodySchema,
+        response: { 200: studySessionJsonSchema },
+      },
+    },
+    async (request) => {
+      const { id } = request.params as { id: string };
+      const input = request.body as ResumeStudySessionInput;
+      return studySessionService.resumeStudySession(id, input);
     },
   );
 };

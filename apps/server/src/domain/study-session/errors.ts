@@ -93,3 +93,15 @@ export class StudySessionStartPreconditionError extends Error {
     this.name = 'StudySessionStartPreconditionError';
   }
 }
+
+/**
+ * Session 内部时间状态损坏：startedAt / pausedAt 无法解析、pausedAt 早于 startedAt、
+ * 或服务器时间早于 pausedAt。属服务端数据问题，返回受控 500，消息不回显原始时间
+ * 或 Session 内容，也不得修改仓储。
+ */
+export class StudySessionTimeCorruptionError extends Error {
+  constructor(readonly studySessionId: string) {
+    super(`Study session ${studySessionId} time state is corrupted`);
+    this.name = 'StudySessionTimeCorruptionError';
+  }
+}

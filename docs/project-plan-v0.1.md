@@ -206,8 +206,8 @@ Windows App
 - [x] 设置倒计时时长
 - [x] 支持正计时
 - [x] 开始 Session
-- [ ] 确定暂停规则
-- [ ] 恢复 Session
+- [x] 确定暂停规则
+- [x] 恢复 Session
 - [ ] 结束 Session
 - [ ] 用户提交总结
 - [ ] AI 追加自己的报告

@@ -1802,6 +1802,84 @@
 
 ---
 
+## 小喵下发任务 #9 · 暂停与恢复 Study Session · 2026-08-09
+
+### 本批候选计划项
+
+- [ ] 确定暂停规则
+- [ ] 恢复 Session
+
+本批由小喵正式确定 v0.1 暂停规则，并实现 `running → paused → running` 闭环。暂停接口是“恢复 Session”的必要支撑能力；计划文档没有单列“暂停 Session”，因此只申报上面两项。不要实现结束、取消、中断或最终实际学习时长结算。
+
+### 一、v0.1 暂停规则（本批正式采用）
+
+1. 只有 `running` 可以暂停，只有 `paused` 可以恢复；重复暂停、重复恢复或其他状态调用均返回稳定状态冲突。
+2. 新增 `pausedAt: string | null` 作为当前这一次暂停的开始时间：
+   - 创建与运行时为 `null`；
+   - 暂停成功时写入服务器当前 UTC 时间；
+   - 恢复成功后清空为 `null`。
+3. `pausedDurationSeconds` 保存已经完成的历次暂停累计秒数；当前仍在进行的暂停暂不计入该字段，恢复时再累计。
+4. 恢复时累计：`floor((resumeTime - pausedAt) / 1000)` 秒，最小为 0；v0.1 以整秒为显示和结算精度，不创建毫秒累计字段。
+5. 暂停期间正计时与倒计时都应冻结。客户端显示规则：
+   - running：`当前时间 - startedAt - pausedDurationSeconds`；
+   - paused：`pausedAt - startedAt - pausedDurationSeconds`。
+6. 暂停和恢复都只采样一次服务器时间，并通过版本 CAS 原子保存；客户端不能提交时间或累计时长。
+7. App / 服务重启后的真实恢复由第六关 PostgreSQL 持久化保证；本批内存仓储只验证业务规则。
+
+请把这些规则同步写入契约 / 服务注释和检查点汇报，后续“结束 Session”必须沿用，不能另起一套算法。
+
+### 二、契约与模型
+
+- `StudySession` 新增必需字段 `pausedAt: string | null`；创建、草稿修改、开始后的字段不变量同步更新。
+- 新增严格请求契约，可共用一个 `{ expectedVersion }` schema / 类型，也可以使用语义清晰的 Pause / Resume 类型；未知字段和字符串版本号必须 400。
+- 所有现有测试工厂、响应 schema 与既有用例同步适配，不得把缺字段静默隐藏。
+
+### 三、暂停 Session
+
+实现：
+
+- `POST /api/v1/study-sessions/:id/pause`
+- 只允许 `running → paused`；
+- 必须已有合法 `startedAt`，且 `pausedAt` 当前为空；
+- 成功时用同一次服务器时间写 `status = paused`、`pausedAt = now`、`updatedAt = now`、`version + 1`；其他业务字段不变；
+- 20 路相同版本并发暂停只能一个成功，其余稳定 409；成功后重复暂停不得重写 `pausedAt`。
+
+### 四、恢复 Session
+
+实现：
+
+- `POST /api/v1/study-sessions/:id/resume`
+- 只允许 `paused → running`；
+- 必须已有合法 `startedAt` 与 `pausedAt`；
+- 服务器单次采样 `now`，计算本次暂停整秒数并累加到 `pausedDurationSeconds`；
+- 成功时写 `status = running`、`pausedAt = null`、累计后的 `pausedDurationSeconds`、`updatedAt = now`、`version + 1`；`startedAt` 保持首次开始时间不变；
+- 如果时间字段无法解析、`pausedAt < startedAt` 或服务器时间早于 `pausedAt`，视为内部时间状态损坏：返回受控 500 错误码，不回显原始时间或 Session 内容，并且不得修改仓储；
+- 20 路相同版本并发恢复只能一个成功，其余稳定 409。
+
+### 五、测试要求
+
+- 覆盖契约、服务与 HTTP API；
+- 固定 / 可控时钟验证暂停字段和恢复累计，例如暂停 65.9 秒累计 65 秒；
+- 覆盖多轮暂停恢复累计、正计时与倒计时均可暂停恢复；
+- 覆盖重复暂停 / 恢复、错误状态、陈旧版本、未知字段、字符串版本号；
+- 覆盖 20 路并发暂停与恢复各只有一次成功；
+- 覆盖非法 / 倒退时间状态受控失败且仓储不变；
+- 确认每个成功状态转换只采样一次服务器时间；
+- 运行 `npm run typecheck`、`npm test`、`git diff --check`。
+
+### 本批明确不做
+
+- 不实现结束、取消、中断或 `actualDurationSeconds` 最终结算；
+- 不创建真实计时器、后台任务或高频时长写入；
+- 不实现历史、完整详情、总结、AI 报告或音乐关联；
+- 不修改计划文档复选框；
+- 不执行 Git、GitHub、VPS 或其他外部操作；
+- 不读取或修改 `.claude/`、`ui素材mingwu/` 等无关目录。
+
+完成后把“检查点 #9”追加到本文件末尾，列出候选完成项、最终暂停规则、接口与不变量、文件清单、真实测试结果和风险，然后立即暂停，等待小喵审核。
+
+---
+
 ## 小喵审核结果 #8 · 需要小返修 · 2026-08-09
 
 ### 独立复检结果
@@ -1888,5 +1966,227 @@
 - 结束 / 中断 Session：结算 `actualDurationSeconds`（利用服务端 startedAt），状态进入 completed / interrupted；
 - 暂停 / 恢复规则需小喵先定；
 - 查询 Session 列表 / 历史。
+
+**等待小喵审核。**
+
+---
+
+## 检查点 #9 · 等待小喵审核 · 2026-08-09
+
+### 本批次目标
+
+按《小喵下发任务 #9》实现 Study Session 的 `running → paused → running` 闭环：正式采用 v0.1 暂停规则，新增 `pausedAt` 字段，实现暂停 / 恢复两个接口，覆盖契约、服务与 HTTP API 三层测试，然后暂停等待小喵审核。不实现结束、取消、中断或最终时长结算。
+
+### 候选完成的计划项目原文
+
+- [ ] 确定暂停规则
+- [ ] 恢复 Session
+
+> 计划文档复选框未改动，以下仅作候选申报。
+
+### 实际完成内容
+
+1. **契约层（`packages/contracts/src/study-session.ts`）**
+   - `StudySession` 新增必需字段 `pausedAt: string | null`，`studySessionJsonSchema` 的 required / properties 同步；
+   - 新增 `PauseStudySessionInput` / `ResumeStudySessionInput`（`{ expectedVersion: number }`）与严格请求体 schema：`required: ['expectedVersion']`、`additionalProperties: false`、`expectedVersion` 整数且 `>= 1`；未知字段与字符串版本号均被契约层拒绝。
+
+2. **错误层（`apps/server/src/domain/study-session/errors.ts`）**
+   - 新增 `StudySessionTimeCorruptionError`，用于内部时间状态损坏的统一受控失败。
+
+3. **服务层（`apps/server/src/application/study-session/study-session-service.ts`）**
+   - `pauseStudySession`：仅 `running` 可暂停；校验 `startedAt` 合法且 `pausedAt === null`（否则时间损坏）；单次采样 `this.now()`，写 `status = paused`、`pausedAt = now`、`updatedAt = now`、`version + 1`，其余业务字段不变；版本 CAS 失败返回稳定版本冲突；
+   - `resumeStudySession`：仅 `paused` 可恢复；单次采样 `now`，先做时间一致性校验（字段可解析、`pausedAt >= startedAt`、`now >= pausedAt`，任一不满足即时间损坏且不改仓储），累计 `max(0, floor((now - pausedAt) / 1000))` 秒到 `pausedDurationSeconds`；写 `status = running`、`pausedAt = null`、`updatedAt = now`、`version + 1`；`startedAt` 保持首次开始时间不变；版本 CAS 失败返回稳定版本冲突；
+   - `createStudySession` 支持注入时钟（`now: () => string`，默认 `new Date().toISOString()`）并初始化 `pausedAt = null`；启动 / 创建路径时间单次采样约定保持。
+
+4. **API 层（`apps/server/src/api/routes/study-sessions.ts`）**
+   - `POST /api/v1/study-sessions/:id/pause`（`running → paused`）；
+   - `POST /api/v1/study-sessions/:id/resume`（`paused → running`）；
+   - 两者均只接受 `{ expectedVersion }`，不接受客户端提交时间 / 状态 / 时长。
+
+5. **错误映射（`apps/server/src/app.ts`）**
+   - `StudySessionTimeCorruptionError` → 受控 `500 { error: 'study_session_time_corrupt', message: 'study session time state is inconsistent' }`，细节只进服务日志，不回显原始时间或 Session 内容。
+
+6. **测试（新增 / 修改）**
+   - `apps/server/test/study-session-contract.test.ts`：pause / resume 请求体 schema 合法请求通过、缺字段 / `expectedVersion < 1` / 字符串版本号 / 未知字段拒绝；jsonSchema 全字段样本含 `pausedAt: null`；
+   - `apps/server/test/study-session-service.test.ts`：暂停成功写服务端 `pausedAt`、非 running 拒绝、`startedAt` 缺失时间损坏、`pausedAt` 已设置时间损坏、重复暂停不重写、陈旧版本、20 路并发只一次成功；恢复成功累计（固定时钟 0 秒、可变时钟 65.9 秒 → 65 秒）、多轮累计（65 + 60 = 125）、正计时与倒计时均可暂停恢复、非 paused 拒绝、时间损坏（`pausedAt < startedAt` / 服务器时间早于 `pausedAt` / 无法解析）且仓储不变、陈旧版本、20 路并发只一次成功；
+   - `apps/server/test/study-session-api.test.ts`：pause / resume 全 HTTP 路径，含固定 / 可变时钟、500 时间损坏映射（含仓储不变断言）、404、状态冲突 409、版本冲突 409、未知字段 400、字符串版本号 400、20 路并发各只一次成功。
+
+### 新增 / 修改 / 删除文件清单
+
+修改：
+- `packages/contracts/src/study-session.ts`（`pausedAt` 字段、Pause / Resume 类型与 schema、jsonSchema 同步）
+- `apps/server/src/domain/study-session/errors.ts`（`StudySessionTimeCorruptionError`）
+- `apps/server/src/application/study-session/study-session-service.ts`（`pauseStudySession`、`resumeStudySession`、`isValidIsoTime`、创建注入时钟与 `pausedAt`）
+- `apps/server/src/api/routes/study-sessions.ts`（pause / resume 路由）
+- `apps/server/src/app.ts`（时间损坏 → 受控 500）
+- `apps/server/test/helpers.ts`（`makeStudySession` 含 `pausedAt`）
+- `apps/server/test/study-session-contract.test.ts`（+pause / resume schema 用例）
+- `apps/server/test/study-session-service.test.ts`（+暂停 / 恢复服务用例）
+- `apps/server/test/study-session-api.test.ts`（+暂停 / 恢复 HTTP 用例）
+
+新增：无（本批未新增文件）。
+
+删除：无。
+
+### 关键设计决定及其依据
+
+- **`pausedAt` 为当前这一次暂停的开始时间**：创建与运行时为 `null`，暂停写入，恢复清空；`pausedDurationSeconds` 只保存已累计的整秒，进行中的暂停不计入。依据任务规则第 2、3 条。
+- **恢复累计取整秒、最小为 0**：`max(0, floor((now - pausedAt) / 1000))`。依据任务规则第 4 条，v0.1 以整秒为显示与结算精度，不创建毫秒累计字段。
+- **暂停 / 恢复都只单次采样服务器时间并通过版本 CAS 保存**：避免真实时钟跨毫秒导致同一原子转换保存两个时间；客户端不能提交时间或累计时长。依据任务规则第 6 条与既有的 CAS 并发约定。
+- **时间损坏统一受控 500 且不改仓储**：字段无法解析、`pausedAt < startedAt`、服务器时间早于 `pausedAt` 均视为内部状态损坏；响应只返回稳定错误码，不回显原始时间，避免把内部状态泄露给客户端。依据任务第四节。
+- **重复暂停不重写 `pausedAt`**：暂停成功后状态变为 `paused`，再次暂停走状态冲突稳定 409，天然不重写。
+- **`startedAt` 保持首次开始时间不变**：恢复不覆盖开始时间，只清空 `pausedAt`、累计暂停秒数。依据任务第四节。
+- **严格请求白名单**：pause / resume 只接受 `{ expectedVersion }`，未知字段与字符串版本号均 400，与已有接口保持一致。
+
+### 执行过的测试与检查（真实结果）
+
+- `npm run typecheck`：`@mingwu/contracts` 与 `@mingwu/server` 均通过；
+- `npm test`：19 个测试文件，**373/373 通过**（较检查点 #8 返修的 336 新增 37：契约、服务、API 三层暂停 / 恢复用例）；
+- `git diff --check`：通过，仅有 Windows LF→CRLF 行尾提示，无空白错误。
+
+### 未完成内容、已知问题与风险
+
+- 未实现结束、取消、中断或 `actualDurationSeconds` 最终结算（本批明确不做）；
+- 未创建真实计时器、后台任务或高频时长写入（本批明确不做）；
+- 内存仓储只验证业务规则，App / 服务重启后的真实恢复依赖第六关 PostgreSQL 持久化；
+- 服务器时间校准异常（如时钟倒退超出本次 `now >= pausedAt` 检查范围）仍可能产生累计偏差，属后续持久化与时钟策略范畴。
+
+### 是否涉及数据库 / 身份权限 / 密钥 / 外部服务 / 破坏性变化
+
+- 均无：未触碰数据库、身份权限、密钥、外部服务；无破坏性变化；未修改计划复选框；未读取或修改 `.claude/`、`ui素材mingwu/` 等无关目录；未执行 Git / GitHub / VPS 操作。
+
+### 建议下一批任务
+
+- 结束 / 中断 Session：结算 `actualDurationSeconds`（利用服务端 `startedAt` 与暂停累计），状态进入 completed / interrupted，暂停规则沿用本批算法；
+- 查询 Study Session 历史；
+- 查询单次 Session 完整详情。
+
+**等待小喵审核。**
+
+---
+
+## 小喵返修验收结果 #9 · 通过 · 2026-08-09
+
+### 验收结论
+
+检查点 #9 与时间返修全部通过，本批正式验收：
+
+- [x] 确定暂停规则
+- [x] 恢复 Session
+
+### 小喵独立复验
+
+- `npm run typecheck`：contracts 与 server 均通过；
+- `npm test`：19 个测试文件，380/380 通过；
+- `git diff --check`：通过，仅有 Windows LF→CRLF 提示；
+- 暂停与恢复均在写入前验证服务器当前时间可解析且不倒退；
+- 坏时钟不会改变状态、版本、`pausedAt` 或累计暂停时长，HTTP 只返回受控错误且不回显坏时间；
+- 暂停与恢复成功路径均只采样一次服务器时间；
+- 多轮暂停累计、整秒取整、正计时 / 倒计时、严格请求体、状态冲突和并发 CAS 均符合已确定规则；
+- 未提前实现结束、取消、中断或最终时长结算。
+
+计划文档对应两项已由小喵打勾。检查点 #9 正式关闭。
+
+---
+
+## 小喵审核结果 #9 · 需要小返修 · 2026-08-09
+
+### 独立复检结果
+
+- `npm run typecheck`：通过；
+- `npm test`：19 个测试文件，373/373 通过；
+- `git diff --check`：通过，仅有 Windows LF→CRLF 提示；
+- `pausedAt` 模型、整秒累计、多轮暂停恢复、正计时 / 倒计时共用规则、状态冲突、严格请求体、CAS 并发和受控 500 的主体实现均正确；
+- 没有提前实现结束、取消、中断或最终时长结算，范围控制正确。
+
+本批只剩一个集中在“服务器当前时间”上的必须修复问题，暂不打勾、不提交。
+
+### 必须修复：暂停 / 恢复没有完整验证服务器当前时间
+
+当前：
+
+1. `pauseStudySession` 验证了已有 `startedAt`，但没有验证 `this.now()` 是否可解析，也没有检查 `now >= startedAt`。坏时钟会把非法或早于开始时间的 `pausedAt` 写进仓储，制造新的损坏状态。
+2. `resumeStudySession` 计算了 `nowMs = Date.parse(nowIso)`，但条件中没有验证 `nowIso` 本身。若时钟返回不可解析字符串，比较表达式不会拦截 `NaN`，随后可能把 `pausedDurationSeconds = NaN` 写入仓储。
+
+请：
+
+- 暂停时单次采样 `now` 后，确认它可解析且不早于 `startedAt`；失败抛现有 `StudySessionTimeCorruptionError`，不写仓储；
+- 恢复时把 `nowIso` 可解析纳入时间损坏条件，在任何减法和累计之前拦截；
+- 增加服务层测试：暂停遇到不可解析 `now`、暂停时钟早于 `startedAt`、恢复遇到不可解析 `now`，均受控失败且仓储状态 / 版本 / 时间字段不变；
+- 增加至少一个 HTTP 映射回归，确认仍返回受控 `500 study_session_time_corrupt`，响应不含原始坏时间；
+- 顺手为暂停和恢复成功路径补“时钟只调用一次”的断言，以兑现本批明确测试要求。
+
+### 返修边界
+
+- 只修以上时间校验并补测试，不开始下一批；
+- 不修改计划文档复选框；
+- 不执行 Git、GitHub、VPS 或其他外部操作；
+- 运行 `npm run typecheck`、`npm test`、`git diff --check`；
+- 把“检查点 #9 返修”追加到本文件末尾后立即暂停，等待小喵复验。
+
+---
+
+## 检查点 #9 返修 · 等待小喵复验 · 2026-08-09
+
+### 本批次目标
+
+按《小喵审核结果 #9》完成暂停 / 恢复对服务器当前时间的完整校验返修：暂停时确认 `now` 可解析且不早于 `startedAt`，恢复时把 `now` 可解析纳入时间损坏条件并在任何减法 / 累计前拦截，补时钟只调用一次断言与 HTTP 映射回归。只修以上内容，不开始下一批。
+
+### 实际完成内容
+
+1. **`pauseStudySession`（服务层）**
+   - 单次采样 `now` 后，新增对服务器当前时间的校验：`now` 不可解析，或 `now < startedAt`，与已有时间状态校验一起抛 `StudySessionTimeCorruptionError`，不写仓储；
+   - 坏时钟无法再把非法或早于开始时间的 `pausedAt` 写进仓储制造新的损坏状态。
+
+2. **`resumeStudySession`（服务层）**
+   - 把 `nowIso` 可解析纳入时间损坏条件：先验证 `startedAt` / `pausedAt` / `nowIso` 三处均可解析，再做 `pausedAt >= startedAt`、`now >= pausedAt` 的数值比较；
+   - 因 `Date.parse` 对不可解析串返回 `NaN`、`NaN` 参与比较恒为 `false`，仅靠大小比较拦不住；现在任何一处不可解析都会在任何减法与累计之前被拦截，杜绝 `pausedDurationSeconds = NaN` 落库。
+
+3. **服务层测试（`study-session-service.test.ts`，+5 用例）**
+   - 暂停遇到不可解析 `now` → 受控失败，仓储状态 / `startedAt` / `pausedAt` / 版本均不变；
+   - 暂停时钟早于 `startedAt` → 受控失败，仓储状态 / `pausedAt` / 版本均不变；
+   - 恢复遇到不可解析 `now` → 受控失败，仓储状态 / `pausedAt` / `pausedDurationSeconds` / 版本均不变；
+   - 成功暂停只采样一次服务器时钟（计数时钟断言 `calls === 1`）；
+   - 成功恢复只采样一次服务器时钟（计数时钟断言 `calls === 1`）。
+
+4. **HTTP 映射回归（`study-session-api.test.ts`，+2 用例）**
+   - 暂停在坏时钟下仍返回受控 `500 study_session_time_corrupt`，响应体不含原始坏时间串；
+   - 恢复在坏时钟下仍返回受控 `500 study_session_time_corrupt`，响应体不含原始坏时间串，且仓储状态 / `pausedDurationSeconds` / 版本均不变。
+
+### 新增 / 修改 / 删除文件清单
+
+修改：
+- `apps/server/src/application/study-session/study-session-service.ts`（暂停 / 恢复对服务器当前时间完整校验）
+- `apps/server/test/study-session-service.test.ts`（+5 用例：暂停坏 now、暂停时钟早于 startedAt、恢复坏 now、暂停 / 恢复时钟只调用一次）
+- `apps/server/test/study-session-api.test.ts`（+2 用例：暂停 / 恢复坏时钟 500 映射且不回显坏时间）
+
+新增：无。删除：无。
+
+### 关键设计决定及其依据
+
+- **服务器当前时间视为领域输入的一部分，与已有时间字段同等校验**：暂停 / 恢复要写入 `pausedAt` / 累计暂停时长，坏时钟会把非法时间或 `NaN` 写进仓储，破坏后续所有暂停规则与结算；因此在单次采样后立即校验 `now` 可解析且不早于 `startedAt`。依据审核结果：必须修复两条。
+- **先验证可解析，再比较大小**：`Date.parse` 对不可解析串返回 `NaN`，`NaN < x` 恒为 `false`，若仅靠大小比较拦截会漏过不可解析的 `nowIso`；把三处可解析校验前置，保证任何减法与累计前已拦截。依据审核结果：恢复的 `NaN` 写入问题。
+- **采样仍只发生一次**：校验只读取已采样的 `now` 值，不再调用 `this.now()`，兑现“每个成功状态转换只采样一次服务器时间”的既有约定，并用计数时钟断言固化。
+
+### 执行过的测试与检查（真实结果）
+
+- `npm run typecheck`：`@mingwu/contracts` 与 `@mingwu/server` 均通过；
+- `npm test`：19 个测试文件，**380/380 通过**（较检查点 #9 的 373 新增 7：服务 5、API 2）；
+- `git diff --check`：通过，仅有 Windows LF→CRLF 行尾提示，无空白错误。
+
+### 未完成内容、已知问题与风险
+
+- 其余暂停 / 恢复边界（结束、取消、中断、`actualDurationSeconds` 结算、真实计时器、持久化）仍留待后续批次，本次未触碰；
+- 服务器时钟校准异常超出“`now >= pausedAt` / `now >= startedAt`”检查范围的情形仍属后续持久化与时钟策略范畴，与上次风险记录一致。
+
+### 是否涉及数据库 / 身份权限 / 密钥 / 外部服务 / 破坏性变化
+
+- 均无：未触碰数据库、身份权限、密钥、外部服务；无破坏性变化；未修改计划复选框；未读取或修改 `.claude/`、`ui素材mingwu/` 等无关目录；未执行 Git / GitHub / VPS 操作。
+
+### 建议下一批任务
+
+- 结束 / 中断 Session：结算 `actualDurationSeconds`（利用服务端 `startedAt` 与暂停累计），状态进入 completed / interrupted，暂停规则沿用本批算法；
+- 查询 Study Session 历史；
+- 查询单次 Session 完整详情。
 
 **等待小喵审核。**

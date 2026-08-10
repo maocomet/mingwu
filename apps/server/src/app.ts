@@ -45,6 +45,7 @@ import {
   StudySessionStartPreconditionError,
   StudySessionStatusConflictError,
   StudySessionTaskTextInvalidError,
+  StudySessionTimeCorruptionError,
   StudySessionTimerModeConflictError,
   StudySessionVersionConflictError,
 } from './domain/study-session/errors.js';
@@ -228,6 +229,15 @@ export function buildApp(deps: AppDeps): FastifyInstance {
         error: 'study_session_start_precondition_failed',
         message: error.message,
         reason: error.reason,
+      });
+    }
+    // Session 内部时间状态损坏（startedAt / pausedAt 无法解析或倒退）属于服务端数据问题，
+    // 返回 500 与受控错误码；细节只进服务日志，不把原始时间或 Session 内容放进响应。
+    if (error instanceof StudySessionTimeCorruptionError) {
+      request.log.error({ err: error }, 'study session time state corruption detected');
+      return reply.status(500).send({
+        error: 'study_session_time_corrupt',
+        message: 'study session time state is inconsistent',
       });
     }
     if (error instanceof StudySessionTaskTextInvalidError) {

@@ -37,6 +37,8 @@ export interface StudySession {
   /** 倒计时设定时长；count_up 恒为 null，count_down 允许先以空时长创建草稿。 */
   plannedDurationSeconds: number | null;
   startedAt: string | null;
+  /** 当前这次暂停的开始时间；运行中 / 恢复后为 null，暂停时写入。 */
+  pausedAt: string | null;
   endedAt: string | null;
   actualDurationSeconds: number;
   pausedDurationSeconds: number;
@@ -70,6 +72,16 @@ export interface SetCountdownInput {
 
 export interface StartStudySessionInput {
   /** 本次开始基于的版本号，用于乐观并发控制。 */
+  expectedVersion: number;
+}
+
+export interface PauseStudySessionInput {
+  /** 本次暂停基于的版本号，用于乐观并发控制。 */
+  expectedVersion: number;
+}
+
+export interface ResumeStudySessionInput {
+  /** 本次恢复基于的版本号，用于乐观并发控制。 */
   expectedVersion: number;
 }
 
@@ -129,6 +141,24 @@ export const startStudySessionBodySchema = {
   },
 } as const;
 
+export const pauseStudySessionBodySchema = {
+  type: 'object',
+  required: ['expectedVersion'],
+  additionalProperties: false,
+  properties: {
+    expectedVersion: { type: 'integer', minimum: 1 },
+  },
+} as const;
+
+export const resumeStudySessionBodySchema = {
+  type: 'object',
+  required: ['expectedVersion'],
+  additionalProperties: false,
+  properties: {
+    expectedVersion: { type: 'integer', minimum: 1 },
+  },
+} as const;
+
 export const studySessionJsonSchema = {
   type: 'object',
   required: [
@@ -137,6 +167,7 @@ export const studySessionJsonSchema = {
     'timerMode',
     'plannedDurationSeconds',
     'startedAt',
+    'pausedAt',
     'endedAt',
     'actualDurationSeconds',
     'pausedDurationSeconds',
@@ -156,6 +187,7 @@ export const studySessionJsonSchema = {
       maximum: MAX_PLANNED_DURATION_SECONDS,
     },
     startedAt: { type: ['string', 'null'] },
+    pausedAt: { type: ['string', 'null'] },
     endedAt: { type: ['string', 'null'] },
     actualDurationSeconds: { type: 'integer', minimum: 0 },
     pausedDurationSeconds: { type: 'integer', minimum: 0 },

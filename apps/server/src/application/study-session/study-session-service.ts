@@ -1,5 +1,7 @@
 import type {
   CreateStudySessionInput,
+  PauseStudySessionInput,
+  ResumeStudySessionInput,
   SetCountdownInput,
   SetTaskInput,
   StartStudySessionInput,
@@ -17,6 +19,7 @@ import {
   StudySessionStartPreconditionError,
   StudySessionStatusConflictError,
   StudySessionTaskTextInvalidError,
+  StudySessionTimeCorruptionError,
   StudySessionTimerModeConflictError,
   StudySessionVersionConflictError,
 } from '../../domain/study-session/errors.js';
@@ -38,6 +41,11 @@ function normalizeTaskText(taskText: string | null | undefined): string | null {
 
 function normalizePlannedDurationSeconds(value: number | null | undefined): number | null {
   return value === undefined || value === null ? null : value;
+}
+
+/** 时间字符串是否为可解析的有效时刻（null 视为无效）。 */
+function isValidIsoTime(value: string | null): value is string {
+  return value !== null && !Number.isNaN(Date.parse(value));
 }
 
 /** 倒计时设定时长是否合法：整数且在 1..86400 范围内。 */
@@ -167,6 +175,98 @@ export class StudySessionService {
   }
 
   /**
+   * 暂停 Session：running → paused。v0.1 暂停规则：
+   * - Session 不存在 → 404；status 不是 running → 409（重复暂停 / 其他状态返回状态冲突）；
+   * - 时间状态完整性：running 必须已有可解析 startedAt、pausedAt 必须为空，且
+   *   服务器当前时间可解析且不早于 startedAt，否则视为内部时间状态损坏（受控 500，不改仓储）；
+   * - 成功时用同一次服务器时间写 status=paused、pausedAt=now、updatedAt=now、version+1，
+   *   其他业务字段不变；客户端不能提交时间或累计时长；
+   * - 仓储 CAS 失败（陈旧 expectedVersion）→ 409，20 路并发暂停只有一次成功；
+   *   成功后重复暂停返回状态冲突，不得重写 pausedAt。
+   */
+  async pauseStudySession(id: string, input: PauseStudySessionInput): Promise<StudySession> {
+    const existing = await this.repository.findById(id);
+    if (!existing) {
+      throw new StudySessionNotFoundError(id);
+    }
+    if (existing.status !== 'running') {
+      throw new StudySessionStatusConflictError(id, existing.status);
+    }
+    const now = this.now();
+    // 服务器当前时间也必须有效且不早于开始时间：坏时钟不得把非法或倒退的
+    // pausedAt 写进仓储制造新的损坏状态。now 参与比较前先确认可解析。
+    if (
+      !isValidIsoTime(existing.startedAt) ||
+      existing.pausedAt !== null ||
+      !isValidIsoTime(now) ||
+      Date.parse(now) < Date.parse(existing.startedAt)
+    ) {
+      throw new StudySessionTimeCorruptionError(id);
+    }
+    const updated: StudySession = {
+      ...existing,
+      status: 'paused',
+      pausedAt: now,
+      updatedAt: now,
+      version: existing.version + 1,
+    };
+    const result = await this.repository.updateIfVersion(updated, input.expectedVersion);
+    if (!result) {
+      throw new StudySessionVersionConflictError(id, input.expectedVersion);
+    }
+    return result;
+  }
+
+  /**
+   * 恢复 Session：paused → running。v0.1 暂停规则：
+   * - Session 不存在 → 404；status 不是 paused → 409（重复恢复 / 其他状态返回状态冲突）；
+   * - 服务器单次采样 now，先确认 startedAt / pausedAt / now 均可解析（任何一处不可解析，
+   *   Date.parse 返回 NaN，NaN 参与比较恒为 false，仅靠大小比较拦不住），再校验
+   *   pausedAt >= startedAt、now >= pausedAt；任一不满足即视为内部时间状态损坏
+   *   （受控 500，不改仓储，不回显时间）；
+   * - 成功时写 status=running、pausedAt=null、本次暂停整秒数（floor((now - pausedAt) / 1000)，
+   *   最小 0）累加到 pausedDurationSeconds、updatedAt=now、version+1；startedAt 保持首次开始时间不变；
+   * - 仓储 CAS 失败（陈旧 expectedVersion）→ 409，20 路并发恢复只有一次成功。
+   */
+  async resumeStudySession(id: string, input: ResumeStudySessionInput): Promise<StudySession> {
+    const existing = await this.repository.findById(id);
+    if (!existing) {
+      throw new StudySessionNotFoundError(id);
+    }
+    if (existing.status !== 'paused') {
+      throw new StudySessionStatusConflictError(id, existing.status);
+    }
+    const nowIso = this.now();
+    if (
+      !isValidIsoTime(existing.startedAt) ||
+      !isValidIsoTime(existing.pausedAt) ||
+      !isValidIsoTime(nowIso)
+    ) {
+      throw new StudySessionTimeCorruptionError(id);
+    }
+    const startedAtMs = Date.parse(existing.startedAt);
+    const pausedAtMs = Date.parse(existing.pausedAt);
+    const nowMs = Date.parse(nowIso);
+    if (pausedAtMs < startedAtMs || nowMs < pausedAtMs) {
+      throw new StudySessionTimeCorruptionError(id);
+    }
+    const elapsedSeconds = Math.max(0, Math.floor((nowMs - pausedAtMs) / 1000));
+    const updated: StudySession = {
+      ...existing,
+      status: 'running',
+      pausedAt: null,
+      pausedDurationSeconds: existing.pausedDurationSeconds + elapsedSeconds,
+      updatedAt: nowIso,
+      version: existing.version + 1,
+    };
+    const result = await this.repository.updateIfVersion(updated, input.expectedVersion);
+    if (!result) {
+      throw new StudySessionVersionConflictError(id, input.expectedVersion);
+    }
+    return result;
+  }
+
+  /**
    * 幂等创建 Session。客户端在发送前生成 UUID 作为幂等键。
    * - count_up 携带 plannedDurationSeconds → 模式冲突（409），与 Session 是否存在无关；
    * - count_down 允许先以空时长创建草稿，倒计时时长留待设置倒计时时长接口补全；
@@ -184,13 +284,14 @@ export class StudySessionService {
     if (input.timerMode === 'count_up' && plannedDurationSeconds !== null) {
       throw new StudySessionTimerModeConflictError(input.id, input.timerMode);
     }
-    const now = new Date().toISOString();
+    const now = this.now();
     const studySession: StudySession = {
       id: input.id,
       taskText,
       timerMode: input.timerMode,
       plannedDurationSeconds,
       startedAt: null,
+      pausedAt: null,
       endedAt: null,
       actualDurationSeconds: 0,
       pausedDurationSeconds: 0,
