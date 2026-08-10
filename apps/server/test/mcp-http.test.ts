@@ -24,6 +24,7 @@ function setup(logger?: AppDeps['logger']) {
     taskService: services.taskService,
     projectStatusService: services.projectStatusService,
     studySessionService: services.studySessionService,
+    studySummaryService: services.studySummaryService,
     logger,
   });
   return { app, ...services };
@@ -476,6 +477,7 @@ describe('MCP Streamable HTTP via /mcp', () => {
       taskService: services.taskService,
       projectStatusService: throwingStatus,
       studySessionService: services.studySessionService,
+    studySummaryService: services.studySummaryService,
       logger: capture.logger,
     });
     try {
@@ -512,6 +514,7 @@ describe('MCP Streamable HTTP via /mcp', () => {
       taskService: services.taskService,
       projectStatusService: services.projectStatusService,
       studySessionService: services.studySessionService,
+    studySummaryService: services.studySummaryService,
       logger: { level: 'silent' },
     });
     try {

@@ -2676,3 +2676,304 @@
 - PostgreSQL 数据库端 keyset pagination 仍属于后续数据库阶段，不影响本批内存实现验收。
 
 **检查点 #11 已完成，可以进入下一批。**
+
+---
+
+## 小喵任务 #12 · 用户学习总结 · 2026-08-10
+
+### 本批唯一候选计划项
+
+- [ ] 用户提交总结
+
+本批建立一个 Session 最多一份、可由用户反复修改但不会新增第二份的正式学习总结。AI 辅助生成只作为来源标记；本批不调用 AI，也不保存未经用户确认的 AI 草稿。
+
+### 一、数据与契约
+
+建立 `StudySummary` 最小模型，至少包含：
+
+- `id`
+- `studySessionId`
+- `content`
+- `source: user | ai_assisted`
+- `revision`
+- `confirmedByUserAt`
+- `createdAt`
+- `updatedAt`
+
+规则：
+
+- `studySessionId` 唯一，一个 Session 最多一份正式用户总结；
+- `content` 去除首尾空白后必须非空，并设置明确、合理的最大长度；契约、服务与测试使用同一常量；
+- `source=user` 表示用户自行撰写，`source=ai_assisted` 表示内容曾由 AI 辅助，但两者都必须经过用户确认后才通过本接口保存；
+- 初次保存 `revision=1`；修改同一记录时 `revision+1`，`id / studySessionId / createdAt` 保持不变；
+- 每次用户确认保存时由服务端写入 / 刷新 `confirmedByUserAt` 与 `updatedAt`；客户端不得伪造这些字段。
+
+### 二、接口
+
+实现：
+
+- `PUT /api/v1/study-sessions/:id/summary`
+- `GET /api/v1/study-sessions/:id/summary`
+
+PUT 使用严格白名单请求体：
+
+- `content`
+- `source`
+- `expectedRevision`
+
+并发 / 重试规则：
+
+- 尚无总结时只接受 `expectedRevision=0`，原子创建并返回 201；
+- 已有总结时必须提供当前 `expectedRevision`，原子更新并返回 200；陈旧 revision 返回稳定 409；
+- 20 个相同 `expectedRevision` 的并发修改最多一个成功，revision 只增加一次；
+- 初次创建的并发竞争必须依赖仓储级原子唯一性，不能使用“先查再写”；
+- 同一请求成功后若因网络原因重试，不得产生第二份 Summary。请明确并测试重试语义；不得用静默覆盖新内容的方式伪装幂等。
+
+业务边界：
+
+- Session 不存在 → 404；
+- 只允许终态 Session（当前可通过正常接口产生 completed；cancelled / interrupted 仅保留领域兼容）提交正式总结，活动或草稿 Session 返回稳定 409；
+- GET：Session 不存在与 Summary 不存在使用清晰、稳定且不同的受控 404 错误码；
+- 请求体严格拒绝 `id / studySessionId / revision / confirmedByUserAt / createdAt / updatedAt / actorId` 等受保护或身份字段；
+- 当前统一用户认证尚未接入，请在代码中明确此为未来“已认证用户路由”边界，不新增可由客户端指定的用户身份字段。
+
+### 三、存储与数据完整性
+
+- 新增独立 `StudySummaryRepository` 与内存实现，不把 Summary 塞进 `StudySession` 对象；
+- 仓储以 `studySessionId` 保证唯一，并提供原子 create-if-absent / compare-and-swap（或语义等价）能力；
+- 返回对象使用拷贝，外部修改不得污染仓储；
+- 为 PostgreSQL 阶段写清楚唯一约束与 revision 条件更新要求，但本批不创建数据库迁移；
+- Summary 与未来 `StudyReport` 必须是不同模型与仓储，不能互相覆盖。
+
+### 四、测试与验收
+
+覆盖契约、仓储、服务与 HTTP API，至少包括：
+
+- completed Session 初次提交 201，字段、时间与 revision 正确；
+- 修改返回 200，仍是同一 Summary，revision+1，createdAt 不变；
+- 一个 Session 始终最多一份 Summary；
+- content trim、空内容、超长内容、非法 source、未知字段；
+- Session / Summary 404 与非终态 409；
+- 陈旧 revision 409、并发创建、并发修改；
+- GET 正确读取且不泄露额外内部字段；
+- `ai_assisted` 只能表示“用户已确认的正式总结”，不得创建未确认的正式记录；
+- 仓储返回深拷贝；
+- 运行 `npm run typecheck`、`npm test`、`git diff --check`。
+
+### 本批明确不做
+
+- 不调用 AI，不实现“让 AI 帮我总结”的生成接口，不保存 AI 草稿；
+- 不实现 AI 参与者、AI 学习报告、MCP `study_append_report` 或多个 AI 报告；
+- 不申报“查询单次 Session 完整详情”；该项要等 Summary、参与者、报告聚合完成后再验收；
+- 不修改计划文档复选框；
+- 不执行 Git / GitHub / VPS 或其他外部操作；
+- 不读取或修改 `.claude/`、`ui素材mingwu/` 等无关目录。
+
+完成后把“检查点 #12”追加到本文件末尾，列出候选完成项、接口 / 并发规则、文件清单、真实测试结果与数据库阶段风险，然后立即暂停，等待小喵审核。
+
+---
+
+## 检查点 #12 · 用户学习总结 · 2026-08-10
+
+### 本批次目标
+
+实现“用户提交总结”：建立 `StudySummary` 模型，提供 `PUT / GET /api/v1/study-sessions/:id/summary`，一个 Session 最多一份正式总结、可反复修改不新增第二份；明确并落地 create-if-absent / compare-and-swap 的并发与重试语义；只允许终态 Session 提交；严格拒绝受保护或身份字段。
+
+### 候选完成的计划项（原文，未打勾）
+
+- [ ] 用户提交总结（docs/project-plan-v0.1.md 对应项）
+
+### 实际完成内容
+
+- 契约层：`packages/contracts/src/study-summary.ts`，含 `StudySummary` 模型、`PutStudySummaryInput`、`SUMMARY_SOURCES`、`SUMMARY_CONTENT_MAX_LENGTH = 5000`（契约 / 服务 / 测试共用）、严格白名单 `studySummaryBodySchema`（coerceTypes:false、additionalProperties:false）与响应 `studySummaryJsonSchema`。
+- 领域层：`apps/server/src/domain/study-summary/` 下 6 个受控错误与 `StudySummaryRepository` 接口（createIfAbsent / updateIfRevision / findByStudySessionId）。
+- 应用层：`StudySummaryService`，含 `getBySessionId`（区分 Session 404 与 Summary 404）与 `putBySessionId`（创建 / 更新路径、重试与并发语义、服务端时间与 id）。
+- 仓储：`InMemoryStudySummaryRepository`，以 `studySessionId` 为主键，返回深拷贝，原子 create-if-absent / CAS。
+- 路由与装配：`study-sessions.ts` 增加 `PUT/GET /study-sessions/:id/summary`；`app.ts` 注入 service 并映射 6 个错误码；`index.ts` 装配；测试 `helpers.ts` 增加 `studySummaryRepository / studySummaryService / makeStudySummary`，12 个 `buildApp` 调用方补齐必需依赖。
+- 测试：契约 / 仓储 / 服务 / HTTP API 四层共 56 个新测试。
+
+### 新增、修改、删除的文件清单
+
+新增：
+- packages/contracts/src/study-summary.ts
+- apps/server/src/domain/study-summary/errors.ts
+- apps/server/src/domain/study-summary/repository.ts
+- apps/server/src/application/study-summary/study-summary-service.ts
+- apps/server/src/infrastructure/repositories/in-memory-study-summary-repository.ts
+- apps/server/test/study-summary-contract.test.ts
+- apps/server/test/study-summary-repository.test.ts
+- apps/server/test/study-summary-service.test.ts
+- apps/server/test/study-summary-api.test.ts
+
+修改：
+- packages/contracts/src/index.ts（导出 study-summary）
+- apps/server/src/app.ts（AppDeps 增加 studySummaryService，注册路由，映射 StudySummary 6 个错误码）
+- apps/server/src/index.ts（装配 StudySummaryService）
+- apps/server/src/api/routes/study-sessions.ts（PUT/GET summary 路由，plugin opts 增加 studySummaryService）
+- apps/server/test/helpers.ts（makeServices 增加 studySummary，新增 makeStudySummary）
+- apps/server/test/health.test.ts、project-api.test.ts、stage-api.test.ts、project-task-api.test.ts、project-status-api.test.ts、mcp-http.test.ts、mcp-http-smoke.test.ts、study-session-api.test.ts（补齐 buildApp 必需依赖 studySummaryService）
+
+删除：无。
+
+### 关键设计决定及其依据
+
+1. 服务端生成 id 与时间：`id` 用 `crypto.randomUUID()`，`confirmedByUserAt / createdAt / updatedAt` 全部由服务端可注入时钟写入，客户端提交即被 schema 严格拒绝（400），防止客户端伪造确认时间或覆盖保护字段。
+2. 重试语义（明确、测试、不静默覆盖）：创建路径 `expectedRevision=0` 依赖仓储 `createIfAbsent` 原子唯一（PostgreSQL 阶段为唯一约束 / `ON CONFLICT DO NOTHING`，业务层不“先查再写”）；重试撞上已存在总结时，请求 content+source 与已有完全一致 → 幂等返回已有（created=false → 200，不推进 revision），不一致 → 409 `study_summary_idempotency_conflict`，绝不覆盖已确认内容。更新路径 `expectedRevision>0` 以 revision+1 构造新值后走仓储 CAS `updateIfRevision`；陈旧 / 并发 / 更新后重试 → 409 `study_summary_revision_conflict`；20 个相同 expectedRevision 并发修改最多一个成功（并发创建、并发修改均有测试）。
+3. GET 404 区分：Session 不存在 → `study_session_not_found`，Summary 不存在 → `study_summary_not_found`，两个受控 404 错误码稳定且不同。
+4. 终态校验：复用契约 `HISTORY_TERMINAL_STATUSES`（completed / cancelled / interrupted），活动或草稿 Session 提交返回稳定 409 `study_summary_session_not_terminal`。
+5. 长度与 trim：`content` trim 后非空且 ≤ 5000，常量单一来源；schema minLength 只拦空串，纯空白串由服务层 trim 后抛 400 `study_summary_content_invalid`（有测试）。
+6. 未来已认证用户路由边界：统一用户认证尚未接入，代码注释明确本批不新增可由客户端指定的用户身份字段，`actorId` 在 body 中被 strict 拒绝。
+7. Summary 与未来 StudyReport 独立模型 / 仓储，本批未建立 StudyReport，不会互相覆盖。
+
+### 执行过的测试或检查、命令与真实结果
+
+- `cd apps/server && npm run typecheck`：通过（tsc --noEmit 无错误）。
+- `cd apps/server && npx vitest run test/study-summary-contract.test.ts test/study-summary-repository.test.ts test/study-summary-service.test.ts test/study-summary-api.test.ts`：4 个文件 **56/56 通过**。
+- `cd apps/server && npx vitest run`（全量）：23 个测试文件 **523/523 通过**（含既有 StudySession、MCP、项目 / 关卡 / 任务等回归）。
+- 真实 NUL 字节扫描（node 脚本遍历 apps/server 与 packages/contracts 全部 .ts）：**TOTAL NUL: 0**。
+- `git diff --check`：exit 0，除 Windows LF→CRLF 提示外无空白错误。
+
+### 未完成内容、已知问题和风险
+
+- 内存仓储为第三关接口开发用；第六关 PostgreSQL 需 `study_summaries.study_session_id` 唯一约束 + `UPDATE ... WHERE study_session_id = ? AND revision = ?` 条件更新（已在仓储接口注释写明），本批不创建数据库迁移。
+- 统一用户认证未接入：PUT summary 暂不做客户端身份绑定，仅预留“已认证用户路由”边界注释。
+- 未申报“查询单次 Session 完整详情”；该项需等 Summary、参与者、报告聚合完成后才能验收。
+- 未实现 AI 生成接口 / AI 草稿 / AI 参与者 / AI 学习报告 / MCP `study_append_report`，`ai_assisted` 仅作为“用户已确认的正式总结”来源标记。
+
+### 是否涉及数据库、身份权限、密钥、外部服务或破坏性变化
+
+- 数据库 / Migration：否（仅注明 PostgreSQL 阶段要求，未建迁移）。
+- 身份认证 / 权限 / 密钥：否（认证边界仅注释，未新增身份字段）。
+- 外部服务 / VPS / 部署：否。
+- 破坏性变化：否（保留工作区既有修改，未触碰 `.claude/`、`ui素材mingwu/` 等无关目录）。
+
+### 建议下一批任务
+
+由小喵审核后决定。候选方向：建立 AI 参与者 / AI 学习报告模型与仓储（与 Summary 独立），或等待 Summary、参与者、报告齐备后申报“查询单次 Session 完整详情”聚合。
+
+### 等待小喵审核
+
+等待小喵审核。
+
+---
+
+## 小喵审核结果 #12 · 需要小返修 · 2026-08-10
+
+### 审核结论
+
+本批的主体设计通过审核：StudySummary 与 StudyReport 边界独立；一个 Session 一份 Summary；创建使用仓储级原子唯一；修改使用 revision CAS；同内容创建重试不会生成第二份；不同内容不会静默覆盖；终态限制、服务端确认字段与严格请求白名单均已落实。
+
+小喵独立执行结果：
+
+- `npm run typecheck`：通过；
+- `npm test`：23 个测试文件，**523/523 通过**；
+- server / contracts 全部 `.ts` 文件真实 NUL 字节计数为 0；
+- `git diff --check`：除 Windows LF→CRLF 提示外无空白错误。
+
+但有一个会影响真实用户输入的长度边界问题，修正前暂不勾选“用户提交总结”。
+
+### 必须返修：统一 Unicode 长度语义
+
+`studySummaryBodySchema.maxLength` 按 JSON Schema 规则计算 Unicode code point，而服务层使用 JavaScript `content.length`，后者计算 UTF-16 code unit。两层对 emoji 等非 BMP 字符的长度判断不一致。
+
+小喵真实复现：
+
+- `'😀'.repeat(5000)` 的 UTF-16 length 为 10000，Unicode code point 数为 5000；
+- 当前请求 Schema 判定合法（正好等于 `SUMMARY_CONTENT_MAX_LENGTH=5000`）；
+- 同一内容直接进入 `StudySummaryService.putBySessionId` 后抛 `StudySummaryContentInvalidError`。
+
+这意味着请求先通过契约，却在服务层被错误拒绝。请：
+
+- 服务层按照与 JSON Schema `maxLength` 一致的 Unicode code point 语义计算 trim 后正文长度，例如使用共享的小辅助函数或等价的 `Array.from(content).length`；
+- 保持 `SUMMARY_CONTENT_MAX_LENGTH` 为单一常量来源，不改成两套上限；
+- 增加契约、服务与 HTTP API 回归测试：正好 5000 个 emoji 可以保存，5001 个 emoji 被拒绝；
+- 保持空白 trim、幂等比较、原子创建与 CAS 逻辑不变。
+
+### 边界要求
+
+- 只修这个 Unicode 长度问题，不开始下一批；
+- 不修改计划文档复选框；
+- 不执行 Git / GitHub / VPS 操作；
+- 不读取或修改 `.claude/`、`ui素材mingwu/` 等无关目录；
+- 完成后在本文件末尾追加“检查点 #12 返修”，列出修改和真实测试结果，然后暂停等待复验。
+
+---
+
+## 检查点 #12 返修 · Unicode 长度语义 · 2026-08-10
+
+### 返修目标
+
+统一服务层与 JSON Schema 的长度语义：`studySummaryBodySchema.maxLength` 按 Unicode code point 计数，而服务层使用 `String.length`（UTF-16 code unit 计数），导致恰好 `SUMMARY_CONTENT_MAX_LENGTH` 个 emoji（如 `'😀'.repeat(5000)`，UTF-16 length 10000、code point 数 5000）会通过请求校验却在服务层被错误拒绝。本返修只修这一处，保持空白 trim、幂等比较、原子创建与 CAS 逻辑不变。
+
+### 实际修改
+
+- 新增共享 helper：`packages/contracts/src/study-summary.ts` 增加并导出 `countCodePoints(value)`（`Array.from(value).length`，按 Unicode code point 计数），与 `SUMMARY_CONTENT_MAX_LENGTH` 同为单一来源，契约层校验与服务层保存共用同一长度语义。
+- 服务层：`apps/server/src/application/study-summary/study-summary-service.ts` 的 `putBySessionId` 中，trim 后正文长度校验从 `content.length > SUMMARY_CONTENT_MAX_LENGTH` 改为 `countCodePoints(content) > SUMMARY_CONTENT_MAX_LENGTH`；空串判断从 `content.length === 0` 改为 `content === ''`。`SUMMARY_CONTENT_MAX_LENGTH` 常量保持不变，未引入第二套上限。
+- 注释更新：`StudySummaryContentInvalidError` 与 `putBySessionId` 文档注释补充“按 Unicode code point 计数，与 JSON Schema maxLength 语义一致”。
+- 空白 trim、幂等比较（content+source 完全一致才幂等）、仓储原子 createIfAbsent / CAS 逻辑均未改动。
+
+### 修改的文件清单
+
+修改：
+- packages/contracts/src/study-summary.ts（新增并导出 `countCodePoints`）
+- apps/server/src/application/study-summary/study-summary-service.ts（长度校验改用 `countCodePoints`）
+- apps/server/src/domain/study-summary/errors.ts（注释说明 code point 语义）
+- apps/server/test/study-summary-contract.test.ts（emoji 边界 + `countCodePoints` helper 测试）
+- apps/server/test/study-summary-service.test.ts（emoji 边界测试）
+- apps/server/test/study-summary-api.test.ts（emoji 边界测试）
+
+新增：无。删除：无。
+
+### 新增回归测试（三个层面，共 +5）
+
+- 契约层：正好 `SUMMARY_CONTENT_MAX_LENGTH`（5000）个 emoji 通过 `studySummaryBodySchema`（code point 计数），5001 个 emoji 拒绝；`countCodePoints` helper 单测（`''`=0、`'abc'`=3、`'😀'`=1、`'😀'.length`=2、5000 emoji 的 code point 数=5000 而 UTF-16 length=10000）。
+- 服务层：`'😀'.repeat(5000)` 调用 `putBySessionId` 成功创建（created=true，revision=1）；`'😀'.repeat(5001)` 抛 `StudySummaryContentInvalidError`。
+- HTTP API：PUT 恰好 5000 个 emoji 返回 201（契约与服务均按 code point 放行，response schema 同样放行）；5001 个 emoji 被 schema 先行拒绝，返回 400 `validation_failed`。
+
+### 执行过的测试或检查、命令与真实结果
+
+- `cd apps/server && npm run typecheck`：通过（tsc --noEmit 无错误）。
+- `cd apps/server && npx vitest run test/study-summary-contract.test.ts test/study-summary-repository.test.ts test/study-summary-service.test.ts test/study-summary-api.test.ts`：4 个文件 **61/61 通过**（返修前 56，新增 5 个边界测试）。
+- `cd apps/server && npx vitest run`（全量）：23 个测试文件 **528/528 通过**（返修前 523，+5）。
+- 真实 NUL 字节扫描（node 脚本遍历 apps/server 与 packages/contracts 全部 .ts）：**TOTAL NUL: 0**。
+- `git diff --check`：exit 0，除 Windows LF→CRLF 提示外无空白错误。
+
+### 未完成内容、已知问题和风险
+
+- 本返修只覆盖 StudySummary 的正文长度校验。代码库中其它文本长度校验（如 `taskText`、任务标题等）若同样用 `String.length` 对 maxLength 判断，会存在相同的 emoji 边界问题；建议后续批次统一引入 `countCodePoints` 语义，本批不擅自扩大范围。
+- 其余与「检查点 #12」相同：内存仓储为第三关接口开发用，第六关 PostgreSQL 阶段需唯一约束与 revision 条件更新；统一用户认证未接入；未申报“查询单次 Session 完整详情”；未实现 AI 参与者 / AI 学习报告。
+
+### 是否涉及数据库、身份权限、密钥、外部服务或破坏性变化
+
+- 数据库 / Migration：否。身份认证 / 权限 / 密钥：否。外部服务 / VPS / 部署：否。破坏性变化：否（未触碰 `.claude/`、`ui素材mingwu/` 等无关目录，计划复选框未勾选）。
+
+### 等待小喵复验
+
+等待小喵复验。
+
+---
+
+## 小喵复验结果 #12 · 通过 · 2026-08-10
+
+### 验收结论
+
+检查点 #12 及 Unicode 长度返修已通过，计划项“用户提交总结”由小喵正式勾选。
+
+小喵独立复验结果：
+
+- `npm run typecheck`：通过；
+- `npm test`：23 个测试文件，**528/528 通过**；
+- `countCodePoints('😀'.repeat(5000)) = 5000`，5001 个 emoji 正确判定越界；
+- 契约、服务与 HTTP API 的 emoji 边界测试均通过；
+- server / contracts 全部 `.ts` 文件真实 NUL 字节计数为 0；
+- `git diff --check`：除 Windows LF→CRLF 提示外无空白错误；
+- 一个 Session 一份 Summary、创建幂等、不同内容冲突、revision CAS、终态限制、trim 与服务端确认字段均保持正确。
+
+### 验收边界
+
+- 本次只验收“用户提交总结”；
+- `ai_assisted` 仅表示用户确认后的正式总结来源，本批没有实现 AI 生成或草稿保存；
+- AI 参与者、AI 学习报告与 MCP `study_append_report` 尚未实现；
+- “查询单次 Session 完整详情”继续保持未勾选。
+
+**检查点 #12 已完成，可以进入下一批。**

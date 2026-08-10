@@ -9,6 +9,7 @@ import type { StageService } from './application/stage/stage-service.js';
 import type { ProjectTaskService } from './application/project-task/project-task-service.js';
 import type { ProjectStatusService } from './application/project-status/project-status-service.js';
 import type { StudySessionService } from './application/study-session/study-session-service.js';
+import type { StudySummaryService } from './application/study-summary/study-summary-service.js';
 import {
   healthRoutes,
   type ReadinessCheck,
@@ -52,6 +53,14 @@ import {
   StudySessionTimerModeConflictError,
   StudySessionVersionConflictError,
 } from './domain/study-session/errors.js';
+import {
+  StudySummaryContentInvalidError,
+  StudySummaryExpectedRevisionInvalidError,
+  StudySummaryIdempotencyConflictError,
+  StudySummaryNotFoundError,
+  StudySummaryRevisionConflictError,
+  StudySummarySessionNotTerminalError,
+} from './domain/study-summary/errors.js';
 
 export interface AppDeps {
   config: AppConfig;
@@ -60,6 +69,7 @@ export interface AppDeps {
   taskService: ProjectTaskService;
   projectStatusService: ProjectStatusService;
   studySessionService: StudySessionService;
+  studySummaryService: StudySummaryService;
   readinessChecks?: ReadinessCheck[];
   /** readyz 单项检查超时毫秒数，默认 2000，测试可注入小值。 */
   readyzTimeoutMs?: number;
@@ -111,6 +121,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   app.register(studySessionRoutes, {
     prefix: '/api/v1',
     studySessionService: deps.studySessionService,
+    studySummaryService: deps.studySummaryService,
   });
 
   // MCP Streamable HTTP 挂在根路径 /mcp（不在 /api/v1 下），本地测试专用。
@@ -277,6 +288,42 @@ export function buildApp(deps: AppDeps): FastifyInstance {
       return reply.status(500).send({
         error: 'study_session_history_data_corrupt',
         message: 'study session history data is inconsistent',
+      });
+    }
+    // StudySummary：404 区分 Session 与 Summary 不存在；409 区分非终态 / revision /
+    // 幂等冲突；400 区分正文与 expectedRevision 不合法。所有消息不回显用户正文、
+    // 总结内容、受保护字段或时间，避免把用户数据反弹给调用方。
+    if (error instanceof StudySummaryNotFoundError) {
+      return reply.status(404).send({ error: 'study_summary_not_found', message: error.message });
+    }
+    if (error instanceof StudySummarySessionNotTerminalError) {
+      return reply.status(409).send({
+        error: 'study_summary_session_not_terminal',
+        message: error.message,
+      });
+    }
+    if (error instanceof StudySummaryRevisionConflictError) {
+      return reply.status(409).send({
+        error: 'study_summary_revision_conflict',
+        message: error.message,
+      });
+    }
+    if (error instanceof StudySummaryIdempotencyConflictError) {
+      return reply.status(409).send({
+        error: 'study_summary_idempotency_conflict',
+        message: error.message,
+      });
+    }
+    if (error instanceof StudySummaryContentInvalidError) {
+      return reply.status(400).send({
+        error: 'study_summary_content_invalid',
+        message: error.message,
+      });
+    }
+    if (error instanceof StudySummaryExpectedRevisionInvalidError) {
+      return reply.status(400).send({
+        error: 'study_summary_expected_revision_invalid',
+        message: error.message,
       });
     }
     if (error.validation) {

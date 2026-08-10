@@ -2,6 +2,7 @@ import type {
   CreateStudySessionInput,
   EndStudySessionInput,
   PauseStudySessionInput,
+  PutStudySummaryInput,
   ResumeStudySessionInput,
   SetCountdownInput,
   SetTaskInput,
@@ -19,10 +20,13 @@ import {
   studySessionHistoryQuerySchema,
   studySessionJsonSchema,
   studySessionParamsSchema,
+  studySummaryBodySchema,
+  studySummaryJsonSchema,
 } from '@mingwu/contracts';
 import type { FastifyPluginAsync } from 'fastify';
 import { StudySessionHistoryLimitInvalidError } from '../../domain/study-session/errors.js';
 import type { StudySessionService } from '../../application/study-session/study-session-service.js';
+import type { StudySummaryService } from '../../application/study-summary/study-summary-service.js';
 
 const HISTORY_PAGE_DEFAULT_LIMIT = 20;
 const HISTORY_PAGE_MAX_LIMIT = 100;
@@ -45,8 +49,9 @@ function parseHistoryLimit(raw: string | undefined): number {
 
 export const studySessionRoutes: FastifyPluginAsync<{
   studySessionService: StudySessionService;
+  studySummaryService: StudySummaryService;
 }> = async (app, opts) => {
-  const { studySessionService } = opts;
+  const { studySessionService, studySummaryService } = opts;
 
   // 幂等创建：id 由客户端生成并充当幂等键。重试相同 id + 相同内容返回已有 Session（200），
   // 相同 id + 不同内容返回稳定 409，不会因重试产生重复 Session。
@@ -205,6 +210,46 @@ export const studySessionRoutes: FastifyPluginAsync<{
       const { id } = request.params as { id: string };
       const input = request.body as EndStudySessionInput;
       return studySessionService.endStudySession(id, input);
+    },
+  );
+
+  // 读取正式学习总结（只读）。Session 不存在返回 study_session_not_found（404），
+  // Session 存在但没有总结返回 study_summary_not_found（404），两者错误码不同。
+  // 本批不调用 AI、不建立 AI 参与者 / AI 学习报告模型。
+  app.get(
+    '/study-sessions/:id/summary',
+    {
+      schema: {
+        params: studySessionParamsSchema,
+        response: { 200: studySummaryJsonSchema },
+      },
+    },
+    async (request) => {
+      const { id } = request.params as { id: string };
+      return studySummaryService.getBySessionId(id);
+    },
+  );
+
+  // 提交 / 修改正式学习总结。一个 Session 最多一份，反复修改不新增第二份：
+  // - expectedRevision=0 原子创建，201；网络 / 并发重试撞上已存在总结时，请求内容
+  //   与已有内容一致按幂等返回已有总结（200），不一致返回稳定 409，不静默覆盖；
+  // - expectedRevision>0 为乐观并发更新（CAS revision+1），200；陈旧 revision 409。
+  // 请求体只允许 content / source / expectedRevision，拒绝受保护或身份字段；
+  // 时间（confirmedByUserAt / createdAt / updatedAt）与服务端生成 id 由服务端写入。
+  app.put(
+    '/study-sessions/:id/summary',
+    {
+      schema: {
+        params: studySessionParamsSchema,
+        body: studySummaryBodySchema,
+        response: { 201: studySummaryJsonSchema, 200: studySummaryJsonSchema },
+      },
+    },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      const input = request.body as PutStudySummaryInput;
+      const { summary, created } = await studySummaryService.putBySessionId(id, input);
+      return reply.status(created ? 201 : 200).send(summary);
     },
   );
 };

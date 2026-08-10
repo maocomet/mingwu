@@ -24,6 +24,7 @@ describe('MCP Streamable HTTP real-HTTP smoke (127.0.0.1, ephemeral port)', () =
       taskService: services.taskService,
       projectStatusService: services.projectStatusService,
       studySessionService: services.studySessionService,
+    studySummaryService: services.studySummaryService,
     });
     await app.listen({ host: '127.0.0.1', port: 0 });
     const address = app.server.address();

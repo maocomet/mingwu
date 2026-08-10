@@ -5,10 +5,12 @@ import { StageService } from './application/stage/stage-service.js';
 import { ProjectTaskService } from './application/project-task/project-task-service.js';
 import { ProjectStatusService } from './application/project-status/project-status-service.js';
 import { StudySessionService } from './application/study-session/study-session-service.js';
+import { StudySummaryService } from './application/study-summary/study-summary-service.js';
 import { InMemoryProjectRepository } from './infrastructure/repositories/in-memory-project-repository.js';
 import { InMemoryStageRepository } from './infrastructure/repositories/in-memory-stage-repository.js';
 import { InMemoryProjectTaskRepository } from './infrastructure/repositories/in-memory-project-task-repository.js';
 import { InMemoryStudySessionRepository } from './infrastructure/repositories/in-memory-study-session-repository.js';
+import { InMemoryStudySummaryRepository } from './infrastructure/repositories/in-memory-study-summary-repository.js';
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -16,6 +18,7 @@ async function main(): Promise<void> {
   const stageRepository = new InMemoryStageRepository();
   const taskRepository = new InMemoryProjectTaskRepository();
   const studySessionRepository = new InMemoryStudySessionRepository();
+  const studySummaryRepository = new InMemoryStudySummaryRepository();
   const projectService = new ProjectService(projectRepository);
   const stageService = new StageService(stageRepository, projectRepository);
   const taskService = new ProjectTaskService(taskRepository, stageRepository, projectRepository);
@@ -25,6 +28,10 @@ async function main(): Promise<void> {
     taskRepository,
   );
   const studySessionService = new StudySessionService(studySessionRepository);
+  const studySummaryService = new StudySummaryService(
+    studySummaryRepository,
+    studySessionRepository,
+  );
   const app = buildApp({
     config,
     projectService,
@@ -32,6 +39,7 @@ async function main(): Promise<void> {
     taskService,
     projectStatusService,
     studySessionService,
+    studySummaryService,
   });
 
   const shutdown = async (signal: string): Promise<void> => {
