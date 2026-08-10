@@ -1,12 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type { StudySession } from '@mingwu/contracts';
 import { buildApp } from '../src/app.js';
+import { StudySessionService } from '../src/application/study-session/study-session-service.js';
 import { loadConfig } from '../src/config.js';
 import { makeServices, makeStudySession, uuid } from './helpers.js';
 
 type App = ReturnType<typeof buildApp>;
 
-function setup() {
+function setup(now?: () => string) {
   const config = loadConfig({ NODE_ENV: 'test' });
   const services = makeServices();
   const app = buildApp({
@@ -15,7 +16,9 @@ function setup() {
     stageService: services.stageService,
     taskService: services.taskService,
     projectStatusService: services.projectStatusService,
-    studySessionService: services.studySessionService,
+    studySessionService: now
+      ? new StudySessionService(services.studySessionRepository, now)
+      : services.studySessionService,
   });
   return { app, services };
 }
@@ -473,5 +476,235 @@ describe('PATCH /api/v1/study-sessions/:id/countdown', () => {
     );
     expect(results.filter((r) => r.statusCode === 200)).toHaveLength(1);
     expect(results.filter((r) => r.statusCode === 409)).toHaveLength(19);
+  });
+});
+
+describe('GET /api/v1/study-sessions/:id', () => {
+  it('returns the session core state', async () => {
+    const { app } = setup();
+    const id = uuid();
+    await app.inject({
+      method: 'POST',
+      url: '/api/v1/study-sessions',
+      payload: { id, timerMode: 'count_down', taskText: '背单词', plannedDurationSeconds: 600 },
+    });
+    const res = await app.inject({ method: 'GET', url: `/api/v1/study-sessions/${id}` });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.id).toBe(id);
+    expect(body.timerMode).toBe('count_down');
+    expect(body.taskText).toBe('背单词');
+    expect(body.plannedDurationSeconds).toBe(600);
+    expect(body.status).toBe('created');
+    expect(body.version).toBe(1);
+  });
+
+  it('returns 404 for an unknown session', async () => {
+    const { app } = setup();
+    const res = await app.inject({ method: 'GET', url: `/api/v1/study-sessions/${uuid()}` });
+    expect(res.statusCode).toBe(404);
+    expect(res.json().error).toBe('study_session_not_found');
+  });
+});
+
+describe('POST /api/v1/study-sessions/:id/start', () => {
+  const FIXED_NOW = '2026-01-01T08:00:00.000Z';
+
+  it('starts a count_down session and returns running with server-side startedAt', async () => {
+    const { app } = setup(() => FIXED_NOW);
+    const id = uuid();
+    await app.inject({
+      method: 'POST',
+      url: '/api/v1/study-sessions',
+      payload: { id, timerMode: 'count_down', taskText: '背单词', plannedDurationSeconds: 600 },
+    });
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${id}/start`,
+      payload: { expectedVersion: 1 },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.status).toBe('running');
+    expect(body.startedAt).toBe(FIXED_NOW);
+    expect(body.version).toBe(2);
+    expect(body.endedAt).toBeNull();
+    expect(body.actualDurationSeconds).toBe(0);
+    expect(body.pausedDurationSeconds).toBe(0);
+  });
+
+  it('starts a count_up session without a duration', async () => {
+    const { app } = setup();
+    const id = uuid();
+    await app.inject({
+      method: 'POST',
+      url: '/api/v1/study-sessions',
+      payload: { id, timerMode: 'count_up', taskText: '专注' },
+    });
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${id}/start`,
+      payload: { expectedVersion: 1 },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.status).toBe('running');
+    expect(body.timerMode).toBe('count_up');
+    expect(body.plannedDurationSeconds).toBeNull();
+  });
+
+  it('returns a stable 409 with reason missing_task when the task is not set', async () => {
+    const { app } = setup();
+    const id = uuid();
+    await app.inject({
+      method: 'POST',
+      url: '/api/v1/study-sessions',
+      payload: { id, timerMode: 'count_down', plannedDurationSeconds: 600 },
+    });
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${id}/start`,
+      payload: { expectedVersion: 1 },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe('study_session_start_precondition_failed');
+    expect(res.json().reason).toBe('missing_task');
+  });
+
+  it('returns a stable 409 with reason missing_duration for a count_down without a duration', async () => {
+    const { app } = setup();
+    const id = uuid();
+    await app.inject({
+      method: 'POST',
+      url: '/api/v1/study-sessions',
+      payload: { id, timerMode: 'count_down', taskText: '任务' },
+    });
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${id}/start`,
+      payload: { expectedVersion: 1 },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().reason).toBe('missing_duration');
+  });
+
+  it('returns 409 with reason invalid_duration for a count_down with an illegal stored duration and keeps state unchanged', async () => {
+    const { app, services } = setup();
+    const session = makeStudySession({
+      timerMode: 'count_down',
+      taskText: '任务',
+      plannedDurationSeconds: 0,
+    });
+    await services.studySessionRepository.createIfAbsent(session);
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${session.id}/start`,
+      payload: { expectedVersion: session.version },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe('study_session_start_precondition_failed');
+    expect(res.json().reason).toBe('invalid_duration');
+    const latest = await app.inject({ method: 'GET', url: `/api/v1/study-sessions/${session.id}` });
+    expect(latest.json().status).toBe('created');
+    expect(latest.json().version).toBe(session.version);
+    expect(latest.json().startedAt).toBeNull();
+  });
+
+  it('returns a stable status-conflict 409 for a non-created session and does not rewrite startedAt', async () => {
+    const { app, services } = setup();
+    const session = makeStudySession({
+      timerMode: 'count_down',
+      taskText: '任务',
+      plannedDurationSeconds: 600,
+      status: 'running',
+      startedAt: '2026-01-01T01:00:00.000Z',
+    });
+    await services.studySessionRepository.createIfAbsent(session);
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${session.id}/start`,
+      payload: { expectedVersion: session.version },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe('study_session_status_conflict');
+    const latest = await app.inject({ method: 'GET', url: `/api/v1/study-sessions/${session.id}` });
+    expect(latest.json().startedAt).toBe('2026-01-01T01:00:00.000Z');
+    expect(latest.json().version).toBe(session.version);
+  });
+
+  it('returns a stable 409 on a stale expectedVersion', async () => {
+    const { app } = setup();
+    const id = uuid();
+    await app.inject({
+      method: 'POST',
+      url: '/api/v1/study-sessions',
+      payload: { id, timerMode: 'count_down', taskText: '任务', plannedDurationSeconds: 600 },
+    });
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${id}/start`,
+      payload: { expectedVersion: 99 },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error).toBe('study_session_version_conflict');
+  });
+
+  it('rejects unknown fields in the body', async () => {
+    const { app } = setup();
+    const id = uuid();
+    await app.inject({
+      method: 'POST',
+      url: '/api/v1/study-sessions',
+      payload: { id, timerMode: 'count_down', taskText: '任务', plannedDurationSeconds: 600 },
+    });
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${id}/start`,
+      payload: { expectedVersion: 1, actorId: 'x' },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe('validation_failed');
+  });
+
+  it('rejects a string expectedVersion as a strict type violation', async () => {
+    const { app } = setup();
+    const id = uuid();
+    await app.inject({
+      method: 'POST',
+      url: '/api/v1/study-sessions',
+      payload: { id, timerMode: 'count_down', taskText: '任务', plannedDurationSeconds: 600 },
+    });
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/v1/study-sessions/${id}/start`,
+      payload: { expectedVersion: '1' },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe('validation_failed');
+  });
+
+  it('concurrent start with the same expectedVersion: exactly one succeeds and startedAt is written once', async () => {
+    const { app } = setup(() => FIXED_NOW);
+    const id = uuid();
+    await app.inject({
+      method: 'POST',
+      url: '/api/v1/study-sessions',
+      payload: { id, timerMode: 'count_down', taskText: '并发', plannedDurationSeconds: 600 },
+    });
+    const results = await Promise.all(
+      Array.from({ length: 20 }, () =>
+        app.inject({
+          method: 'POST',
+          url: `/api/v1/study-sessions/${id}/start`,
+          payload: { expectedVersion: 1 },
+        }),
+      ),
+    );
+    expect(results.filter((r) => r.statusCode === 200)).toHaveLength(1);
+    expect(results.filter((r) => r.statusCode === 409)).toHaveLength(19);
+    const latest = await app.inject({ method: 'GET', url: `/api/v1/study-sessions/${id}` });
+    expect(latest.json().status).toBe('running');
+    expect(latest.json().startedAt).toBe(FIXED_NOW);
+    expect(latest.json().version).toBe(2);
   });
 });

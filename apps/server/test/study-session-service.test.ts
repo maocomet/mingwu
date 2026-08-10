@@ -6,6 +6,7 @@ import {
   StudySessionIdempotencyConflictError,
   StudySessionNotFoundError,
   StudySessionPlannedDurationInvalidError,
+  StudySessionStartPreconditionError,
   StudySessionStatusConflictError,
   StudySessionTaskTextInvalidError,
   StudySessionTimerModeConflictError,
@@ -14,9 +15,9 @@ import {
 import type { StudySessionRepository } from '../src/domain/study-session/repository.js';
 import { makeServices, makeStudySession, uuid } from './helpers.js';
 
-function setup() {
+function setup(now?: () => string) {
   const { studySessionRepository } = makeServices();
-  const service = new StudySessionService(studySessionRepository);
+  const service = new StudySessionService(studySessionRepository, now);
   return { service, studySessionRepository };
 }
 
@@ -419,5 +420,163 @@ describe('StudySessionService.setCountdown', () => {
     );
     expect(results.filter((r) => r === 'ok')).toHaveLength(1);
     expect(results.filter((r) => r === 'conflict')).toHaveLength(19);
+  });
+});
+
+describe('StudySessionService.startStudySession', () => {
+  const FIXED_NOW = '2026-01-01T08:00:00.000Z';
+
+  it('starts a count_down session and writes server-side startedAt', async () => {
+    const { service, studySessionRepository } = setup(() => FIXED_NOW);
+    const session = await seedSession(studySessionRepository, {
+      timerMode: 'count_down',
+      taskText: '背 50 个单词',
+      plannedDurationSeconds: 600,
+    });
+    const result = await service.startStudySession(session.id, {
+      expectedVersion: session.version,
+    });
+    expect(result.status).toBe('running');
+    expect(result.startedAt).toBe(FIXED_NOW);
+    expect(result.updatedAt).toBe(FIXED_NOW);
+    expect(result.version).toBe(session.version + 1);
+    expect(result.endedAt).toBeNull();
+    expect(result.actualDurationSeconds).toBe(0);
+    expect(result.pausedDurationSeconds).toBe(0);
+    expect(result.taskText).toBe('背 50 个单词');
+  });
+
+  it('starts a count_up session without a duration', async () => {
+    const { service, studySessionRepository } = setup(() => FIXED_NOW);
+    const session = await seedSession(studySessionRepository, {
+      timerMode: 'count_up',
+      taskText: '专注工作',
+    });
+    const result = await service.startStudySession(session.id, {
+      expectedVersion: session.version,
+    });
+    expect(result.status).toBe('running');
+    expect(result.timerMode).toBe('count_up');
+    expect(result.plannedDurationSeconds).toBeNull();
+    expect(result.startedAt).toBe(FIXED_NOW);
+  });
+
+  it('rejects starting without a task with reason missing_task', async () => {
+    const { service, studySessionRepository } = setup();
+    const session = await seedSession(studySessionRepository, {
+      timerMode: 'count_down',
+      plannedDurationSeconds: 600,
+    });
+    await expect(
+      service.startStudySession(session.id, { expectedVersion: session.version }),
+    ).rejects.toMatchObject({ reason: 'missing_task' });
+  });
+
+  it('rejects starting a count_down session without a duration with reason missing_duration', async () => {
+    const { service, studySessionRepository } = setup();
+    const session = await seedSession(studySessionRepository, {
+      timerMode: 'count_down',
+      taskText: '任务',
+    });
+    await expect(
+      service.startStudySession(session.id, { expectedVersion: session.version }),
+    ).rejects.toMatchObject({ reason: 'missing_duration' });
+  });
+
+  it('rejects starting a count_down session with an illegal stored duration with reason invalid_duration', async () => {
+    const { service, studySessionRepository } = setup();
+    for (const plannedDurationSeconds of [0, 86401, 1.5]) {
+      const session = await seedSession(studySessionRepository, {
+        timerMode: 'count_down',
+        taskText: '任务',
+        plannedDurationSeconds,
+      });
+      await expect(
+        service.startStudySession(session.id, { expectedVersion: session.version }),
+      ).rejects.toMatchObject({ reason: 'invalid_duration' });
+    }
+  });
+
+  it('samples the server time exactly once for a successful start', async () => {
+    let calls = 0;
+    const countingClock = () => {
+      calls += 1;
+      return '2026-01-01T08:00:00.000Z';
+    };
+    const { service, studySessionRepository } = setup(countingClock);
+    const session = await seedSession(studySessionRepository, {
+      timerMode: 'count_down',
+      taskText: '任务',
+      plannedDurationSeconds: 600,
+    });
+    const result = await service.startStudySession(session.id, {
+      expectedVersion: session.version,
+    });
+    expect(calls).toBe(1);
+    expect(result.startedAt).toBe('2026-01-01T08:00:00.000Z');
+    expect(result.updatedAt).toBe('2026-01-01T08:00:00.000Z');
+  });
+
+  it('rejects a count_up session carrying a duration with reason count_up_duration_set', async () => {
+    const { service, studySessionRepository } = setup();
+    const session = await seedSession(studySessionRepository, {
+      timerMode: 'count_up',
+      taskText: '任务',
+      plannedDurationSeconds: 600,
+    });
+    await expect(
+      service.startStudySession(session.id, { expectedVersion: session.version }),
+    ).rejects.toMatchObject({ reason: 'count_up_duration_set' });
+  });
+
+  it('throws a status conflict for a non-created session without rewriting startedAt', async () => {
+    const { service, studySessionRepository } = setup();
+    const session = await seedSession(studySessionRepository, {
+      status: 'running',
+      startedAt: '2026-01-01T01:00:00.000Z',
+    });
+    await expect(
+      service.startStudySession(session.id, { expectedVersion: session.version }),
+    ).rejects.toBeInstanceOf(StudySessionStatusConflictError);
+    const latest = await studySessionRepository.findById(session.id);
+    expect(latest!.startedAt).toBe('2026-01-01T01:00:00.000Z');
+    expect(latest!.version).toBe(session.version);
+  });
+
+  it('throws a version conflict on a stale expectedVersion', async () => {
+    const { service, studySessionRepository } = setup();
+    const session = await seedSession(studySessionRepository, {
+      timerMode: 'count_down',
+      taskText: '任务',
+      plannedDurationSeconds: 600,
+    });
+    await expect(
+      service.startStudySession(session.id, { expectedVersion: session.version + 99 }),
+    ).rejects.toBeInstanceOf(StudySessionVersionConflictError);
+  });
+
+  it('20 concurrent starts with the same expectedVersion: exactly one succeeds and startedAt is written once', async () => {
+    const { service, studySessionRepository } = setup(() => FIXED_NOW);
+    const session = await seedSession(studySessionRepository, {
+      timerMode: 'count_down',
+      taskText: '并发开始',
+      plannedDurationSeconds: 600,
+    });
+    const results = await Promise.all(
+      Array.from({ length: 20 }, () =>
+        service
+          .startStudySession(session.id, { expectedVersion: session.version })
+          .then(() => 'ok')
+          .catch((e) =>
+            e instanceof StudySessionVersionConflictError ? 'conflict' : 'other',
+          ),
+      ),
+    );
+    expect(results.filter((r) => r === 'ok')).toHaveLength(1);
+    expect(results.filter((r) => r === 'conflict')).toHaveLength(19);
+    const latest = await studySessionRepository.findById(session.id);
+    expect(latest!.status).toBe('running');
+    expect(latest!.startedAt).toBe(FIXED_NOW);
+    expect(latest!.version).toBe(session.version + 1);
   });
 });

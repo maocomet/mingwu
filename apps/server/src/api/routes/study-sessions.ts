@@ -2,11 +2,13 @@ import type {
   CreateStudySessionInput,
   SetCountdownInput,
   SetTaskInput,
+  StartStudySessionInput,
 } from '@mingwu/contracts';
 import {
   createStudySessionBodySchema,
   setCountdownBodySchema,
   setTaskBodySchema,
+  startStudySessionBodySchema,
   studySessionJsonSchema,
   studySessionParamsSchema,
 } from '@mingwu/contracts';
@@ -66,6 +68,40 @@ export const studySessionRoutes: FastifyPluginAsync<{
       const { id } = request.params as { id: string };
       const input = request.body as SetCountdownInput;
       return studySessionService.setCountdown(id, input);
+    },
+  );
+
+  // 读取 Session 当前核心状态（只读）。用于启动后刷新与客户端计算显示时间；
+  // 本批不返回用户总结 / AI 参与者 / AI 报告或音乐信息。
+  app.get(
+    '/study-sessions/:id',
+    {
+      schema: {
+        params: studySessionParamsSchema,
+        response: { 200: studySessionJsonSchema },
+      },
+    },
+    async (request) => {
+      const { id } = request.params as { id: string };
+      return studySessionService.getById(id);
+    },
+  );
+
+  // 开始 Session：把已配置好的草稿启动为 running。请求体仅允许 expectedVersion，
+  // 不接受 actorId / status / startedAt / 时长结果或其他受保护字段；startedAt 由服务端写入。
+  app.post(
+    '/study-sessions/:id/start',
+    {
+      schema: {
+        params: studySessionParamsSchema,
+        body: startStudySessionBodySchema,
+        response: { 200: studySessionJsonSchema },
+      },
+    },
+    async (request) => {
+      const { id } = request.params as { id: string };
+      const input = request.body as StartStudySessionInput;
+      return studySessionService.startStudySession(id, input);
     },
   );
 };

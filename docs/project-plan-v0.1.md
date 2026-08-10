@@ -204,8 +204,8 @@ Windows App
 - [x] 创建 Study Session
 - [x] 设置学习任务
 - [x] 设置倒计时时长
-- [ ] 支持正计时
-- [ ] 开始 Session
+- [x] 支持正计时
+- [x] 开始 Session
 - [ ] 确定暂停规则
 - [ ] 恢复 Session
 - [ ] 结束 Session

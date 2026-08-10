@@ -1619,3 +1619,274 @@
 - 未发现返修范围外的功能扩张，没有触碰数据库、认证、VPS 或既有运行中服务。
 
 计划文档对应三项已由小喵打勾。检查点 #7 正式关闭。
+
+---
+
+## 小喵下发任务 #8 · 开始 Study Session 与正计时 · 2026-08-09
+
+### 本批候选计划项
+
+- [ ] 支持正计时
+- [ ] 开始 Session
+
+本批只把已经配置好的草稿安全地启动为 `running`，并为 Windows 客户端提供读取 Session 当前核心状态的最小能力。不要实现暂停、恢复、结束或后台计时器，也不要把最小读取接口申报为“查询单次 Session 完整详情”。
+
+### 1. 读取 Session 当前核心状态（支撑能力，不申报完整详情）
+
+实现：
+
+- `GET /api/v1/study-sessions/:id`
+- 返回当前 `StudySession` 核心记录；不存在返回稳定 404。
+- 这是启动后刷新与客户端计算显示时间的支撑接口，不包含用户总结、AI 参与者、AI 报告或音乐信息，因此本批不得勾选“查询单次 Session 完整详情”。
+
+### 2. 开始 Session
+
+实现：
+
+- `POST /api/v1/study-sessions/:id/start`
+- 请求体只允许 `{ expectedVersion }`，严格 JSON 类型，不接受 `actorId`、`status`、`startedAt`、时长结果或其他受保护字段。
+- 只允许从 `created` 进入 `running`；其他状态返回稳定状态冲突。
+- 开始前必须已经设置非空学习任务。
+- `count_down` 开始前必须已经设置合法 `plannedDurationSeconds`；`count_up` 必须保持该字段为空。
+- 成功时由服务端一次性写入：`status = running`、`startedAt = 当前 UTC 时间`、`version + 1`、刷新 `updatedAt`；`endedAt` 仍为空，实际时长和暂停时长仍为 0。
+- 不允许客户端提供或覆盖服务器时间。
+- 仓储继续使用原子 `updateIfVersion`；20 路相同 `expectedVersion` 并发开始时只能一个成功，其余稳定 409。
+- 已经 running 的重复开始不得重写 `startedAt`，应返回状态冲突。
+
+请为“缺少学习任务”和“倒计时缺少设定时长”设计受控、可区分但不泄露内容的开始前置条件错误，例如统一错误码配受控 `reason` 枚举，方便客户端提示用户补全草稿。
+
+### 3. 正计时支持的完成边界
+
+本批“支持正计时”定义为：
+
+- 可以创建 `count_up` Session；
+- 设置学习任务后可以成功开始；
+- 服务端保存可信 `startedAt` 与 `running` 状态；
+- 客户端可通过 GET 读取 `startedAt`，用当前时间减去 `startedAt` 显示正计时。
+
+本批不持续写入“当前经过秒数”，不创建 `setInterval`、后台定时器或高频数据库写入。`actualDurationSeconds` 只在后续结束 / 中断流程中结算。
+
+### 测试与安全要求
+
+- 覆盖契约、服务与 HTTP API；
+- 覆盖 GET 成功 / 404、正计时成功开始、倒计时成功开始；
+- 覆盖缺少任务、倒计时缺少时长、非 created 状态、陈旧版本、未知字段、字符串版本号；
+- 覆盖 20 路并发开始只有一次成功，并确认最终 `startedAt` 只被首次成功请求写入；
+- 使用可注入时钟或等价方式让时间断言稳定，避免依赖等待；
+- 运行 `npm run typecheck`、`npm test`、`git diff --check`。
+
+### 本批明确不做
+
+- 不确定或实现暂停 / 恢复规则；
+- 不实现结束、取消、中断或实际学习时长结算；
+- 不创建真实计时器或后台任务；
+- 不实现 Session 历史、完整详情、用户总结、AI 报告或音乐关联；
+- 不修改计划文档复选框；
+- 不执行 Git、GitHub、VPS 或其他外部操作；
+- 不读取或修改 `.claude/`、`ui素材mingwu/` 等无关目录。
+
+完成后把“检查点 #8”追加到本文件末尾，列出候选完成项、启动不变量、接口、文件清单、真实测试结果和风险，然后立即暂停，等待小喵审核。
+
+---
+
+## 检查点 #8 · 等待小喵审核 · 2026-08-09
+
+### 本批次目标
+
+实现《小喵下发任务 #8》：开始 Session 与正计时支持。把已配置好的草稿安全启动为 `running`，并为 Windows 客户端提供读取 Session 当前核心状态的最小能力。不实现暂停、恢复、结束或后台计时器，也不申报“查询单次 Session 完整详情”。
+
+### 候选完成的计划项目原文
+
+- [ ] 支持正计时
+- [ ] 开始 Session
+
+### 实际完成内容
+
+1. **读取 Session 当前核心状态（支撑能力，不申报完整详情）**：
+   - 新增 `GET /api/v1/study-sessions/:id`：返回当前 `StudySession` 核心记录，不存在返回稳定 404 `study_session_not_found`；
+   - 不含用户总结、AI 参与者、AI 报告或音乐信息，本批不勾选“查询单次 Session 完整详情”。
+
+2. **开始 Session**：
+   - 新增 `POST /api/v1/study-sessions/:id/start`：请求体仅允许 `{ expectedVersion }`，严格整数 JSON 类型，不接受 `actorId` / `status` / `startedAt` / 时长结果等受保护字段；
+   - 只允许 `created → running`，其他状态返回稳定 409 状态冲突；已 running 的重复开始不重写 startedAt，返回状态冲突；
+   - 开始前置条件：必须已设置非空学习任务；`count_down` 必须已设置合法 `plannedDurationSeconds`；`count_up` 必须保持时长为空（领域不变量防御分支）；
+   - 成功时由服务端一次性写入：`status=running`、`startedAt=当前 UTC 时间`、`version+1`、刷新 `updatedAt`；`endedAt` 仍为空、实际与暂停时长仍为 0；客户端无法提供或覆盖服务器时间；
+   - 仓储原子 `updateIfVersion`；20 路相同 expectedVersion 并发开始只能一个成功，其余稳定 409；最终 `startedAt` 只被首次成功请求写入。
+
+3. **正计时支持完成边界**：
+   - 可创建 `count_up` Session、设置任务后可成功开始、服务端保存可信 `startedAt` 与 `running` 状态、客户端可 GET 读取 `startedAt` 计算正计时；
+   - 不持续写入“当前经过秒数”，不创建 `setInterval` / 后台定时器 / 高频数据库写入；`actualDurationSeconds` 留待后续结束 / 中断流程结算。
+
+### 启动不变量（关键设计决定及其依据）
+
+1. 校验顺序：not found → status 非 `created`（状态冲突，重复开始不重写 startedAt）→ 开始前置条件 → 仓储 CAS。状态优先于前置条件，保证“已经 running 的重复开始”稳定返回状态冲突。
+2. 开始前置条件错误采用统一错误码 `study_session_start_precondition_failed`（409）+ 受控 `reason` 枚举（`missing_task` / `missing_duration` / `count_up_duration_set`），可区分但不泄露草稿内容，客户端据此提示用户补全草稿。
+3. 服务端时间由可注入时钟写入：构造参数 `now()` 默认当前 UTC 时间，测试注入固定时钟使 `startedAt` 断言稳定，不依赖等待。
+4. `count_up_duration_set` 为领域不变量破坏的防御分支（正常流程 count_up 恒无时长），仅仓储播种可构造，防止异常数据被启动。
+
+### 接口清单
+
+- `GET /api/v1/study-sessions/:id` → 200 StudySession / 404 `study_session_not_found`
+- `POST /api/v1/study-sessions/:id/start` 请求体 `{ expectedVersion }` →
+  - 200 StudySession（status=running、startedAt=服务端时间、version+1）
+  - 400 `validation_failed`（未知字段 / 字符串版本号 / 非整数）
+  - 404 `study_session_not_found`
+  - 409 `study_session_status_conflict`
+  - 409 `study_session_start_precondition_failed` + `reason`（missing_task / missing_duration / count_up_duration_set）
+  - 409 `study_session_version_conflict`
+
+### 新增 / 修改 / 删除文件清单
+
+修改：
+- `packages/contracts/src/study-session.ts`（新增 `StartStudySessionInput`、`startStudySessionBodySchema`）
+- `apps/server/src/domain/study-session/errors.ts`（新增 `StudySessionStartPreconditionReason` 与 `StudySessionStartPreconditionError`）
+- `apps/server/src/application/study-session/study-session-service.ts`（可注入时钟 `now()`、`getById`、`startStudySession`）
+- `apps/server/src/api/routes/study-sessions.ts`（`GET /:id`、`POST /:id/start`）
+- `apps/server/src/app.ts`（StartPreconditionError → 409 + reason 映射）
+- `apps/server/test/study-session-contract.test.ts`（+2 用例）
+- `apps/server/test/study-session-service.test.ts`（+8 用例，setup 支持注入时钟）
+- `apps/server/test/study-session-api.test.ts`（+11 用例，setup 支持注入时钟）
+
+删除：无。
+
+### 执行过的测试与检查（真实结果）
+
+- `npm run typecheck`：`@mingwu/contracts` 与 `@mingwu/server` 均通过；
+- `npm test`：19 个测试文件，**333/333 通过**（较上批 312 新增 21：契约 2、服务 8、API 11）；
+- `git diff --check`：通过，仅有 Windows LF→CRLF 行尾提示。
+
+### 未完成内容、已知问题与风险
+
+- 未实现暂停 / 恢复、结束 / 取消 / 中断、实际学习时长结算、真实计时器、Session 历史 / 完整详情 / 用户总结 / AI 报告 / 音乐关联。
+- `count_up_duration_set` 仅仓储播种可构造，正常流程不可达，属防御分支。
+- 内存仓储并发正确性依赖单进程同步 Map；第六关落 PostgreSQL 时依赖唯一约束 + `UPDATE ... WHERE version = ?`。
+
+### 是否涉及数据库 / 身份权限 / 密钥 / 外部服务 / 破坏性变化
+
+- 数据库 / Migration：无（继续内存仓储）。
+- 身份认证 / 权限 / 密钥：无。start 请求体严格白名单，不接受 `actorId` 等身份字段；未读取、输出或提交任何密钥。
+- 外部服务：未操作 VPS / Cloudflare / GitHub，无部署、重启或修改运行中服务。
+- 破坏性变化：无。新增只读 GET 与 start 写接口，既有接口不变。
+
+### 建议下一批任务
+
+- 结束 / 中断 Session：结算 `actualDurationSeconds`（利用服务端 startedAt），状态进入 completed / interrupted；
+- 暂停 / 恢复规则需小喵先定；
+- 查询 Session 列表 / 历史。
+
+**等待小喵审核。**
+
+---
+
+## 小喵返修验收结果 #8 · 通过 · 2026-08-09
+
+### 验收结论
+
+检查点 #8 与返修全部通过，本批正式验收：
+
+- [x] 支持正计时
+- [x] 开始 Session
+
+### 小喵独立复验
+
+- `npm run typecheck`：contracts 与 server 均通过；
+- `npm test`：19 个测试文件，336/336 通过；
+- `git diff --check`：通过，仅有 Windows LF→CRLF 提示；
+- 倒计时仓储脏值 `0`、`86401`、`1.5` 均无法启动，受控返回 `invalid_duration`；
+- 非法启动不改变状态、版本或 `startedAt`；
+- 成功启动只采样一次服务器时间，`startedAt` 与 `updatedAt` 一致；
+- GET、正计时启动、严格请求类型、状态前置条件与并发 CAS 均符合本批边界；
+- 未实现或申报暂停、恢复、结束、后台计时器和完整详情。
+
+计划文档对应两项已由小喵打勾。检查点 #8 正式关闭。
+
+---
+
+## 小喵审核结果 #8 · 需要小返修 · 2026-08-09
+
+### 独立复检结果
+
+- `npm run typecheck`：通过；
+- `npm test`：19 个测试文件，333/333 通过；
+- `git diff --check`：通过，仅有 Windows LF→CRLF 提示；
+- GET、严格请求白名单、开始前置条件、状态冲突、版本 CAS 与 20 路并发启动的主体实现均符合任务要求；
+- 没有实现暂停、恢复、结束、后台计时器或完整详情，范围控制正确。
+
+本批只剩一个必须修复的启动不变量遗漏，另有一个同处的小时间一致性修正。暂不打勾、不提交。
+
+### 必须修复 1：倒计时开始时只检查“非空”，没有再次确认“合法”
+
+`startStudySession` 当前对 `count_down` 只判断 `plannedDurationSeconds === null`。如果仓储中已有 `0`、`86401` 或小数等异常值，Session 仍会被启动；这与本批“开始前必须已经设置合法 plannedDurationSeconds”的要求不一致，也与已经实现的 `count_up_duration_set` 脏数据防御不对称。
+
+请：
+
+1. 在倒计时开始路径同时检查整数与 `1..86400` 范围；
+2. 为已存在但非法的时长增加受控开始前置条件 reason，例如 `invalid_duration`，不要回显具体值；
+3. 增加服务层测试，直接播种 `0`、`86401`、`1.5` 后均不得启动；
+4. 增加至少一个 API 映射测试，确认返回 409 `study_session_start_precondition_failed` + `reason: invalid_duration`，且 Session 状态、版本、`startedAt` 均保持不变。
+
+### 同处修正：一次启动只采样一次服务器时间
+
+当前启动成功路径分别调用两次 `this.now()` 写 `startedAt` 与 `updatedAt`。真实时钟可能跨毫秒，导致同一个原子状态转换保存两个不同时间。请先执行一次 `const now = this.now()`，然后同时赋给 `startedAt` 与 `updatedAt`。
+
+请补一个可注入递增时钟或调用次数断言，证明成功启动只采样一次时间；并发失败请求是否采样不作为本批验收条件，最终持久化值正确即可。
+
+### 返修边界
+
+- 只修以上内容并补测试，不开始下一批；
+- 不修改计划文档复选框；
+- 不执行 Git、GitHub、VPS 或其他外部操作；
+- 运行 `npm run typecheck`、`npm test`、`git diff --check`；
+- 把“检查点 #8 返修”追加到本文件末尾后立即暂停，等待小喵复验。
+
+---
+
+## 检查点 #8 返修 · 等待小喵复验 · 2026-08-09
+
+### 本批次目标
+
+按《小喵审核结果 #8》完成两项修正：倒计时开始再次确认时长合法、一次启动只采样一次服务器时间。不开始下一批，不修改计划复选框。
+
+### 实际完成内容
+
+1. **必须修复 1：倒计时开始再次确认时长合法**
+   - `StudySessionStartPreconditionReason` 新增 `invalid_duration`；
+   - `startStudySession` 对 `count_down` 拆分为两层校验：`plannedDurationSeconds === null` → `missing_duration`；非空但非整数或超出 `1..86400` → `invalid_duration`（不回显具体值）；
+   - 与已实现的 `count_up_duration_set` 脏数据防御对称，仓储播种出的非法时长无法被启动；
+   - 复用抽取的 `isValidPlannedDuration` 判定函数（与创建/设置路径同一规则）。
+
+2. **同处修正：一次启动只采样一次服务器时间**
+   - 成功路径由两次 `this.now()` 改为一次 `const now = this.now()`，同时赋给 `startedAt` 与 `updatedAt`，避免真实时钟跨毫秒导致同一原子状态转换保存两个不同时间。
+
+### 新增 / 修改 / 删除文件清单
+
+修改：
+- `apps/server/src/domain/study-session/errors.ts`（reason 枚举加 `invalid_duration`）
+- `apps/server/src/application/study-session/study-session-service.ts`（抽取 `isValidPlannedDuration`；start 校验时长合法性；时间单次采样）
+- `apps/server/test/study-session-service.test.ts`（+2 用例：播种 `0` / `86401` / `1.5` 均不得启动；成功启动时间采样恰好一次）
+- `apps/server/test/study-session-api.test.ts`（+1 用例：`invalid_duration` 映射 409 + reason，状态 / 版本 / `startedAt` 均不变）
+
+删除：无。
+
+### 执行过的测试与检查（真实结果）
+
+- `npm run typecheck`：`@mingwu/contracts` 与 `@mingwu/server` 均通过；
+- `npm test`：19 个测试文件，**336/336 通过**（较上批 333 新增 3：服务 2、API 1）；
+- `git diff --check`：通过，仅有 Windows LF→CRLF 行尾提示。
+
+### 未完成内容、已知问题与风险
+
+- 并发失败请求是否采样时间不作为本批验收条件（按审核结果约定），仅保证最终持久化值正确。
+- 其余本批范围外事项（暂停 / 恢复 / 结束 / 计时器等）仍留待后续。
+
+### 是否涉及数据库 / 身份权限 / 密钥 / 外部服务 / 破坏性变化
+
+- 均无：未触碰数据库、身份权限、密钥、外部服务；无破坏性变化；未修改计划复选框；未执行 Git / GitHub / VPS 操作。
+
+### 建议下一批任务
+
+- 结束 / 中断 Session：结算 `actualDurationSeconds`（利用服务端 startedAt），状态进入 completed / interrupted；
+- 暂停 / 恢复规则需小喵先定；
+- 查询 Session 列表 / 历史。
+
+**等待小喵审核。**

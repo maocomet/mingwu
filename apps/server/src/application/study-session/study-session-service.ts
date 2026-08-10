@@ -2,6 +2,7 @@ import type {
   CreateStudySessionInput,
   SetCountdownInput,
   SetTaskInput,
+  StartStudySessionInput,
   StudySession,
 } from '@mingwu/contracts';
 import {
@@ -13,6 +14,7 @@ import {
   StudySessionIdempotencyConflictError,
   StudySessionNotFoundError,
   StudySessionPlannedDurationInvalidError,
+  StudySessionStartPreconditionError,
   StudySessionStatusConflictError,
   StudySessionTaskTextInvalidError,
   StudySessionTimerModeConflictError,
@@ -38,6 +40,15 @@ function normalizePlannedDurationSeconds(value: number | null | undefined): numb
   return value === undefined || value === null ? null : value;
 }
 
+/** 倒计时设定时长是否合法：整数且在 1..86400 范围内。 */
+function isValidPlannedDuration(value: number): boolean {
+  return (
+    Number.isInteger(value) &&
+    value >= MIN_PLANNED_DURATION_SECONDS &&
+    value <= MAX_PLANNED_DURATION_SECONDS
+  );
+}
+
 /**
  * 校验倒计时设定时长：必须是 1..86400 范围内的整数。
  * null / undefined（草稿阶段尚未设置）允许通过；创建与设置路径共用同一规则。
@@ -50,11 +61,7 @@ function assertValidPlannedDurationSeconds(
   if (value === null || value === undefined) {
     return;
   }
-  if (
-    !Number.isInteger(value) ||
-    value < MIN_PLANNED_DURATION_SECONDS ||
-    value > MAX_PLANNED_DURATION_SECONDS
-  ) {
+  if (!isValidPlannedDuration(value)) {
     throw new StudySessionPlannedDurationInvalidError(studySessionId);
   }
 }
@@ -89,7 +96,75 @@ function sameCreateSemantics(
  * - 写操作可安全重试，不会因重试产生重复 Session 或覆盖新状态。
  */
 export class StudySessionService {
-  constructor(private readonly repository: StudySessionRepository) {}
+  constructor(
+    private readonly repository: StudySessionRepository,
+    /**
+     * 可注入时钟（返回 ISO 字符串）。默认取当前 UTC 时间；
+     * 测试传入固定时钟以稳定断言 startedAt 等服务端时间写入。
+     */
+    private readonly now: () => string = () => new Date().toISOString(),
+  ) {}
+
+  /**
+   * 读取 Session 当前核心状态（只读）。不存在抛 StudySessionNotFoundError（404）。
+   * 本批不返回用户总结 / AI 参与者 / AI 报告或音乐信息。
+   */
+  async getById(id: string): Promise<StudySession> {
+    const existing = await this.repository.findById(id);
+    if (!existing) {
+      throw new StudySessionNotFoundError(id);
+    }
+    return existing;
+  }
+
+  /**
+   * 开始 Session：把已配置好的草稿安全地启动为 running。
+   * - Session 不存在 → 404；status 不是 created → 409（重复开始返回状态冲突，不重写 startedAt）；
+   * - 开始前置条件：必须已设置非空学习任务；count_down 必须已设置合法时长；
+   *   count_up 必须保持时长为空（领域不变量防御分支）；
+   * - 成功时由服务端一次性写入 status=running、startedAt=now()、version+1、刷新 updatedAt；
+   *   endedAt 仍为空、实际与暂停时长仍为 0；客户端无法提供或覆盖服务器时间；
+   * - 仓储 CAS 失败（陈旧 expectedVersion）→ 409，20 路并发开始只有一次成功。
+   */
+  async startStudySession(id: string, input: StartStudySessionInput): Promise<StudySession> {
+    const existing = await this.repository.findById(id);
+    if (!existing) {
+      throw new StudySessionNotFoundError(id);
+    }
+    if (existing.status !== 'created') {
+      throw new StudySessionStatusConflictError(id, existing.status);
+    }
+    if (existing.taskText === null || existing.taskText.trim().length === 0) {
+      throw new StudySessionStartPreconditionError(id, 'missing_task');
+    }
+    if (existing.timerMode === 'count_down') {
+      if (existing.plannedDurationSeconds === null) {
+        throw new StudySessionStartPreconditionError(id, 'missing_duration');
+      }
+      if (!isValidPlannedDuration(existing.plannedDurationSeconds)) {
+        // 仓储中存在非法时长（正常流程不可达，防御分支）：不得启动，也不回显具体值。
+        throw new StudySessionStartPreconditionError(id, 'invalid_duration');
+      }
+    }
+    if (existing.timerMode === 'count_up' && existing.plannedDurationSeconds !== null) {
+      throw new StudySessionStartPreconditionError(id, 'count_up_duration_set');
+    }
+    // 一次原子状态转换只采样一次服务器时间，同时写入 startedAt 与 updatedAt，
+    // 避免真实时钟跨毫秒导致同一转换保存两个不同时间。
+    const now = this.now();
+    const updated: StudySession = {
+      ...existing,
+      status: 'running',
+      startedAt: now,
+      version: existing.version + 1,
+      updatedAt: now,
+    };
+    const result = await this.repository.updateIfVersion(updated, input.expectedVersion);
+    if (!result) {
+      throw new StudySessionVersionConflictError(id, input.expectedVersion);
+    }
+    return result;
+  }
 
   /**
    * 幂等创建 Session。客户端在发送前生成 UUID 作为幂等键。

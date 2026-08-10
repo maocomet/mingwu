@@ -42,6 +42,7 @@ import {
   StudySessionIdempotencyConflictError,
   StudySessionNotFoundError,
   StudySessionPlannedDurationInvalidError,
+  StudySessionStartPreconditionError,
   StudySessionStatusConflictError,
   StudySessionTaskTextInvalidError,
   StudySessionTimerModeConflictError,
@@ -220,6 +221,13 @@ export function buildApp(deps: AppDeps): FastifyInstance {
       return reply.status(409).send({
         error: 'study_session_status_conflict',
         message: error.message,
+      });
+    }
+    if (error instanceof StudySessionStartPreconditionError) {
+      return reply.status(409).send({
+        error: 'study_session_start_precondition_failed',
+        message: error.message,
+        reason: error.reason,
       });
     }
     if (error instanceof StudySessionTaskTextInvalidError) {

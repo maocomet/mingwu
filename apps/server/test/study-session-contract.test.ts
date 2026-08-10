@@ -5,6 +5,7 @@ import {
   createStudySessionBodySchema,
   setCountdownBodySchema,
   setTaskBodySchema,
+  startStudySessionBodySchema,
   studySessionJsonSchema,
 } from '@mingwu/contracts';
 import { uuid } from './helpers.js';
@@ -165,6 +166,21 @@ describe('StudySession contract schemas', () => {
       expect(
         validate({ expectedVersion: 1, plannedDurationSeconds: 600, status: 'created' }),
       ).toBe(false);
+    });
+  });
+
+  describe('startStudySessionBodySchema', () => {
+    it('accepts a valid start request', () => {
+      const validate = compile({ ...startStudySessionBodySchema });
+      expect(validate({ expectedVersion: 1 })).toBe(true);
+    });
+
+    it('requires expectedVersion >= 1 and rejects extra fields and a string version', () => {
+      const validate = compile({ ...startStudySessionBodySchema });
+      expect(validate({})).toBe(false);
+      expect(validate({ expectedVersion: 0 })).toBe(false);
+      expect(validate({ expectedVersion: '1' })).toBe(false);
+      expect(validate({ expectedVersion: 1, actorId: 'x' })).toBe(false);
     });
   });
 

@@ -71,3 +71,25 @@ export class StudySessionPlannedDurationInvalidError extends Error {
     this.name = 'StudySessionPlannedDurationInvalidError';
   }
 }
+
+/** 开始 Session 的前置条件未满足，reason 是受控枚举，不泄露具体内容。 */
+export type StudySessionStartPreconditionReason =
+  | 'missing_task'
+  | 'missing_duration'
+  | 'invalid_duration'
+  | 'count_up_duration_set';
+
+/**
+ * 开始前置条件不满足：草稿尚未补全（缺学习任务 / 倒计时缺设定时长），
+ * 或 count_up 却带着时长（领域不变量破坏的防御分支，正常流程不可达）。
+ * reason 为受控枚举，客户端可据此提示用户补全草稿，但不暴露草稿实际内容。
+ */
+export class StudySessionStartPreconditionError extends Error {
+  constructor(
+    readonly studySessionId: string,
+    readonly reason: StudySessionStartPreconditionReason,
+  ) {
+    super(`Study session ${studySessionId} cannot start: ${reason}`);
+    this.name = 'StudySessionStartPreconditionError';
+  }
+}

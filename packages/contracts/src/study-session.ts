@@ -68,6 +68,11 @@ export interface SetCountdownInput {
   plannedDurationSeconds: number;
 }
 
+export interface StartStudySessionInput {
+  /** 本次开始基于的版本号，用于乐观并发控制。 */
+  expectedVersion: number;
+}
+
 export const studySessionParamsSchema = {
   type: 'object',
   required: ['id'],
@@ -112,6 +117,15 @@ export const setCountdownBodySchema = {
       minimum: MIN_PLANNED_DURATION_SECONDS,
       maximum: MAX_PLANNED_DURATION_SECONDS,
     },
+  },
+} as const;
+
+export const startStudySessionBodySchema = {
+  type: 'object',
+  required: ['expectedVersion'],
+  additionalProperties: false,
+  properties: {
+    expectedVersion: { type: 'integer', minimum: 1 },
   },
 } as const;
 
