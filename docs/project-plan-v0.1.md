@@ -201,9 +201,9 @@ Windows App
 
 ### Study API
 
-- [ ] 创建 Study Session
-- [ ] 设置学习任务
-- [ ] 设置倒计时时长
+- [x] 创建 Study Session
+- [x] 设置学习任务
+- [x] 设置倒计时时长
 - [ ] 支持正计时
 - [ ] 开始 Session
 - [ ] 确定暂停规则

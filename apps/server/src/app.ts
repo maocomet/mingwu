@@ -8,6 +8,7 @@ import type { ProjectService } from './application/project/project-service.js';
 import type { StageService } from './application/stage/stage-service.js';
 import type { ProjectTaskService } from './application/project-task/project-task-service.js';
 import type { ProjectStatusService } from './application/project-status/project-status-service.js';
+import type { StudySessionService } from './application/study-session/study-session-service.js';
 import {
   healthRoutes,
   type ReadinessCheck,
@@ -16,6 +17,7 @@ import { mcpRoutes } from './api/routes/mcp.js';
 import { McpSessionRegistry } from './mcp/mcp-sessions.js';
 import { projectRoutes } from './api/routes/projects.js';
 import { stageRoutes } from './api/routes/stages.js';
+import { studySessionRoutes } from './api/routes/study-sessions.js';
 import { taskRoutes } from './api/routes/tasks.js';
 import {
   ProjectConflictError,
@@ -36,6 +38,15 @@ import {
   ProjectTaskScopeConflictError,
   ProjectTaskTreeCorruptionError,
 } from './domain/project-task/errors.js';
+import {
+  StudySessionIdempotencyConflictError,
+  StudySessionNotFoundError,
+  StudySessionPlannedDurationInvalidError,
+  StudySessionStatusConflictError,
+  StudySessionTaskTextInvalidError,
+  StudySessionTimerModeConflictError,
+  StudySessionVersionConflictError,
+} from './domain/study-session/errors.js';
 
 export interface AppDeps {
   config: AppConfig;
@@ -43,6 +54,7 @@ export interface AppDeps {
   stageService: StageService;
   taskService: ProjectTaskService;
   projectStatusService: ProjectStatusService;
+  studySessionService: StudySessionService;
   readinessChecks?: ReadinessCheck[];
   /** readyz 单项检查超时毫秒数，默认 2000，测试可注入小值。 */
   readyzTimeoutMs?: number;
@@ -61,7 +73,10 @@ export function buildApp(deps: AppDeps): FastifyInstance {
         // 严格校验：未知字段直接拒绝（400），而不是被静默删除。
         // 防止字段拼写错误悄悄丢失数据。
         removeAdditional: false,
-        coerceTypes: 'array',
+        // 关闭类型强制转换：JSON 请求体必须使用 schema 声明的类型（严格整数契约）。
+        // 例如 plannedDurationSeconds 必须是 JSON 数字，字符串 "600" 直接 400，
+        // 不会被悄悄改写成数字落库。
+        coerceTypes: false,
         useDefaults: true,
       },
     },
@@ -88,6 +103,10 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   });
   app.register(stageRoutes, { prefix: '/api/v1', stageService: deps.stageService });
   app.register(taskRoutes, { prefix: '/api/v1', taskService: deps.taskService });
+  app.register(studySessionRoutes, {
+    prefix: '/api/v1',
+    studySessionService: deps.studySessionService,
+  });
 
   // MCP Streamable HTTP 挂在根路径 /mcp（不在 /api/v1 下），本地测试专用。
   // session registry 在根实例上创建并装饰，便于测试/运维观察生命周期；
@@ -174,6 +193,45 @@ export function buildApp(deps: AppDeps): FastifyInstance {
       return reply.status(500).send({
         error: 'project_task_tree_corrupt',
         message: 'project task tree is inconsistent',
+      });
+    }
+    if (error instanceof StudySessionNotFoundError) {
+      return reply.status(404).send({ error: 'study_session_not_found', message: error.message });
+    }
+    if (error instanceof StudySessionIdempotencyConflictError) {
+      return reply.status(409).send({
+        error: 'study_session_idempotency_conflict',
+        message: error.message,
+      });
+    }
+    if (error instanceof StudySessionVersionConflictError) {
+      return reply.status(409).send({
+        error: 'study_session_version_conflict',
+        message: error.message,
+      });
+    }
+    if (error instanceof StudySessionTimerModeConflictError) {
+      return reply.status(409).send({
+        error: 'study_session_timer_mode_conflict',
+        message: error.message,
+      });
+    }
+    if (error instanceof StudySessionStatusConflictError) {
+      return reply.status(409).send({
+        error: 'study_session_status_conflict',
+        message: error.message,
+      });
+    }
+    if (error instanceof StudySessionTaskTextInvalidError) {
+      return reply.status(400).send({
+        error: 'study_session_task_text_invalid',
+        message: error.message,
+      });
+    }
+    if (error instanceof StudySessionPlannedDurationInvalidError) {
+      return reply.status(400).send({
+        error: 'study_session_planned_duration_invalid',
+        message: error.message,
       });
     }
     if (error.validation) {

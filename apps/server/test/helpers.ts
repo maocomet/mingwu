@@ -1,17 +1,20 @@
-import type { Project, ProjectStage, ProjectTask } from '@mingwu/contracts';
+import type { Project, ProjectStage, ProjectTask, StudySession } from '@mingwu/contracts';
 import { ProjectService } from '../src/application/project/project-service.js';
 import { StageService } from '../src/application/stage/stage-service.js';
 import { ProjectTaskService } from '../src/application/project-task/project-task-service.js';
 import { ProjectStatusService } from '../src/application/project-status/project-status-service.js';
+import { StudySessionService } from '../src/application/study-session/study-session-service.js';
 import { InMemoryProjectRepository } from '../src/infrastructure/repositories/in-memory-project-repository.js';
 import { InMemoryStageRepository } from '../src/infrastructure/repositories/in-memory-stage-repository.js';
 import { InMemoryProjectTaskRepository } from '../src/infrastructure/repositories/in-memory-project-task-repository.js';
+import { InMemoryStudySessionRepository } from '../src/infrastructure/repositories/in-memory-study-session-repository.js';
 
-/** 共享同一组仓储，保证项目 / 关卡 / 任务写入互相可见。 */
+/** 共享同一组仓储，保证项目 / 关卡 / 任务 / 学习会话写入互相可见。 */
 export function makeServices() {
   const projectRepository = new InMemoryProjectRepository();
   const stageRepository = new InMemoryStageRepository();
   const taskRepository = new InMemoryProjectTaskRepository();
+  const studySessionRepository = new InMemoryStudySessionRepository();
   const projectService = new ProjectService(projectRepository);
   const stageService = new StageService(stageRepository, projectRepository);
   const taskService = new ProjectTaskService(taskRepository, stageRepository, projectRepository);
@@ -20,14 +23,17 @@ export function makeServices() {
     stageRepository,
     taskRepository,
   );
+  const studySessionService = new StudySessionService(studySessionRepository);
   return {
     projectRepository,
     stageRepository,
     taskRepository,
+    studySessionRepository,
     projectService,
     stageService,
     taskService,
     projectStatusService,
+    studySessionService,
   };
 }
 
@@ -92,5 +98,23 @@ export function makeTask(overrides: Partial<ProjectTask> = {}): ProjectTask {
     updatedAt: overrides.updatedAt ?? now,
     completedAt: overrides.completedAt ?? null,
     archivedAt: overrides.archivedAt ?? null,
+  };
+}
+
+export function makeStudySession(overrides: Partial<StudySession> = {}): StudySession {
+  const now = new Date().toISOString();
+  return {
+    id: overrides.id ?? uuid(),
+    taskText: overrides.taskText ?? null,
+    timerMode: overrides.timerMode ?? 'count_down',
+    plannedDurationSeconds: overrides.plannedDurationSeconds ?? null,
+    startedAt: overrides.startedAt ?? null,
+    endedAt: overrides.endedAt ?? null,
+    actualDurationSeconds: overrides.actualDurationSeconds ?? 0,
+    pausedDurationSeconds: overrides.pausedDurationSeconds ?? 0,
+    status: overrides.status ?? 'created',
+    version: overrides.version ?? 1,
+    createdAt: overrides.createdAt ?? now,
+    updatedAt: overrides.updatedAt ?? now,
   };
 }

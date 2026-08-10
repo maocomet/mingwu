@@ -5,13 +5,15 @@ import { makeServices } from './helpers.js';
 
 function setup() {
   const config = loadConfig({ NODE_ENV: 'test' });
-  const { projectService, stageService, taskService, projectStatusService } = makeServices();
+  const { projectService, stageService, taskService, projectStatusService, studySessionService } =
+    makeServices();
   const app = buildApp({
     config,
     projectService,
     stageService,
     taskService,
     projectStatusService,
+    studySessionService,
   });
   return { app, config };
 }
@@ -49,13 +51,15 @@ describe('health endpoints', () => {
 
   it('readyz reports ready when all checks pass', async () => {
     const config = loadConfig({ NODE_ENV: 'test' });
-    const { projectService, stageService, taskService, projectStatusService } = makeServices();
+    const { projectService, stageService, taskService, projectStatusService, studySessionService } =
+    makeServices();
     const app = buildApp({
       config,
       projectService,
       stageService,
       taskService,
       projectStatusService,
+      studySessionService,
       readinessChecks: [
         { name: 'database', check: async () => ({ ok: true }) },
         { name: 'migrations', check: async () => ({ ok: true }) },
@@ -70,13 +74,15 @@ describe('health endpoints', () => {
 
   it('readyz keeps serving even when a check rejects', async () => {
     const config = loadConfig({ NODE_ENV: 'test' });
-    const { projectService, stageService, taskService, projectStatusService } = makeServices();
+    const { projectService, stageService, taskService, projectStatusService, studySessionService } =
+    makeServices();
     const app = buildApp({
       config,
       projectService,
       stageService,
       taskService,
       projectStatusService,
+      studySessionService,
       readinessChecks: [
         { name: 'database', check: async () => ({ ok: true }) },
         {
@@ -96,13 +102,15 @@ describe('health endpoints', () => {
 
   it('does not leak raw exception messages into the readyz response', async () => {
     const config = loadConfig({ NODE_ENV: 'test' });
-    const { projectService, stageService, taskService, projectStatusService } = makeServices();
+    const { projectService, stageService, taskService, projectStatusService, studySessionService } =
+    makeServices();
     const app = buildApp({
       config,
       projectService,
       stageService,
       taskService,
       projectStatusService,
+      studySessionService,
       readinessChecks: [
         { name: 'database', check: async () => ({ ok: true }) },
         {
@@ -125,13 +133,15 @@ describe('health endpoints', () => {
 
   it('normalizes arbitrary check failure messages to a controlled error code', async () => {
     const config = loadConfig({ NODE_ENV: 'test' });
-    const { projectService, stageService, taskService, projectStatusService } = makeServices();
+    const { projectService, stageService, taskService, projectStatusService, studySessionService } =
+    makeServices();
     const app = buildApp({
       config,
       projectService,
       stageService,
       taskService,
       projectStatusService,
+      studySessionService,
       readinessChecks: [
         { name: 'database', check: async () => ({ ok: true }) },
         {
@@ -151,13 +161,15 @@ describe('health endpoints', () => {
 
   it('maps a hanging check to the timeout error code', async () => {
     const config = loadConfig({ NODE_ENV: 'test' });
-    const { projectService, stageService, taskService, projectStatusService } = makeServices();
+    const { projectService, stageService, taskService, projectStatusService, studySessionService } =
+    makeServices();
     const app = buildApp({
       config,
       projectService,
       stageService,
       taskService,
       projectStatusService,
+      studySessionService,
       readyzTimeoutMs: 50,
       readinessChecks: [
         { name: 'database', check: async () => ({ ok: true }) },

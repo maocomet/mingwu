@@ -1287,3 +1287,335 @@
 `检查 MCP` 暂不勾选：当前 readyz 的 MCP 检查仍为 `not_configured`，production 也因尚无认证而硬性禁用；待认证与正式就绪检查接入后再验收该项。
 
 **检查点 #6 已关闭。**
+
+---
+
+## 小喵下发任务 #7 · Study Session 草稿配置 · 2026-08-09
+
+### 本批候选计划项
+
+- [ ] 创建 Study Session
+- [ ] 设置学习任务
+- [ ] 设置倒计时时长
+
+本批只建立 Study Session 的“创建后、开始前”配置闭环。不要启动计时，不要实现 Session 状态流转，也不要替项目决定尚未确定的暂停 / 恢复规则。
+
+### 1. 建立最小 Study Session 模型
+
+按《第二关卡报告》已经确定的数据模型建立契约、领域接口、应用服务与内存仓储。至少包含：
+
+- `id`：客户端生成 UUID；
+- `taskText`：当前学习任务，可为空；
+- `timerMode`：`count_up | count_down`；
+- `plannedDurationSeconds`：倒计时设定时长，可为空；
+- `startedAt`、`endedAt`：本批创建后均为空；
+- `actualDurationSeconds`、`pausedDurationSeconds`：本批创建后均为 `0`；
+- `status`：本批只允许创建为 `created`；
+- `version`、`createdAt`、`updatedAt`。
+
+状态枚举可以按报告预留 `created | running | paused | completed | cancelled | interrupted`，但本批不得实现 `created` 以外的状态变化。
+
+### 2. 创建 Study Session
+
+实现：
+
+- `POST /api/v1/study-sessions`
+- 请求至少包含 `id`、`timerMode`；可以同时包含可选的 `taskText` 和 `plannedDurationSeconds`。
+- 未知字段严格拒绝；时间、状态、版本、实际时长等服务端字段不得由调用者伪造。
+- `count_up` 必须保持 `plannedDurationSeconds = null`；请求中提供倒计时时长时应返回稳定的模式冲突错误。
+- `count_down` 允许先以空时长创建草稿，也允许创建时直接给出合法时长；真正开始前必须已有时长的规则留到后续“开始 Session”批次落实。
+- 沿用现有客户端 UUID 语义幂等：同 ID、同语义内容重试返回已有记录；同 ID、不同语义内容返回稳定 `409`。
+- 仓储创建必须具备原子 `createIfAbsent` 语义，并覆盖并发重试测试。
+
+### 3. 设置学习任务
+
+实现：
+
+- `PATCH /api/v1/study-sessions/:id/task`
+- 请求只允许 `expectedVersion`、`taskText`。
+- `taskText` 去除首尾空白后必须非空，并设置合理长度上限。
+- 本批只允许修改 `created` 状态的 Session；其他状态返回稳定冲突错误。
+- 使用原子版本比较更新；陈旧版本稳定返回 `409`。
+- 新值与当前值完全相同时，在版本仍匹配的前提下返回当前记录，不推进版本或时间。
+
+### 4. 设置倒计时时长
+
+实现：
+
+- `PATCH /api/v1/study-sessions/:id/countdown`
+- 请求只允许 `expectedVersion`、`plannedDurationSeconds`。
+- 时长使用整数秒，范围暂定 `1..86400`（1 秒至 24 小时）。
+- 只允许用于 `count_down` 且状态为 `created` 的 Session；正计时模式返回稳定的模式冲突错误。
+- 使用同一个原子版本比较更新能力；陈旧版本稳定返回 `409`。
+- 新值与当前值相同时，在版本仍匹配的前提下返回当前记录，不推进版本或时间。
+
+### 5. 错误、安全与测试要求
+
+- 为不存在、ID 幂等冲突、版本冲突、计时模式冲突、状态冲突提供稳定且不泄露内部信息的错误码。
+- 所有请求 schema 保持严格白名单，不接受 `actorId` 或其他身份字段。
+- 不记录请求体、任务正文或潜在敏感数据到错误日志。
+- 至少覆盖契约、仓储、服务、HTTP API 四层测试，包括：严格校验、创建幂等与冲突、20 路并发同 ID 创建、两类 PATCH 的版本竞争、模式 / 状态限制、no-op 不推进版本，以及所有创建时不变量。
+- 运行 `npm run typecheck`、`npm test`；如有必要可做本机真实 HTTP 冒烟，结束后释放端口。
+
+### 本批明确不做
+
+- 不实现开始、暂停、恢复、结束、取消或中断 Session；
+- 不创建真实计时器或后台定时任务；
+- 不实现查询详情 / 历史、用户总结、AI 报告、音乐关联；
+- 不修改计划文档复选框；
+- 不执行 Git、GitHub、VPS 或其他外部操作；
+- 不读取或修改 `.claude/`、`ui素材mingwu/` 等无关目录。
+
+完成后只把”检查点 #7”追加到本文件末尾，列出候选完成项、接口与不变量、文件清单、真实测试结果和已知风险，然后立即暂停，等待小喵审核。
+
+---
+
+## 检查点 #7 · Study Session 草稿配置 · 2026-08-09
+
+### 本批候选完成项（候选，未打勾）
+
+- [ ] 创建 Study Session
+- [ ] 设置学习任务
+- [ ] 设置倒计时时长
+
+> 以上为候选完成项，未修改 `docs/project-plan-v0.1.md` 复选框；是否勾选由小喵审核后决定。
+
+### 本批次目标
+
+实现 Study Session 的”创建后、开始前”草稿配置闭环：创建 Session、设置学习任务、设置倒计时时长。只允许 `status = created`，不实现开始 / 暂停 / 恢复 / 结束、真实计时器、查询详情 / 历史、用户总结、AI 报告或音乐关联，也不自行决定暂停规则。
+
+### 实际完成内容
+
+1. **契约层（`@mingwu/contracts`）**：新增 `StudySession` 模型与 `CreateStudySessionInput` / `SetTaskInput` / `SetCountdownInput`；状态枚举预留 `created | running | paused | completed | cancelled | interrupted`（本批仅使用 `created`）；计时模式 `count_up | count_down`；常量 `TASK_TEXT_MAX_LENGTH = 2000`、时长范围 `1..86400`；严格白名单 JSON Schema（`additionalProperties: false`），创建 / 设置任务 / 设置倒计时 / 响应共 4 个 schema。
+2. **领域层**：`StudySessionNotFoundError` / `IdempotencyConflictError` / `VersionConflictError` / `TimerModeConflictError` / `StatusConflictError` / `TaskTextInvalidError` 六个错误类；`StudySessionRepository` 接口（`findById` / `createIfAbsent` / `updateIfVersion`）。
+3. **应用服务 `StudySessionService`**：
+   - `createStudySession`：客户端 UUID 作幂等键；`count_up` 携带时长 → 模式冲突；taskText 去空白后为空 → null；新建 Session 状态 `created`、version 1、startedAt/endedAt 为空、实际与暂停时长 0；同 id 同语义重试返回已有（created=false）、同 id 不同内容 → 幂等冲突。
+   - `setTask`：仅允许 `created` 状态；去空白后非空且 ≤2000 字符；值未变时在版本匹配前提下原样返回、不推进版本/时间；否则 version+1 + 仓储 CAS。
+   - `setCountdown`：仅允许 `count_down` 且 `created` 状态；1..86400 整数秒；值未变时 no-op；否则 version+1 + CAS。
+4. **内存仓储 `InMemoryStudySessionRepository`**：`createIfAbsent`（原子、返回防御性克隆）、`updateIfVersion`（版本比较并交换）；读取返回 `structuredClone` 副本，防调用方修改泄漏。
+5. **API 层**：`POST /api/v1/study-sessions`、`PATCH /api/v1/study-sessions/:id/task`、`PATCH /api/v1/study-sessions/:id/countdown`；`AppDeps` 新增必需 `studySessionService`；错误处理器把 6 类错误映射为稳定、不泄露内部信息的错误码。
+
+### 接口与不变量
+
+- `POST /api/v1/study-sessions`：请求 `{ id, timerMode, taskText?, plannedDurationSeconds? }`；未知字段 / 非 UUID → 400 `validation_failed`；`count_up` + 时长 → 409 `study_session_timer_mode_conflict`；首次创建 201、重复同语义 200；同 id 不同内容 → 409 `study_session_idempotency_conflict`。
+- `PATCH /api/v1/study-sessions/:id/task`：请求仅 `{ expectedVersion, taskText }`；不存在 → 404 `study_session_not_found`；状态非 `created` → 409 `study_session_status_conflict`；去空白后为空或超长 → 400 `study_session_task_text_invalid`；版本陈旧 → 409 `study_session_version_conflict`；no-op 不推进 version/updatedAt。
+- `PATCH /api/v1/study-sessions/:id/countdown`：请求仅 `{ expectedVersion, plannedDurationSeconds }`；`count_up` → 409 `study_session_timer_mode_conflict`；状态非 `created` → 409 `study_session_status_conflict`；版本陈旧 → 409 `study_session_version_conflict`；no-op 不推进版本/时间。
+- 所有请求 schema 严格白名单，不接受 `actorId` 或任何身份字段；身份必须由服务端凭据解析。
+- 写操作可安全重复调用：重试不会产生重复 Session，也不会用陈旧状态覆盖较新状态。
+
+### 新增 / 修改 / 删除文件清单
+
+新增：
+- `packages/contracts/src/study-session.ts`（模型 + 请求类型 + 4 个 JSON Schema + 常量）
+- `apps/server/src/domain/study-session/errors.ts`
+- `apps/server/src/domain/study-session/repository.ts`
+- `apps/server/src/application/study-session/study-session-service.ts`
+- `apps/server/src/infrastructure/repositories/in-memory-study-session-repository.ts`
+- `apps/server/src/api/routes/study-sessions.ts`
+- 测试：`study-session-contract.test.ts`（19）、`study-session-repository.test.ts`（9）、`study-session-service.test.ts`（27）、`study-session-api.test.ts`（28）
+
+修改：
+- `packages/contracts/src/index.ts`（导出 study-session）
+- `apps/server/src/app.ts`（AppDeps + 路由注册 + 错误映射）
+- `apps/server/src/index.ts`（装配 studySessionRepository/Service）
+- `apps/server/test/helpers.ts`（makeServices 增补 + `makeStudySession` 工厂）
+- 全部 `buildApp` 调用点：`health.test.ts`（6 处）、`project-api.test.ts`、`stage-api.test.ts`、`project-task-api.test.ts`、`project-status-api.test.ts`、`mcp-http.test.ts`（3 处）、`mcp-http-smoke.test.ts`
+
+删除：无。
+
+### 关键设计决定及其依据
+
+1. `studySessionService` 作为 `AppDeps` 必需字段（非可选）：诚实反映本批新增服务，任何遗漏在类型检查期即报错，而不是运行时静默缺省。
+2. 幂等 / 并发沿用既有模式：仓储级 `createIfAbsent` + `updateIfVersion`（CAS），服务层 `sameCreateSemantics` 用规范化后的值比较，重试的排版差异不误判冲突。
+3. no-op 不推进版本/时间：与 `setStageStatus` 同款模式，避免无意义写入，保留并发安全。
+4. `count_up` 携带倒计时时长直接抛模式冲突（与 Session 是否存在无关）：正计时 Session 设置倒计时是根本性模式错误，错误语义稳定。
+5. `setCountdown` 先判模式再判状态：`count_up` 是更根本的不兼容，保证稳定模式错误优先。
+6. 长度上限服务端同样校验（`setTask` 超 2000 字符抛 `TaskTextInvalidError`）：HTTP schema 与领域层双保险，直接调用服务也被约束。
+
+### 执行过的测试与检查（真实结果）
+
+- `npm run typecheck`：`@mingwu/contracts` 与 `@mingwu/server` 均 `tsc --noEmit` 通过。
+- `npm test`：19 个测试文件，**306/306 通过**（较上一批 223 新增 4 个文件 83 个用例：契约 19、仓储 9、服务 27、API 28）。
+- `git diff --check`：通过，仅有 Windows LF→CRLF 行尾提示。
+- 覆盖点：严格校验、创建幂等与冲突、20 路并发同 ID 创建（仓储 / 服务 / HTTP 三层）、两类 PATCH 版本竞争（含 20 路并发同 expectedVersion 仅一个成功）、模式 / 状态限制、no-op 不推进版本、创建全部不变量、防御性克隆、6 类错误码映射。
+
+### 未完成内容、已知问题与风险
+
+- 未实现开始 / 暂停 / 恢复 / 结束 / 取消 / 中断、真实计时器、查询详情 / 历史、用户总结、AI 报告、音乐关联；暂停规则留待小喵决定。
+- **Fastify `coerceTypes` 转换（既有全局行为，非本批引入）**：Fastify 默认 ajv 配置会把 `”600”` 这类合法数字字符串强转为数字，因此 `plannedDurationSeconds: “600”` 会被接受并落库为 600。这与全部既有路由（projects / stages / tasks）共用同一 ajv 配置，属既成约定；契约 schema 本身是严格的（`type: integer`）。契约测试用 `coerceTypes: false` 验证 schema 自身规则，API 测试则如实断言运行时强制转换行为。若需拒绝字符串类型，须全局调整 coerceTypes 或做每路由严格化，超出本批范围，建议小喵定夺。
+- 契约测试通过 `createRequire` 直接使用 Fastify 的 CJS 传递依赖 `ajv`，未新增 package.json 依赖，锁文件无变化。
+- 状态冲突路径只能通过直接播种仓储测试（API 无法产生 `created` 以外的状态），已用 `makeStudySession` 直连仓储覆盖该分支。
+- 未做本机真实 HTTP 冒烟：`app.inject` 已走完整 Fastify 管线，且既有 `mcp-http-smoke.test.ts` 已验证真实 socket 监听 / 释放路径，判定本批非必要。
+
+### 是否涉及数据库 / 身份权限 / 密钥 / 外部服务 / 破坏性变化
+
+- 数据库 / Migration：无（本批继续使用内存仓储，无表结构变化）。
+- 身份认证 / 权限 / 密钥：无。所有 schema 严格白名单，不接受 `actorId` 等身份字段；未读取、输出或提交任何密钥。
+- 外部服务：未操作 VPS / Cloudflare / GitHub，无部署、重启或修改运行中服务。
+- 破坏性变化：无。未删除既有文件；`AppDeps` 增加必需字段仅影响内部装配与测试调用点，已全部同步。
+- 未修改 `docs/project-plan-v0.1.md` 复选框；未读取或修改 `.claude/`、`ui素材mingwu/`。
+
+### 建议下一批任务
+
+- 查询 Session 详情 / 列表（只读），为客户端刷新草稿提供接口；
+- 开始 Session（首次写入 startedAt、校验 count_down 已设时长）与结束 Session 的状态流转规则；
+- 暂停 / 恢复规则需小喵先定（本批未自行决定）。
+
+**等待小喵审核。**
+
+---
+
+## 小喵审核结果 #7 · 需要返修 · 2026-08-09
+
+### 独立复检结果
+
+- `npm run typecheck`：通过；
+- `npm test`：19 个测试文件，306/306 通过；
+- `git diff --check`：通过，仅有 Windows LF→CRLF 提示；
+- 范围核对：没有修改计划复选框，没有执行 Git / GitHub / VPS 操作，也没有把开始、暂停、结束或真实计时器混入本批。
+
+整体分层、幂等创建、仓储 CAS、no-op 版本语义和接口边界都符合方向，但下列问题会让非法数据绕过 HTTP 后进入领域状态，本批暂不验收、不打勾、不提交。
+
+### 必须修复 1：服务层没有完整守住自身输入不变量
+
+当前 `StudySessionService` 只在 HTTP JSON Schema 层限制倒计时时长；直接调用应用服务时：
+
+- `createStudySession` 可以保存 `0`、`86401`、小数或其他非法 `plannedDurationSeconds`；
+- `setCountdown` 同样可以把非法时长写进仓储；
+- `createStudySession` 可以保存超过 2000 字符的 `taskText`。
+
+应用服务未来会被 HTTP 以外的入口复用，不能把正确性只寄托在路由校验上。请：
+
+1. 在服务层统一校验 `plannedDurationSeconds` 必须是整数且位于 `1..86400`；创建时仅在值非空时校验；
+2. 创建时对规范化后的非空 `taskText` 执行与设置任务相同的长度校验；
+3. 新增受控的时长非法领域错误（例如 `StudySessionPlannedDurationInvalidError`），HTTP 映射为稳定 400，响应不要回显非法值；
+4. 增加服务层直调用例，覆盖创建与设置的 `0`、`86401`、小数，以及创建超长任务，证明绕过 HTTP 也无法污染仓储。
+
+### 必须修复 2：API 实际会接受数字字符串，与严格整数契约不一致
+
+当前 `apps/server/src/app.ts` 使用 `coerceTypes: 'array'`，导致 JSON 请求中的 `plannedDurationSeconds: "600"` 被接受并改写为数字；现有测试还把该行为固定为成功。对于 JSON 请求体，本批契约明确要求整数，字符串不应悄悄通过。
+
+请将全局 AJV `coerceTypes` 改为 `false`，并：
+
+- 把创建与设置倒计时的数字字符串测试改为期望 400；
+- 增加 `expectedVersion: "1"` 返回 400 的回归测试；
+- 跑完全部既有接口测试，确认关闭强制转换没有破坏其他 API。
+
+这里由小喵明确决定采用严格 JSON 类型，不保留检查点所述的数字字符串兼容行为。
+
+### 必须修复 3：测试直接使用了未声明的传递依赖
+
+`study-session-contract.test.ts` 直接 `require('ajv')`，但 `apps/server/package.json` 没有声明 `ajv`。目前只是恰好从 Fastify / MCP SDK 的传递依赖中解析成功，依赖树变化后测试可能无代码改动却突然失败。
+
+请把 `ajv` 明确加入 `@mingwu/server` 的 `devDependencies`，同步更新 lockfile；不要依赖其他包替本项目声明测试依赖。使用当前已经安装并锁定的兼容主版本即可。
+
+### 返修边界
+
+- 只修以上三项并补测试，不开始下一批；
+- 不修改计划文档复选框；
+- 不执行 Git、GitHub、VPS 或其他外部操作；
+- 完成后运行 `npm run typecheck`、`npm test`、`git diff --check`；
+- 把“检查点 #7 返修”追加到本文件末尾后立即暂停，等待小喵复验。
+
+---
+
+## 检查点 #7 返修 · 等待小喵复验 · 2026-08-09
+
+### 本批次目标
+
+严格按《小喵审核结果 #7》的三项必须修复完成 study-session 批次返修，不开始下一批，不修改计划复选框。
+
+### 候选完成的计划项目原文
+
+本批为返修批次，不涉及计划文档候选完成项，未修改任何 `- [ ]` / `- [x]`。
+
+### 实际完成内容
+
+1. **服务层自守输入不变量（必须修复 1）**：
+   - 新增领域错误 `StudySessionPlannedDurationInvalidError`（`errors.ts`），消息不回显非法值；
+   - 新增 `assertValidPlannedDurationSeconds`：时长必须为 `1..86400` 范围内的整数，`null / undefined`（草稿未设置）放行；
+   - `createStudySession`：规范化后非空时长一律校验；规范化后非空 `taskText` 执行与 `setTask` 相同的长度校验（超 2000 抛 `StudySessionTaskTextInvalidError`）；
+   - `setCountdown`：写入仓储前校验时长；
+   - 服务层直调用例覆盖创建/设置的 `0`、`86401`、`1.5`，创建超长任务，证明绕过 HTTP 也无法污染仓储；并覆盖合法边界 `1`、`86400` 接受。
+
+2. **关闭 AJV 类型强制转换（必须修复 2）**：
+   - `app.ts` 全局 `coerceTypes` 由 `'array'` 改为 `false`，JSON 请求体遵循严格整数契约；
+   - 创建与设置倒计时的数字字符串（`'600'`）测试由“成功”改为期望 400 `validation_failed`；
+   - 新增 `expectedVersion: '1'` 在 task / countdown 两个 PATCH 上返回 400 的回归测试；
+   - 全部既有接口测试通过，确认关闭强制转换未破坏 project / stage / task / MCP 等其他 API。
+
+3. **测试依赖显式声明（必须修复 3）**：
+   - `ajv` 加入 `@mingwu/server` 的 `devDependencies`（`^8.20.0`，与已安装锁定的版本兼容），`package-lock.json` 同步更新（仅新增一行）；
+   - 契约测试不再依赖 Fastify 的传递依赖解析；注释同步说明运行时同样关闭 coerceTypes。
+
+### 新增、修改和删除的文件清单
+
+修改（本次返修）：
+- `apps/server/src/domain/study-session/errors.ts`（新增 `StudySessionPlannedDurationInvalidError`）
+- `apps/server/src/application/study-session/study-session-service.ts`（时长/任务长度服务层校验）
+- `apps/server/src/app.ts`（`coerceTypes` 关闭 + 新错误映射 400 `study_session_planned_duration_invalid`）
+- `apps/server/test/study-session-service.test.ts`（新增 4 个直调用例）
+- `apps/server/test/study-session-api.test.ts`（2 处数字字符串改期望 400 + 2 个 expectedVersion 回归）
+- `apps/server/test/study-session-contract.test.ts`（更新 ajv 依赖与 coerceTypes 注释）
+- `apps/server/package.json`（devDependencies 声明 `ajv`）
+- `package-lock.json`（同步 ajv 声明一行）
+
+删除：无。
+
+### 关键设计决定及其依据
+
+1. 校验顺序：先校验值本身（时长/任务长度），再校验模式约束。与 HTTP 严格 schema 的拒绝结果对齐（如 `count_up` + 非法时长在 HTTP 层同样是 400 而非 409）。
+2. 新错误消息不回显非法值：避免把无效输入反弹给调用方，符合小喵“响应不要回显非法值”的要求。
+3. `coerceTypes: false` 为全局行为：JSON 请求体必须使用 schema 声明的类型；MCP 的 `clientInfo.version` 等字符串字段走 MCP 协议自身处理，不受 Fastify ajv 影响，已由 `mcp-http` / `mcp-http-smoke` 测试确认。
+4. `ajv` 仅声明为 devDependency，契约测试继续用 `createRequire` 运行时加载（CJS 默认导出在 NodeNext 下类型解析无歧义）。
+
+### 执行过的测试与检查（真实结果）
+
+- `npm run typecheck`：`@mingwu/contracts` 与 `@mingwu/server` 均 `tsc --noEmit` 通过。
+- `npm test`：19 个测试文件，**312/312 通过**（较上一批 306 新增 6 个用例：服务层 4、API 2）。
+- `git diff --check`：通过，仅有 Windows LF→CRLF 行尾提示。
+- `package-lock.json` diff：仅新增 `ajv: ^8.20.0` 一行，无其他变更。
+
+### 未完成内容、已知问题与风险
+
+- 严格遵循返修边界：未开始下一批（查询详情 / 开始 Session 等）。
+- 未执行 Git / GitHub / VPS 或其他外部操作；未修改 `docs/project-plan-v0.1.md` 复选框。
+
+### 是否涉及数据库 / 身份权限 / 密钥 / 外部服务 / 破坏性变化
+
+- 数据库 / Migration：无。
+- 身份认证 / 权限 / 密钥：无。
+- 外部服务：未操作 VPS / Cloudflare / GitHub，无部署、重启或修改运行中服务。
+- 破坏性变化：无新增依赖以外的破坏；`coerceTypes` 由 `'array'` 改为 `false` 属接口行为收紧（严格类型），已由全部既有测试确认兼容。
+
+### 建议下一批任务
+
+- 查询 Session 详情 / 列表（只读），为客户端刷新草稿提供接口；
+- 开始 Session（首次写入 startedAt、校验 count_down 已设时长）与结束 Session 的状态流转规则；
+- 暂停 / 恢复规则需小喵先定。
+
+**等待小喵审核。**
+
+---
+
+## 小喵返修验收结果 #7 · 通过 · 2026-08-09
+
+### 验收结论
+
+检查点 #7 的三项返修全部通过，本批正式验收：
+
+- [x] 创建 Study Session
+- [x] 设置学习任务
+- [x] 设置倒计时时长
+
+### 小喵独立复验
+
+- `npm run typecheck`：contracts 与 server 均通过；
+- `npm test`：19 个测试文件，312/312 通过；
+- `npm ls ajv --all`：`@mingwu/server` 已直接声明 `ajv@8.20.0`，依赖树去重正常；
+- `git diff --check`：通过，仅有 Windows LF→CRLF 提示；
+- 服务层在 HTTP 之外同样拒绝非法时长与超长任务；
+- Fastify 已关闭类型强制转换，数字字符串与字符串版本号均稳定返回 400；
+- 未发现返修范围外的功能扩张，没有触碰数据库、认证、VPS 或既有运行中服务。
+
+计划文档对应三项已由小喵打勾。检查点 #7 正式关闭。
