@@ -221,7 +221,7 @@ Windows App
 - [x] project_list_stages
 - [x] project_get_stage
 - [x] project_submit_stage_update
-- [ ] project_list_reports
+- [x] project_list_reports
 - [ ] task_list_my_tasks
 - [ ] task_create
 - [ ] task_update

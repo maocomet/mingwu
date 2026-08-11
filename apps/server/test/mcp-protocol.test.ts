@@ -23,6 +23,7 @@ function buildTestServer() {
     studySessionCurrentService: services.studySessionCurrentService,
     studyReportService: services.studyReportService,
     stageUpdateRequestService: services.stageUpdateRequestService,
+    projectWorkReportService: services.projectWorkReportService,
     serviceName: 'mingwu-server',
     serviceVersion: '0.1.0',
     logger: { error: () => undefined },
@@ -61,18 +62,20 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
       expect(tools.map((t) => t.name).sort()).toEqual([
         'project_get_stage',
         'project_get_status',
+        'project_list_reports',
         'project_list_stages',
         'project_submit_stage_update',
         'study_append_report',
         'study_get_current_session',
         'study_get_session',
       ]);
-      // 五个只读工具都明确只读；两个写工具（study_append_report /
+      // 六个只读工具都明确只读；两个写工具（study_append_report /
       // project_submit_stage_update）不得标“只读”。
       const READ_ONLY_TOOLS = new Set([
         'project_get_stage',
         'project_get_status',
         'project_list_stages',
+        'project_list_reports',
         'study_get_session',
         'study_get_current_session',
       ]);
@@ -93,6 +96,7 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
         project_get_stage: ['stage_id'],
         project_get_status: ['project_id'],
         project_list_stages: ['project_id'],
+        project_list_reports: ['stage_id'],
         study_get_session: ['session_id'],
         study_get_current_session: null,
         study_append_report: ['report_id', 'session_id', 'content'],
@@ -420,6 +424,7 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
       studySessionCurrentService: services.studySessionCurrentService,
       studyReportService: services.studyReportService,
       stageUpdateRequestService: services.stageUpdateRequestService,
+      projectWorkReportService: services.projectWorkReportService,
       serviceName: 'mingwu-server',
       serviceVersion: '0.1.0',
       logger,
@@ -492,6 +497,7 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
       studySessionCurrentService: services.studySessionCurrentService,
       studyReportService: services.studyReportService,
       stageUpdateRequestService: services.stageUpdateRequestService,
+      projectWorkReportService: services.projectWorkReportService,
       serviceName: 'mingwu-server',
       serviceVersion: '0.1.0',
       logger,
@@ -708,6 +714,7 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
       studySessionCurrentService: services.studySessionCurrentService,
       studyReportService: services.studyReportService,
       stageUpdateRequestService: services.stageUpdateRequestService,
+      projectWorkReportService: services.projectWorkReportService,
       serviceName: 'mingwu-server',
       serviceVersion: '0.1.0',
       logger,
@@ -753,6 +760,7 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
       studySessionCurrentService: services.studySessionCurrentService,
       studyReportService: services.studyReportService,
       stageUpdateRequestService: services.stageUpdateRequestService,
+      projectWorkReportService: services.projectWorkReportService,
       serviceName: 'mingwu-server',
       serviceVersion: '0.1.0',
       logger,

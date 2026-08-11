@@ -171,6 +171,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     studySessionCurrentService: deps.studySessionCurrentService,
     studyReportService: deps.studyReportService,
     stageUpdateRequestService: deps.stageUpdateRequestService,
+    projectWorkReportService: deps.projectWorkReportService,
     serviceName: deps.config.serviceName,
     serviceVersion: deps.config.serviceVersion,
     logger: app.log,

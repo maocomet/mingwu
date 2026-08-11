@@ -109,6 +109,7 @@ describe('MCP Streamable HTTP real-HTTP auth smoke (127.0.0.1, ephemeral port)',
       expect(tools.map((t) => t.name).sort()).toEqual([
         'project_get_stage',
         'project_get_status',
+        'project_list_reports',
         'project_list_stages',
         'project_submit_stage_update',
         'study_append_report',
@@ -169,7 +170,7 @@ describe('MCP Streamable HTTP real-HTTP auth smoke (127.0.0.1, ephemeral port)',
       ).toBe(1);
 
       const bList = await b.client.listTools();
-      expect(bList.tools).toHaveLength(7);
+      expect(bList.tools).toHaveLength(8);
 
       // B 也通过 DELETE 显式清理（client.close 不保证发送 DELETE）。
       await b.transport.terminateSession();

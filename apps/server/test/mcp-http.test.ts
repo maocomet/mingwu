@@ -124,7 +124,7 @@ async function createProjectWithData(app: App): Promise<{ projectId: string; sta
 }
 
 describe('MCP Streamable HTTP via /mcp', () => {
-  it('initialize establishes a session; tools/list exposes five read-only tools plus study_append_report', async () => {
+  it('initialize establishes a session; tools/list exposes six read-only tools plus two write tools', async () => {
     const { app } = setup();
     try {
       const { sessionId, protocolVersion } = await initialize(app);
@@ -145,6 +145,7 @@ describe('MCP Streamable HTTP via /mcp', () => {
       expect(tools.map((t) => t.name).sort()).toEqual([
         'project_get_stage',
         'project_get_status',
+        'project_list_reports',
         'project_list_stages',
         'project_submit_stage_update',
         'study_append_report',
@@ -155,6 +156,7 @@ describe('MCP Streamable HTTP via /mcp', () => {
         'project_get_stage',
         'project_get_status',
         'project_list_stages',
+        'project_list_reports',
         'study_get_session',
         'study_get_current_session',
       ]);

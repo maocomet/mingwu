@@ -21,6 +21,7 @@ describe('McpSessionRegistry per-server private identity', () => {
       studySessionCurrentService: services.studySessionCurrentService,
       studyReportService: services.studyReportService,
       stageUpdateRequestService: services.stageUpdateRequestService,
+      projectWorkReportService: services.projectWorkReportService,
       serviceName: 'test-registry',
       serviceVersion: '0.1.0',
       logger: { error: () => undefined },

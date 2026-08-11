@@ -5900,6 +5900,30 @@ App API 严格输入、服务层 `pending -> needs_changes`、同语义重试、
 
 ---
 
+## 小喵审核结果 #31 · 通过 · 2026-08-11
+
+### 验收结论
+
+- MCP `project_list_reports` 已通过审核：工具严格只接收 `stage_id`，直接复用 `ProjectWorkReportService.listByStage`，没有复制排序、归属校验或报告读取逻辑。
+- 工具与 App API 的内容、顺序及空列表语义一致；未知关卡、范围腐败和未知异常均使用受控错误，内部 ID 与异常秘密不进入 MCP 响应。
+- 匿名本地只读连接可以调用；伪造身份、归属和其他未知字段均被严格拒绝。已有七个 MCP 工具的名称、输入、授权与行为保持不变。
+
+### 小喵独立复验
+
+- 根目录 typecheck：contracts 与 server 均通过。
+- 全量测试：**51 个测试文件、829/829 通过**。
+- tools/list、严格输入、稳定排序、未知关卡、范围腐败脱敏、双连接隔离及真实 Streamable HTTP 对拍均通过。
+- 源码、测试、契约与文档扫描：**NUL=0、BOM=0**。
+- `git diff --check`：通过，仅有 Windows LF→CRLF 提示，无空白错误。
+
+### 计划更新
+
+- 已将 `docs/project-plan-v0.1.md` 中 `- [ ] project_list_reports` 更新为 `- [x] project_list_reports`。
+
+本批验收通过，可以提交并推送到 `develop`；下一批任务由小喵在推送后单独追加。
+
+---
+
 ## 小喵审核结果 #30 · 通过 · 2026-08-11
 
 ### 验收结论
@@ -5921,3 +5945,104 @@ App API 严格输入、服务层 `pending -> needs_changes`、同语义重试、
 - 已将 `docs/project-plan-v0.1.md` 中 `- [ ] 获取关卡报告` 更新为 `- [x] 获取关卡报告`。
 
 本批验收通过，可以提交并推送到 `develop`；下一批任务由小喵在推送后单独追加。
+
+---
+
+## 小喵任务 #31 · MCP `project_list_reports` · 2026-08-11
+
+### 本批唯一候选计划项
+
+- `- [ ] project_list_reports`
+
+本批只把检查点 #30 已验收的关卡工作报告读取能力接入 MCP；不要新增报告写入、项目级列表、AI Task、认证模型、数据库、前端或其他工具。
+
+### 必须完成
+
+1. 在 MCP Server 依赖中注入现有 `ProjectWorkReportService`，每个独立 MCP session 继续复用同一业务服务，不复制报告读取或排序算法，也不回调自身 HTTP 接口。
+2. 注册只读工具 `project_list_reports`：
+   - 输入严格只允许 `{ stage_id: UUID }`，使用 Zod `.strict()`；拒绝 `project_id`、`actor_id`、`actorId`、`submittedActorId`、`connectionId` 及其他未知字段；
+   - 调用 `ProjectWorkReportService.listByStage(stage_id)`，返回 `{ reports: [...] }`，结果与 `GET /api/v1/stages/:stageId/reports` 的内容、顺序和空列表语义一致；
+   - 未知关卡返回受控 MCP 错误“关卡不存在”；报告范围腐败返回不含任何内部 ID 的受控错误“关卡报告数据不一致”；未知异常继续走统一脱敏错误处理；
+   - 这是只读工具，匿名本地只读连接可以使用，不要求 Actor 身份，也不得在响应中额外输出 session、connection 或认证身份。
+3. 为工具写准确 description：明确它只读取“直接关联指定关卡”的 Project Work Report，排序为 `submittedAt` 新到旧、同时间 `id` 升序，不混入 Study Report，也不会修改项目数据。
+4. 更新 MCP session / app 装配与既有 tools/list 数量断言。不得改变已有七个工具的名字、输入、授权和行为。
+5. 测试至少覆盖：tools/list 可见且 description 正确、空列表、稳定排序、未知关卡、严格拒绝未知字段与伪造身份字段、范围腐败不泄露 ID、两个 MCP session 读取一致且协议状态隔离、匿名只读可调用，以及真实 Streamable HTTP 冒烟。
+
+### 验收与边界
+
+- 运行 MCP 专项、根目录 typecheck、全量测试、真实 HTTP 冒烟、NUL / BOM 扫描与 `git diff --check`。
+- 在本文件末尾追加检查点，写明真实文件、测试数字、风险和未完成内容，然后暂停等待小喵审核。
+- 不修改计划复选框，不执行 Git / GitHub / VPS 操作，不开始下一批；不要读取或修改 `.claude/` 与 `ui素材mingwu/`。
+
+等待 DS 完成检查点后由小喵审核。
+
+---
+
+## 检查点 #31 · MCP `project_list_reports` · 2026-08-11
+
+### 本批次目标
+
+按小喵任务 #31，把检查点 #30 已验收的关卡工作报告读取能力接入 MCP：在 MCP Server 依赖中注入现有 `ProjectWorkReportService`，注册只读工具 `project_list_reports`，保证与 `GET /api/v1/stages/:stageId/reports` 内容、顺序与空列表语义一致；不新增报告写入、项目级列表、AI Task、认证模型、数据库、前端或其他工具。
+
+### 候选完成的计划项目原文
+
+- `- [ ] project_list_reports`
+
+### 实际完成内容
+
+- 在 `buildMcpServer` 的 `McpServerDeps` 中新增 `projectWorkReportService`，每个独立 MCP session 复用同一业务服务实例，不复制报告读取 / 排序算法，也不回调自身 HTTP 接口。
+- 注册只读工具 `project_list_reports`：输入为 Zod `.strict()` 的 `{ stage_id: UUID }` 严格白名单，运行时拒绝 `project_id`、`actor_id`、`actorId`、`submittedActorId`、`connectionId` 及其他未知字段；调用 `ProjectWorkReportService.listByStage(stage_id)`，返回 `{ reports: [...] }`。
+- 错误映射：未知关卡 → 受控“关卡不存在”；范围腐败（`ProjectWorkReportScopeCorruptError`）→ 固定受控“关卡报告数据不一致”，报告 / 关卡 / 项目内部 ID 只写服务端日志、不进响应；未知异常继续走统一脱敏“内部错误”。
+- 该工具是只读工具，匿名本地只读连接（`authContext === null`）即可调用，不要求 Actor 身份，响应不输出任何 session / connection / 认证身份。
+- 准确 description：只读取直接关联指定关卡的 Project Work Report，排序 `submittedAt` 新到旧、同时间 `id` 升序兜底，不混入 Study Report，不修改任何项目数据。
+- 更新 MCP session / app 装配（`app.ts` 的 `McpSessionRegistry` 注入）与既有 tools/list 数量断言（七个 → 八个）；已有七个工具的名字、输入、授权与行为未改变。
+
+### 新增文件
+
+- `apps/server/test/mcp-list-reports.test.ts`（9 项测试：tools/list 可见与 description、匿名只读空列表、稳定排序并与服务语义一致、未知关卡、严格拒绝伪造身份 / 归属字段与非 UUID、范围腐败不泄露 ID、双 session 读取一致且协议状态隔离、未知异常脱敏、Streamable HTTP 冒烟）
+
+### 修改文件
+
+- `apps/server/src/mcp/mcp-server.ts`（`McpServerDeps` 新增 `projectWorkReportService`；新增 `project_list_reports` 工具与严格输入 schema；更新“五个只读工具”注释为六个）
+- `apps/server/src/app.ts`（`McpSessionRegistry` 装配注入 `projectWorkReportService`）
+- `apps/server/test/mcp-protocol.test.ts`（buildTestServer 与 4 处内联 buildMcpServer 注入新依赖；tools/list 断言更新为 8 个工具并补充 `project_list_reports` 字段白名单）
+- `apps/server/test/mcp-append-report.test.ts`、`apps/server/test/mcp-submit-stage-update.test.ts`（buildTestServer 注入新依赖）
+- `apps/server/test/mcp-http.test.ts`（tools/list 断言更新为 8 个工具；测试名更新为“六个只读工具 + 两个写工具”）
+- `apps/server/test/mcp-http-smoke.test.ts`（tools/list 断言更新为 8 个工具；`toHaveLength(7)` → `toHaveLength(8)`；新增真实 socket 调用 `project_list_reports` 并与 App HTTP 接口结果一致的断言）
+- `apps/server/test/mcp-http-smoke-auth.test.ts`（tools/list 断言更新为 8 个工具；`toHaveLength(7)` → `toHaveLength(8)`）
+- `apps/server/test/mcp-session-registry.test.ts`（`McpSessionRegistry` 构造注入新依赖）
+- `docs/DeepSeek开发汇报.md`（本检查点，仅文件末尾追加）
+
+### 关键设计决定及其依据
+
+- 工具复用既有服务而非复制算法：`ProjectWorkReportService.listByStage` 已内含关卡存在性校验、深拷贝返回与范围一致性防线，MCP 层只做输入白名单与错误映射，避免两套读取逻辑漂移。
+- 严格输入白名单用 Zod `.strict()`：与 `study_get_session` / `project_get_stage` 等既有工具一致，运行时拒绝任何未声明字段，尤其伪造身份 / 归属字段——Actor 身份只可能来自服务端认证上下文，本工具不接收也不输出身份。
+- 范围腐败错误在 MCP 层捕获并只把内部 ID 写入 `deps.logger.error`：响应固定为“关卡报告数据不一致”，与 App 层 `project_work_report_scope_corrupt` 的“明细只进日志、不进响应”原则一致。
+- 匿名只读可调用：与 `project_get_stage` 等只读工具一致，不要求 Actor 身份，也不在响应中回显 session / connection / 认证身份；写工具才受 `authContext` 与授权策略约束。
+- 未新增 HTTP 路由与契约：MCP 工具直接调用已验收的业务服务，返回 `{ reports: [...] }`，与 App HTTP 接口内容、顺序、空列表语义天然一致（已用真实 socket 与 App 接口对拍断言）。
+
+### 执行过的测试或检查、命令与真实结果
+
+- MCP 专项测试：`npx vitest run apps/server/test/mcp-list-reports.test.ts apps/server/test/mcp-protocol.test.ts apps/server/test/mcp-http.test.ts apps/server/test/mcp-http-smoke.test.ts apps/server/test/mcp-http-smoke-auth.test.ts apps/server/test/mcp-http-auth.test.ts apps/server/test/mcp-append-report.test.ts apps/server/test/mcp-submit-stage-update.test.ts apps/server/test/mcp-session-registry.test.ts`
+  - 结果：**9 个文件全部通过，79/79 通过**（含新文件 9/9，真实 socket 冒烟与 Streamable HTTP 冒烟）。
+- 根目录 typecheck：`npm run typecheck` → **contracts 与 server 均通过**（`tsc --noEmit`，无错误）。
+- 全量测试：`npx vitest run` → **51 个测试文件、829/829 通过**。
+- NUL / BOM 扫描：本次新增与修改文件 **NUL=0、BOM=0**。
+- `git diff --check`：通过，仅有 Windows LF→CRLF 提示，无空白错误。
+
+### 未完成内容、已知问题和风险
+
+- 本批仍为只读：未实现项目级报告列表、报告写入 / 提交 API、`relatedAssetIds` 素材校验与 ProjectTask / AI Task / 审核记录关联，留待后续批次。
+- `project_list_reports` 与 `project_get_stage` 共用“关卡不存在”文案，语义一致；若后续需要区分，可再细化文案。
+- `McpServerDeps` 新增依赖使 `mcp-session-registry.test.ts` 等既有测试同步注入，模式与既往批次一致，全量回归通过，风险低。
+- 范围腐败在内存仓储 + 测试装配路径下无法自然触发，为防御性防线，已用假服务在 MCP 层覆盖“不泄露 ID、明细只进日志”。
+
+### 是否涉及数据库、身份权限、密钥、外部服务或破坏性变化
+
+- 不涉及数据库 migration；不涉及身份认证、权限或密钥（本工具只读、匿名可用，未触碰认证逻辑）；不涉及 VPS / Cloudflare / GitHub 等外部服务；无删除文件等破坏性变更。
+
+### 建议下一批任务
+
+- 报告提交 / 写入 API（写路径需补齐幂等与 Actor 身份服务端解析），或按小喵安排继续推进后续计划项；本批不作为任何复选框打勾依据。
+
+等待小喵审核。

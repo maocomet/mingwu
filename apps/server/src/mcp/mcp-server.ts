@@ -12,8 +12,10 @@ import type { StageUpdateRequestService } from '../application/stage-update-requ
 import type { StudySessionCurrentService } from '../application/study-session-current/study-session-current-service.js';
 import type { StudySessionDetailService } from '../application/study-session-detail/study-session-detail-service.js';
 import type { StudyReportService } from '../application/study-report/study-report-service.js';
+import type { ProjectWorkReportService } from '../application/project-work-report/project-work-report-service.js';
 import { ProjectNotFoundError } from '../domain/project/errors.js';
 import { StageNotFoundError, StageVersionConflictError } from '../domain/stage/errors.js';
+import { ProjectWorkReportScopeCorruptError } from '../domain/project-work-report/errors.js';
 import {
   StageUpdateRequestExpectedVersionInvalidError,
   StageUpdateRequestIdInvalidError,
@@ -47,13 +49,14 @@ export interface McpServerDeps {
   studySessionCurrentService: StudySessionCurrentService;
   studyReportService: StudyReportService;
   stageUpdateRequestService: StageUpdateRequestService;
+  projectWorkReportService: ProjectWorkReportService;
   serviceName: string;
   serviceVersion: string;
   logger: McpLogger;
   /**
    * 该 MCP Server 实例私有的只读绑定身份：initialize 时由服务端 Bearer 凭据解析、
    * 经统一校验并复制 / 冻结后的 session 私有对象；本地开发 / 自动化测试的匿名只读
-   * 模式为 null。每次连接各持有自己的实例，绝不放进共享可变全局变量。现有五个
+   * 模式为 null。每次连接各持有自己的实例，绝不放进共享可变全局变量。现有六个
    * 只读工具不得输出本身份，也不新增 whoami 工具；供后续写工具按服务端身份落账。
    */
   readonly authContext: McpAuthContext | null;
@@ -64,6 +67,13 @@ const uuidField = (description: string) => z.string().uuid().describe(descriptio
 const statusInputSchema = z.object({ project_id: uuidField('项目 UUID') }).strict();
 const listStagesInputSchema = z.object({ project_id: uuidField('项目 UUID') }).strict();
 const getStageInputSchema = z.object({ stage_id: uuidField('关卡 UUID') }).strict();
+/**
+ * project_list_reports 严格白名单：只允许 stage_id。.strict() 在运行时拒绝任何额外
+ * 字段，尤其拒绝 project_id / actor_id / actorId / submittedActorId / connectionId /
+ * session 等身份、归属或受保护字段——报告读取的服务端防线会校验报告与正式 Stage
+ * 的归属一致性，身份与 session 信息一律不进响应。
+ */
+const listReportsInputSchema = z.object({ stage_id: uuidField('关卡 UUID') }).strict();
 const getStudySessionInputSchema = z.object({ session_id: uuidField('学习会话 UUID') }).strict();
 /** 当前 Session 工具不需要任何输入参数：严格空对象，任何多余字段（含身份字段）都被拒绝。 */
 const getCurrentStudySessionInputSchema = z.object({}).strict();
@@ -150,7 +160,7 @@ function textContent(value: unknown) {
 }
 
 /**
- * 构建一个全新的 MCP Server 实例：五个只读工具 + 两个写工具
+ * 构建一个全新的 MCP Server 实例：六个只读工具 + 两个写工具
  * （study_append_report / project_submit_stage_update）。
  * 每个 MCP session 都必须使用独立的 Server 实例（SDK 的 Server 一次只安全地
  * 连接一个 transport，不能跨 session 共享临时协议状态）；本工厂只依赖共享的
@@ -218,6 +228,45 @@ export function buildMcpServer(deps: McpServerDeps): McpServer {
       } catch (err) {
         if (err instanceof StageNotFoundError) {
           return toolErrorResult('关卡不存在');
+        }
+        return unexpectedError(deps, err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'project_list_reports',
+    {
+      title: 'List project work reports for a stage',
+      description:
+        '只读：返回直接关联指定关卡的全部项目工作报告（Project Work Report），' +
+        '不混入其他关卡、项目或自习室学习报告（Study Report）。排序为 submittedAt ' +
+        '新到旧、同一时间按 id 升序兜底；已有关卡无报告时返回空列表。' +
+        '未知关卡明确报错。不会修改任何项目数据。',
+      inputSchema: listReportsInputSchema,
+    },
+    async ({ stage_id }) => {
+      try {
+        const reports = await deps.projectWorkReportService.listByStage(stage_id);
+        return textContent({ reports });
+      } catch (err) {
+        if (err instanceof StageNotFoundError) {
+          return toolErrorResult('关卡不存在');
+        }
+        if (err instanceof ProjectWorkReportScopeCorruptError) {
+          // 范围腐败：报告 / 关卡 / 项目 ID 只进服务端日志，响应固定脱敏文本。
+          deps.logger.error(
+            {
+              errType: 'ProjectWorkReportScopeCorruptError',
+              reportId: err.reportId,
+              expectedStageId: err.expectedStageId,
+              expectedProjectId: err.expectedProjectId,
+              actualStageId: err.actualStageId,
+              actualProjectId: err.actualProjectId,
+            },
+            'project_list_reports scope corruption detected',
+          );
+          return toolErrorResult('关卡报告数据不一致');
         }
         return unexpectedError(deps, err);
       }

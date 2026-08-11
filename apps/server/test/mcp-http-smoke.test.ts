@@ -4,6 +4,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { buildApp } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
 import {
+  makeProjectWorkReport,
   makeServices,
   makeStudyParticipant,
   makeStudySummary,
@@ -122,6 +123,7 @@ describe('MCP Streamable HTTP real-HTTP smoke (127.0.0.1, ephemeral port)', () =
       expect(tools.map((t) => t.name).sort()).toEqual([
         'project_get_stage',
         'project_get_status',
+        'project_list_reports',
         'project_list_stages',
         'project_submit_stage_update',
         'study_append_report',
@@ -148,6 +150,30 @@ describe('MCP Streamable HTTP real-HTTP smoke (127.0.0.1, ephemeral port)', () =
       });
       const stages = JSON.parse(firstText(listResult)) as Array<{ name: string }>;
       expect(stages.map((s) => s.name)).toEqual(['第一关']);
+
+      // 播种一条直接关联该关卡的 Project Work Report，经真实 socket 读取
+      // project_list_reports，并验证与 App HTTP 接口结果一致。
+      services.projectWorkReportRepository.seed(
+        makeProjectWorkReport({
+          stageId: stage.id,
+          projectId: project.id,
+          submittedAt: '2026-08-11T02:00:00.000Z',
+          roundGoal: '冒烟关卡报告',
+        }),
+      );
+      const reportsResult = await a.client.callTool({
+        name: 'project_list_reports',
+        arguments: { stage_id: stage.id },
+      });
+      expect(reportsResult.isError).not.toBe(true);
+      const reports = JSON.parse(firstText(reportsResult)) as {
+        reports: Array<{ id: string; roundGoal: string }>;
+      };
+      expect(reports.reports).toHaveLength(1);
+      expect(reports.reports[0]!.roundGoal).toBe('冒烟关卡报告');
+      const apiReports = await fetch(`${baseUrl}/api/v1/stages/${stage.id}/reports`);
+      expect(apiReports.status).toBe(200);
+      expect(reports).toEqual(await apiReports.json());
 
       // 会话还是 created 草稿：study_get_current_session 返回 JSON null（正常结果）。
       const currentNull = await a.client.callTool({
@@ -227,7 +253,7 @@ describe('MCP Streamable HTTP real-HTTP smoke (127.0.0.1, ephemeral port)', () =
 
       // B 可独立读取数据。
       const bList = await b.client.listTools();
-      expect(bList.tools).toHaveLength(7);
+      expect(bList.tools).toHaveLength(8);
 
       // DELETE 结束 A 的 session；A 立即失效，B 不受影响。
       await a.transport.terminateSession();
@@ -235,7 +261,7 @@ describe('MCP Streamable HTTP real-HTTP smoke (127.0.0.1, ephemeral port)', () =
       expect((app as unknown as { mcpSessions: { size: number } }).mcpSessions.size).toBe(1);
 
       const bAfter = await b.client.listTools();
-      expect(bAfter.tools).toHaveLength(7);
+      expect(bAfter.tools).toHaveLength(8);
 
       await b.client.close();
     } finally {

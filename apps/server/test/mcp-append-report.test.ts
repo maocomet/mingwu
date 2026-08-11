@@ -55,6 +55,7 @@ function buildTestServer(opts: BuildOptions = {}) {
     studySessionCurrentService: services.studySessionCurrentService,
     studyReportService: opts.studyReportService ?? services.studyReportService,
     stageUpdateRequestService: services.stageUpdateRequestService,
+    projectWorkReportService: services.projectWorkReportService,
     serviceName: 'mingwu-server',
     serviceVersion: '0.1.0',
     logger: opts.logger ?? { error: () => undefined },
