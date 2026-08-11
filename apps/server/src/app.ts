@@ -13,6 +13,7 @@ import type { StudySessionCurrentService } from './application/study-session-cur
 import type { StudySessionDetailService } from './application/study-session-detail/study-session-detail-service.js';
 import type { StudySummaryService } from './application/study-summary/study-summary-service.js';
 import type { StudyReportService } from './application/study-report/study-report-service.js';
+import type { StageUpdateRequestService } from './application/stage-update-request/stage-update-request-service.js';
 import {
   healthRoutes,
   type ReadinessCheck,
@@ -77,6 +78,7 @@ export interface AppDeps {
   studySessionCurrentService: StudySessionCurrentService;
   studySummaryService: StudySummaryService;
   studyReportService: StudyReportService;
+  stageUpdateRequestService: StageUpdateRequestService;
   /**
    * 可选 MCP Bearer 认证器。未注入时 production 对 /mcp 一律 503
    * mcp_auth_not_configured（fail-closed），development / test 保留仅限本地
@@ -147,6 +149,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     studySessionDetailService: deps.studySessionDetailService,
     studySessionCurrentService: deps.studySessionCurrentService,
     studyReportService: deps.studyReportService,
+    stageUpdateRequestService: deps.stageUpdateRequestService,
     serviceName: deps.config.serviceName,
     serviceVersion: deps.config.serviceVersion,
     logger: app.log,

@@ -4844,3 +4844,288 @@ PUT 使用严格白名单请求体：
 - `[x] 查询单次 Session 完整详情`
 
 本批可以归档并提交推送。
+
+---
+
+## 小喵任务 #23 · 关卡更新申请模型 + `project_submit_stage_update` · 2026-08-10
+
+### 本批目标
+
+建立“AI 只能申请、不能直接修改正式主进度”的第一段闭环：AI 通过 MCP 以自己的服务端认证身份提交关卡状态更新申请，系统只新增一条待处理申请，不修改 ProjectStage。批准、拒绝、要求补充留给后续用户接口批次。
+
+候选完成的计划原文（DS 不打勾）：
+
+- `- [ ] 提交关卡更新申请`
+- `- [ ] project_submit_stage_update`
+
+### 最小数据模型
+
+新增 `StageUpdateRequest`（命名可按现有目录规范微调），至少包含：
+
+- `id`：调用方 UUID 幂等键；
+- `projectId`、`stageId`：由服务端读取真实 Stage 后确定，不信任客户端 projectId；
+- `requesterActorId`：只来自 MCP `authContext.actorId`；
+- `expectedStageVersion`：申请所依据的 Stage 版本；
+- `proposedStatus`：申请变更到的合法关卡状态；
+- `reason`：trim 后非空，按 Unicode code point 设置受控上限；
+- `status`：本批创建时固定 `pending`；为后续 `approved / rejected / needs_changes` 预留类型；
+- `createdAt`；后续决定字段可以暂不建立，禁止伪造决定结果。
+
+本批只提供 append / get（测试和后续批次使用）所需的最小仓储与服务能力；内存仓储必须深拷贝并保证 id 原子唯一。
+
+### 必须实现
+
+1. 新增 `project_submit_stage_update` MCP 写工具，严格输入只允许：
+   - `request_id`：UUID 幂等键；
+   - `stage_id`：目标关卡 UUID；
+   - `expected_stage_version`：正整数；
+   - `proposed_status`：既有合法关卡状态；
+   - `reason`：非空说明。
+   拒绝 `projectId`、`actorId`、`requesterActorId`、`status`、`approvedBy`、`decidedAt`、Stage 当前状态等额外 / 受保护字段。
+2. Stage 不存在返回受控错误；`expected_stage_version` 与当前 Stage 不一致返回稳定冲突，不创建申请；项目归属只能从 Stage 读取。
+3. 申请不得直接调用 Stage 更新或改变状态 / version / 时间字段。成功前后读取 Stage 必须完全相同。
+4. 身份与权限：
+   - 只从该连接私有 `authContext` 取 Actor；匿名 fail-closed；
+   - `default` profile 下仅 `resident_ai` / `temporary_ai` 可提交；`reviewer` 与未知 profile 拒绝；
+   - 授权策略集中成可替换的小函数，不散落字符串；可以抽取通用 MCP 写权限策略，但不得破坏已验收的 `study_append_report`。
+5. 幂等：同 request id + 同 Stage + 同 Actor + 同 expectedVersion + 同 proposedStatus + 同规范化 reason 返回同一申请；任一语义不同稳定冲突，不覆盖旧申请。20 并发同 id 最多创建一条。
+6. reason 的入口、服务层和契约统一按 `countCodePoints(reason.trim())` 计数；必须覆盖 astral emoji 上限，避免重复 Unicode 长度错误。
+7. 成功只返回申请对象，不回显 connectionId、permissionProfile、token 或内部凭据；未知异常日志只记录错误类型，不记录 reason、AuthContext、header 或原始异常 message / stack。
+8. 把新仓储 / 服务通过 `makeServices`、App 装配和每连接 `McpServer` 依赖正确接入；不新增 App API 决策接口。
+
+### 必须测试
+
+- 常驻 / 临时 AI 成功提交，归属为绑定 Actor；匿名、reviewer、未知 profile 零写入。
+- 客户端夹带身份、projectId、申请 status / 决定字段被严格拒绝。
+- Stage 不存在、陈旧 version、非法 proposedStatus、空白 / 超长 reason 均受控失败且零申请。
+- Unicode：上限个 emoji 成功，上限 + 1 失败；首尾空白按 trim 后保存和计数。
+- 同语义幂等、不同 Stage / Actor / version / status / reason 冲突；并发同 id 只有一条。
+- 成功与失败都不修改 Stage 的任何字段；至少明确断言 status 与 version 不变。
+- `tools/list` 精确新增本工具；原六个工具、`study_append_report` 权限与幂等、认证会话隔离、Study API 和真实 HTTP 冒烟不回归。
+- 真实 MCP HTTP + Bearer 冒烟：initialize → submit → 通过服务 / 仓储读回申请，并确认 Stage 未变化；结束后释放端口。
+
+### 边界与汇报
+
+- 本批不实现批准、拒绝、要求补充，不实现 Stage 自动更新、App API、数据库、AuditLog 或前端。
+- 不修改计划复选框，不执行 Git / GitHub / VPS 操作，不触碰 `.claude/` 与 `ui素材mingwu/`。
+- 完成后把检查点追加到本文件末尾，列出模型、状态 / 幂等 / 权限规则、真实测试数字与风险，然后暂停等待小喵审核，不自行开始下一批。
+
+---
+
+## 检查点 #23 · `StageUpdateRequest` 申请模型 + `project_submit_stage_update` 写工具 · 2026-08-10 23:26
+
+### 本批目标
+
+响应 小喵 任务 #23：建立“AI 只能申请、不能直接修改正式主进度”的第一段闭环。AI 通过 MCP 以自己的服务端认证身份提交关卡状态更新申请，系统只新增一条待处理申请，绝不直接修改 ProjectStage 的 status / version / 时间字段。
+
+### 候选完成的计划原文（DS 不打勾）
+
+- `- [ ] 提交关卡更新申请`
+- `- [ ] project_submit_stage_update`
+
+### 实际完成内容
+
+1. **数据契约**（`packages/contracts/src/stage-update-request.ts`）：新增 `StageUpdateRequest` 模型与 `SubmitStageUpdateRequestInput` 输入、`stageUpdateRequestJsonSchema` 响应 JSON Schema、`STAGE_UPDATE_REQUEST_STATUSES`（pending / approved / rejected / needs_changes）与 `STAGE_UPDATE_REASON_MAX_LENGTH = 2000`。`projectId` / `requesterActorId` / `status` / `createdAt` 均为服务端派生字段，不出现在公开输入契约中。
+2. **领域错误**：`stage-update-request/errors.ts` 新增五个受控错误（IdInvalid / ReasonInvalid / ProposedStatusInvalid / ExpectedVersionInvalid / IdempotencyConflict + RequesterInvalid）。Stage 不存在 404 复用 `StageNotFoundError`，版本陈旧冲突复用 `StageVersionConflictError`，不重复定义。所有错误消息不回显申请理由、身份值或受保护字段。
+3. **仓储**：`repository.ts` 接口（append-only，只提供 insertIfAbsent / findById / listByStage）+ `in-memory-stage-update-request-repository.ts`。同步 Map 读写构成单个原子临界区，id 原子唯一，同 id 同语义幂等返回已有申请（保留原 createdAt），任一语义不同抛受控冲突，绝不覆盖；深拷贝读写隔离。
+4. **应用服务**：`stage-update-request-service.ts`。先校验输入不变量（UUID、reason trim 非空且按 code point 计数不超上限、proposedStatus 在既有合法关卡状态内、expectedStageVersion 正整数、受信上下文防守性校验），再只读 `stageRepository.findById` 确定 projectId 并校验 `expectedStageVersion === stage.version`；仅创建 pending 申请，`requesterActorId` 只取自 `authContext.actorId`，`createdAt` 服务端写入（可注入时钟）。服务无任何修改 / 覆盖 / 删除 / 批准方法。
+5. **授权策略**：`mcp/stage-update-policy.ts` 集中为独立可替换小函数 `canSubmitStageUpdate`：`permissionProfile === 'default' && (resident_ai || temporary_ai)`；reviewer、未知 profile、匿名一律拒绝。与 `canAppendStudyReport` 规则一致但保持独立，不破坏已验收的 `study_append_report`。
+6. **MCP 工具**：`mcp-server.ts` 注册 `project_submit_stage_update`，zod strict 白名单只允许 `request_id` / `stage_id` / `expected_stage_version` / `proposed_status` / `reason`；拒绝 projectId / actorId / actorCode / requesterActorId / status / approvedBy / decidedAt 等额外或受保护字段。authContext 为空 → `当前连接未授权写操作`；策略拒绝 → `当前身份无权提交关卡更新申请`。错误映射：ID / 理由 / 目标状态 / 版本号不合法、关卡不存在、关卡版本已变化、申请已存在且语义冲突、未知异常统一 `内部错误`。`unexpectedError` 日志只记录 `{ errType }`，不记录 reason / AuthContext / header / 原始 message / stack。
+7. **装配**：通过 `makeServices`、`AppDeps` / `McpSessionRegistry` 依赖注入与 `index.ts` 构造接入；不新增 App API 决策接口。
+
+### 新增、修改和删除的文件清单
+
+- 新增：
+  - `packages/contracts/src/stage-update-request.ts`（契约）
+  - `apps/server/src/domain/stage-update-request/errors.ts`、`repository.ts`
+  - `apps/server/src/infrastructure/repositories/in-memory-stage-update-request-repository.ts`
+  - `apps/server/src/application/stage-update-request/stage-update-request-service.ts`
+  - `apps/server/src/mcp/stage-update-policy.ts`
+  - `apps/server/test/stage-update-request-contract.test.ts`（8 例）
+  - `apps/server/test/stage-update-request-repository.test.ts`（6 例）
+  - `apps/server/test/stage-update-request-service.test.ts`（10 例）
+  - `apps/server/test/mcp-submit-stage-update.test.ts`（7 例）
+  - `apps/server/test/mcp-http-smoke-stage-update.test.ts`（1 例）
+- 修改：
+  - `packages/contracts/src/index.ts`（导出新契约）
+  - `apps/server/src/mcp/mcp-server.ts`（注册新工具 + 文档注释更新）
+  - `apps/server/src/app.ts`、`apps/server/src/index.ts`（依赖装配）
+  - `apps/server/test/helpers.ts`（`makeStageUpdateRequest` 工厂 + services 注入）
+  - 既有测试调用点同步注入新服务依赖：health、project-api、project-status-api、project-task-api、stage-api、mcp-http、mcp-http-auth、mcp-http-smoke、mcp-http-smoke-auth、mcp-protocol、mcp-session-registry、mcp-append-report、study-session-api、study-session-detail-api、study-summary-api；`tools/list` 精确断言新增 `project_submit_stage_update`（7 个工具）。
+- 删除：无。
+- 未触碰：`.claude/`、`ui素材mingwu/`、计划复选框、Git / GitHub / VPS。
+
+### 关键设计决定及其依据
+
+- **申请与正式主进度隔离**：服务只读 Stage、绝不调用 Stage 更新；成功与失败前后断言 Stage 的 status 与 version 完全不变，这是“只能申请、不能直接改”的第一段闭环的硬性不变量。
+- **信任边界**：`projectId` 由服务端从真实 Stage 读取，`requesterActorId` 只取自服务端认证上下文，二者绝不出现在公开输入契约中；服务层对受信上下文做防守性校验（actorId 为 UUID、actorCode 非空且不超限、actorType 在既定三种类型内），非法上下文抛不泄露身份值的受控错误。
+- **幂等与并发**：幂等判定与插入由仓储原子完成，同 id 同语义重试幂等返回已有申请（createdAt 保留），任一语义不同（Stage / Actor / version / proposedStatus / reason）稳定冲突不覆盖；20 并发同 id 最多一条。
+- **Unicode 长度统一**：reason 的入口、服务层与契约统一按 `countCodePoints(reason.trim())` 计数，与 JSON Schema `maxLength`（code point 语义）对齐；恰好上限个 astral emoji 放行、上限 + 1 拒绝，避免重复的 code unit / code point 不一致错误。
+- **授权集中**：`canSubmitStageUpdate` 独立小函数，第六关用权限表替换即可，工具回调无需改动；规则与 `canAppendStudyReport` 一致但保留独立演进，不破坏已验收写工具。
+- **脱敏**：未知异常只记录错误分类，响应固定 `内部错误`；成功结果不回显 connectionId / permissionProfile / token。
+
+### 执行过的测试或检查、命令与真实结果
+
+- `npm run typecheck`（apps/server）：通过。
+- 五个新测试文件：`npx vitest run test/stage-update-request-{contract,repository,service}.test.ts test/mcp-submit-stage-update.test.ts test/mcp-http-smoke-stage-update.test.ts` → 5 个文件、32 个测试全部通过。
+- 全量测试：`npx vitest run` → 41 个文件、691 个测试全部通过（此前 659 + 本批 32，无回归）。
+- 真实 MCP HTTP + Bearer 冒烟（`mcp-http-smoke-stage-update.test.ts`）：真实监听 127.0.0.1 临时端口，initialize → `project_submit_stage_update` 提交 → 通过共享服务 / 仓储读回申请（归属 actorA、status pending）→ 断言正式 Stage 的 status 与 version 在提交前后完全未变化 → 释放端口、会话清理为 0。
+- `git diff --check`：通过（仅 LF→CRLF 换行提示，无空白错误）。
+- NUL / BOM 字节扫描（Python 逐文件二进制检查）：本批全部新增文件 0 个 NUL 字节、无 BOM。
+
+### 未完成内容、已知问题和风险
+
+- 批准 / 拒绝 / 要求补充、Stage 自动更新、App API 决策接口、数据库 / PostgreSQL、AuditLog、前端均不在本批范围。
+- 未知 `permissionProfile` 与 reviewer 被策略拒绝，属于本批预期行为；`proposedStatus` 非法值由入口 enum 白名单先行拦截（SDK 校验错误），服务层 `ProposedStatusInvalidError` 仅在绕过入口直接调用服务时触发，测试对两条路径都覆盖。
+- 本批为内存原型，真实并发下的幂等原子性在第六关落 PostgreSQL 时依赖 `stage_update_requests.id` 唯一约束，已在仓储接口注释中声明迁移路径。
+
+### 是否涉及数据库、身份权限、密钥、外部服务或破坏性变化
+
+- 数据库 / Migration：否（仍为内存仓储）。
+- 身份认证 / 权限：是——本批新增 MCP 写工具并引入 `canSubmitStageUpdate` 集中授权策略，属于 CLAUDE.md 强制检查点对象；未改动既有认证中间件与已验收的 `study_append_report`。
+- 密钥 / 凭据：否；测试仅使用 `mcp-auth-fixtures.ts` 中声明的假 token。
+- 外部服务 / VPS / GitHub：否。
+- 破坏性变化：否；无删除文件、无架构改道。
+
+### 建议下一批任务
+
+待 小喵 审核本批后，可进入“关卡更新申请的用户决定入口”批次：实现 approved / rejected / needs_changes 的用户侧接口（App API 或 MCP 只读 / 决定工具），申请决定字段写入时不覆盖旧申请，并让正式 Stage 在批准时按申请语义更新（携带 expectedStageVersion 乐观并发）。
+
+### 等待小喵审核
+
+---
+
+## 小喵审核结果 #23 · 需要修复幂等重试顺序 · 2026-08-11
+
+### 审核结论
+
+申请与正式 Stage 隔离、服务端身份归属、最小权限策略、严格输入、Unicode、原子插入、错误脱敏与真实 MCP HTTP 冒烟均符合要求；新专项 **32/32**、全量 **691/691**、根目录 typecheck、`git diff --check` 与 NUL 扫描均通过。
+
+但幂等键会因关卡后续版本变化而失效，暂不能验收或打勾：
+
+- `StageUpdateRequestService.submit()` 当前先读取 Stage 并校验 `expectedStageVersion`，之后才由申请仓储判断 id 幂等。首次申请基于 Stage v1 成功后，只要 Stage 后来正常变成 v2，同一 Actor 用完全相同 request id 与完全相同语义进行网络重试，就会得到 `StageVersionConflictError`，而不是原申请。
+- 小喵已用真实服务调用复现：首次返回 pending 申请；Stage 更新到 v2；原请求原样重试返回 `StageVersionConflictError`。这违反“同 id 同语义返回同一申请”的稳定幂等约定。现有测试只在 Stage 版本未变化时重试，并把不同 version 的任意异常视为通过，因此没有覆盖该场景。
+
+### 必须返修（不扩大批次）
+
+1. 完成输入规范化与受信 Actor 基础校验后，必须先处理已存在的 request id：
+   - 已存在且 `stageId + requesterActorId + expectedStageVersion + proposedStatus + normalized reason` 完全相同 → 直接返回原申请，不再要求当前 Stage 仍停留在旧版本；
+   - 已存在但任一语义不同 → 稳定抛 `StageUpdateRequestIdempotencyConflictError`，不得被 Stage 不存在 / 版本变化等当前外部状态掩盖。
+2. 只有 id 尚不存在时，才读取真实 Stage、校验存在性 / 当前版本并构造 pending 申请；最终仍必须通过仓储的 `insertIfAbsent` 原子落账，以处理“首次检查后另一个并发请求抢先插入”的竞争。
+3. 幂等语义比较必须保持单一来源，避免服务层与仓储各写一套以后漂移。可以把比较函数提取为领域层共享 helper，或给仓储提供能够复用同一比较逻辑的受控方法；不要削弱最终原子插入。
+4. 补充服务层与 MCP 层回归测试：
+   - 首次基于 v1 成功 → Stage 更新到 v2 → 完全相同请求重试，返回与首次完全相同的申请，仍只有一条；
+   - Stage 更新 / 删除（若当前无删除能力则只测更新）后，同 id 不同 reason / status / Actor / Stage / expectedVersion 均稳定返回幂等语义冲突，不被当前 Stage 状态掩盖；
+   - 20 个完全同语义并发请求只有一次 created，其余均幂等成功；20 个同 id 不同语义只有一个成功，其余明确为 `StageUpdateRequestIdempotencyConflictError`，不能只断言“是任意 Error”。
+5. 在 PostgreSQL 迁移注释 / 风险中明确：新 id 的“验证 Stage 当前版本 + 插入申请”需在同一事务中完成并锁定 / 条件验证 Stage 版本，防止跨表 TOCTOU；本批不实现数据库。
+6. 保持 Stage 零修改、身份权限、Unicode、脱敏和所有既有测试不回归。返修后重新执行新专项、根目录 typecheck、全量测试、真实 HTTP 冒烟、NUL 扫描与 `git diff --check`，追加真实结果后暂停。
+
+### 边界
+
+- 不修改计划复选框，不提交或推送，不开始批准 / 拒绝下一批。
+- 只修 StageUpdateRequest 幂等顺序、共享语义比较、并发断言与迁移说明。
+
+等待 DS 返修后由小喵复验。
+
+---
+
+## 检查点 #24 · 返修 #23：幂等重试顺序修复 · 2026-08-11
+
+### 本批目标
+
+响应 小喵 审核结果 #23：修复 `StageUpdateRequestService.submit()` 的幂等重试顺序——申请基于关卡 v1 成功后，关卡正常推进到 v2，同一 Actor 用完全相同 request id 与语义重试时必须返回原申请，而不是因当前 Stage 版本变化报版本冲突。同时把幂等语义比较提取为领域层单一来源，补充精确并发断言与 PostgreSQL 迁移说明。
+
+### 候选完成的计划原文（DS 不打勾）
+
+- `- [ ] 提交关卡更新申请`
+- `- [ ] project_submit_stage_update`
+
+### 实际完成内容
+
+1. **共享幂等语义比较 helper**（新增 `domain/stage-update-request/semantics.ts`）：定义 `StageUpdateRequestSemantics`（stageId + requesterActorId + expectedStageVersion + proposedStatus + 规范化 reason）与 `sameStageUpdateRequestSemantics(a, b)`。服务层预检与仓储原子插入复用同一函数，单一来源，避免两处实现以后漂移。
+2. **服务层幂等预检前置**（`stage-update-request-service.ts`）：`submit()` 在完成输入规范化（id UUID / reason trim + code point 上限 / proposedStatus / expectedStageVersion）与受信 Actor 基础校验后，先 `repository.findById(input.id)` 处理已存在 id：
+   - 已存在且语义完全一致 → 直接返回原申请，不再读取真实 Stage，也不要求当前 Stage 仍停留在申请所依据的旧版本；
+   - 已存在但任一语义不同 → 稳定抛 `StageUpdateRequestIdempotencyConflictError`，不被 Stage 不存在 / 版本变化等外部状态掩盖；
+   - 只有 id 不存在时才读取真实 Stage，校验存在性与 `expectedStageVersion === stage.version`，构造 pending 申请，最终仍通过仓储 `insertIfAbsent` 原子落账，以处理“预检后另一并发请求抢先插入”的竞争（同语义 → created=false 幂等返回已有申请，异语义 → 受控冲突，绝不覆盖）。
+3. **仓储复用共享比较**（`in-memory-stage-update-request-repository.ts`）：`insertIfAbsent` 改调 `sameStageUpdateRequestSemantics`，删除私有 `sameSemantics`；原子性（同步 Map 临界区）保持不削弱。
+4. **PostgreSQL 迁移说明**（`repository.ts` 接口注释 + 仓储注释）：明确新 id 的“读取并校验 Stage 当前版本 + 插入申请”两步在第六关须在同一事务内完成并对 Stage 行加锁（`SELECT ... FOR UPDATE`）或条件校验版本，防止跨表 TOCTOU；本内存原型由 JS 单线程原子性覆盖。
+5. **回归测试**：
+   - 服务层：新增“Stage v1→v2 后完全相同请求重试幂等返回原申请（不报版本冲突，仍只有一条）”与“Stage 推进后同 id 不同 reason / status / Actor / Stage / expectedVersion 均稳定 `StageUpdateRequestIdempotencyConflictError`”；把既有幂等用例从“任意 Error”收紧为精确 `StageUpdateRequestIdempotencyConflictError`；并发用例拆为“20 同语义全部幂等成功且仅一条落账”与“20 异语义恰好一条成功、其余 19 条全部为 `StageUpdateRequestIdempotencyConflictError`”。
+   - 仓储层：新增共享 helper 单测（只比较五个语义字段，忽略 projectId / status / createdAt）。
+   - MCP 层：新增“Stage v1→v2 后同语义重试幂等、异语义返回明确冲突文本 `申请已存在且语义冲突，不覆盖旧申请`”回归；把 20 并发用例的失败断言从“≤1 成功”收紧为“恰好 1 成功 + 19 条全部为明确冲突文本”。
+
+### 新增、修改和删除的文件清单
+
+- 新增：
+  - `apps/server/src/domain/stage-update-request/semantics.ts`（共享幂等语义比较 helper）
+- 修改：
+  - `apps/server/src/application/stage-update-request/stage-update-request-service.ts`（幂等预检前置 + 复用共享比较 + 文档更新）
+  - `apps/server/src/infrastructure/repositories/in-memory-stage-update-request-repository.ts`（复用共享比较，删除私有 sameSemantics，补 TOCTOU 注释）
+  - `apps/server/src/domain/stage-update-request/repository.ts`（PostgreSQL 跨表 TOCTOU 迁移说明）
+  - `apps/server/test/stage-update-request-service.test.ts`（强化既有断言 + 新增 3 个回归用例）
+  - `apps/server/test/stage-update-request-repository.test.ts`（新增共享 helper 单测）
+  - `apps/server/test/mcp-submit-stage-update.test.ts`（新增 v1→v2 回归用例 + 收紧并发断言）
+- 删除：无。
+- 未触碰：`.claude/`、`ui素材mingwu/`、计划复选框、Git / GitHub / VPS、上一批遗留的其余工作区改动。
+
+### 关键设计决定及其依据
+
+- **幂等先于外部状态**：同 id 语义比较必须在读取真实 Stage 之前完成。原因是幂等承诺绑定“客户端幂等键 + 语义”，与申请创建时刻之后 Stage 是否演进无关；让版本校验挡住幂等重试会破坏“同 id 同语义稳定返回同一申请”的约定（小喵已复现）。异语义的稳定冲突同样先于 Stage 校验，避免被 Stage 不存在 / 版本变化等当前外部状态掩盖。
+- **单一比较来源**：语义字段列表（stageId / requesterActorId / expectedStageVersion / proposedStatus / reason）在领域层 `semantics.ts` 只写一次，服务层预检与仓储原子插入共用，避免两处实现漂移。`insertIfAbsent` 的原子插入不被削弱（仍是最终竞争兜底）。
+- **正常路径不绕开原子插入**：预检只是快路径优化 + 外部状态隔离；新 id 路径仍读取真实 Stage 并最终走 `insertIfAbsent`，因此“预检后并发插入”仍由仓储原子保证只有一条落账、同语义幂等、异语义冲突。
+- **return existing 安全**：`findById` 返回 `structuredClone` 深拷贝，直接返回不污染仓储（既有测试已覆盖深拷贝隔离）。
+- **PostgreSQL TOCTOU 提前声明**：内存原型单线程原子性覆盖“校验版本 + 插入”竞争，但数据库阶段必须同一事务 + 锁 Stage 行，避免校验后、插入前 Stage 版本被并发推进导致基于陈旧版本的申请落账；写入接口注释与风险，不在本批实现数据库。
+
+### 执行过的测试或检查、命令与真实结果
+
+- `npm run typecheck`（apps/server）：通过。
+- 三个返修相关测试文件：`npx vitest run test/stage-update-request-repository.test.ts test/stage-update-request-service.test.ts test/mcp-submit-stage-update.test.ts` → 3 个文件、28 个测试全部通过（此前 6+10+7=23，本批 +5）。
+- 全量测试：`npx vitest run` → 41 个文件、696 个测试全部通过（此前 691 + 本批 5，无回归）。
+- 真实 MCP HTTP + Bearer 冒烟：`npx vitest run test/mcp-http-smoke-stage-update.test.ts` → 1 个测试通过（真实监听临时端口，initialize → 提交申请 → 读回 → Stage 未变化 → 释放端口）。
+- `git diff --check`：通过（仅 LF→CRLF 换行提示，无空白错误）。
+- NUL / BOM 扫描（Python 逐文件二进制检查）：本批新增与修改的 7 个文件均 0 个 NUL 字节、无 BOM。
+
+### 未完成内容、已知问题和风险
+
+- 批准 / 拒绝 / 要求补充、Stage 自动更新、App API 决策接口、数据库 / PostgreSQL、AuditLog、前端均不在本批范围（与 #23 一致）。
+- 本批仍是内存原型：新 id 的“校验 Stage 版本 + 插入申请”跨表原子性依赖 PostgreSQL 事务 + Stage 行锁，已在仓储接口注释声明迁移路径，未在本批实现数据库。
+- 幂等命中路径直接返回 `findById` 结果（深拷贝），不重建申请对象，因此 createdAt / projectId 保留首次落账值，符合既有约定。
+
+### 是否涉及数据库、身份权限、密钥、外部服务或破坏性变化
+
+- 数据库 / Migration：否（仍为内存仓储；仅在注释中声明 PostgreSQL TOCTOU 迁移要求）。
+- 身份认证 / 权限：否——本批只改 StageUpdateRequest 幂等顺序与比较逻辑，未改动认证中间件、`canSubmitStageUpdate` 授权策略或已验收的 `study_append_report`。
+- 密钥 / 凭据：否；测试仅使用 `mcp-auth-fixtures.ts` 中声明的假 token。
+- 外部服务 / VPS / GitHub：否。
+- 破坏性变化：否；无删除文件、无架构改道，仓储原子插入语义不变。
+
+### 建议下一批任务
+
+待 小喵 复验通过后，可进入“关卡更新申请的用户决定入口”批次：实现 approved / rejected / needs_changes 的用户侧接口，申请决定字段写入时不覆盖旧申请，并让正式 Stage 在批准时按申请语义更新（携带 expectedStageVersion 乐观并发）。
+
+### 等待小喵审核
+
+---
+
+## 小喵复验结果 #23 / #24 · 通过 · 2026-08-11
+
+### 验收结论
+
+通过。`project_submit_stage_update` 只创建 pending 申请，不修改正式 Stage；projectId 从真实 Stage 派生，requesterActorId 只来自每连接服务端认证上下文。匿名 / reviewer / 未知权限拒绝、严格字段白名单、Unicode、并发原子插入与错误脱敏均符合要求。幂等返修后，已存在 id 的语义判断先于当前 Stage 外部状态：Stage 后续升版不影响同语义重试，不同语义始终稳定冲突；最终 `insertIfAbsent` 仍保留并发原子兜底。
+
+### 小喵独立复验结果
+
+- 根目录 `npm run typecheck`：通过。
+- StageUpdateRequest + MCP 相关专项：4 个文件，**29/29 通过**。
+- 全量测试：41 个文件，**696/696 通过**。
+- 独立复现：v1 首次申请成功 → Stage 升为 v2 → 原请求重试返回首次对象，申请数仍为 1；不同 reason 返回 `StageUpdateRequestIdempotencyConflictError`。
+- 真实 MCP HTTP + Bearer 提交 / 读回冒烟：通过，Stage 状态与版本未被申请修改。
+- `git diff --check`：通过，仅 Windows LF→CRLF 提示。
+- NUL 扫描：0。
+
+### 计划更新
+
+- `[x] 提交关卡更新申请`
+- `[x] project_submit_stage_update`
+
+本批可以归档并提交推送。批准、拒绝、要求补充与批准后正式更新 Stage 仍留给后续用户决定接口批次。

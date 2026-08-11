@@ -22,6 +22,7 @@ function buildTestServer() {
     studySessionDetailService: services.studySessionDetailService,
     studySessionCurrentService: services.studySessionCurrentService,
     studyReportService: services.studyReportService,
+    stageUpdateRequestService: services.stageUpdateRequestService,
     serviceName: 'mingwu-server',
     serviceVersion: '0.1.0',
     logger: { error: () => undefined },
@@ -52,7 +53,7 @@ function firstText(result: {
 }
 
 describe('MCP protocol (official Client + InMemoryTransport)', () => {
-  it('initialize succeeds and exposes the five read-only tools plus one write tool with strict schemas', async () => {
+  it('initialize succeeds and exposes the five read-only tools plus two write tools with strict schemas', async () => {
     const { server } = buildTestServer();
     const client = await connectClient(server);
     try {
@@ -61,11 +62,13 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
         'project_get_stage',
         'project_get_status',
         'project_list_stages',
+        'project_submit_stage_update',
         'study_append_report',
         'study_get_current_session',
         'study_get_session',
       ]);
-      // 五个只读工具都明确只读；study_append_report 是唯一写工具，不得标“只读”。
+      // 五个只读工具都明确只读；两个写工具（study_append_report /
+      // project_submit_stage_update）不得标“只读”。
       const READ_ONLY_TOOLS = new Set([
         'project_get_stage',
         'project_get_status',
@@ -74,11 +77,16 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
         'study_get_current_session',
       ]);
       const writeTools = tools.filter((t) => !READ_ONLY_TOOLS.has(t.name));
-      expect(writeTools.map((t) => t.name)).toEqual(['study_append_report']);
+      expect(writeTools.map((t) => t.name).sort()).toEqual([
+        'project_submit_stage_update',
+        'study_append_report',
+      ]);
       for (const tool of tools.filter((t) => READ_ONLY_TOOLS.has(t.name))) {
         expect(tool.description).toContain('只读');
       }
-      expect(writeTools[0]!.description).not.toContain('只读');
+      for (const tool of writeTools) {
+        expect(tool.description).not.toContain('只读');
+      }
       // 严格 input schema：禁止未知字段。需要 UUID 字段的工具只允许指定字段；
       // study_get_current_session 是严格空对象（无任何输入参数）。
       const fieldByTool: Record<string, string[] | null> = {
@@ -88,7 +96,22 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
         study_get_session: ['session_id'],
         study_get_current_session: null,
         study_append_report: ['report_id', 'session_id', 'content'],
+        project_submit_stage_update: [
+          'request_id',
+          'stage_id',
+          'expected_stage_version',
+          'proposed_status',
+          'reason',
+        ],
       };
+      // 各工具字段类型：uuid 字段为 string + format uuid；其余字段只断言存在。
+      const UUID_FIELDS = new Set([
+        'project_id',
+        'stage_id',
+        'session_id',
+        'report_id',
+        'request_id',
+      ]);
       for (const tool of tools) {
         expect(tool.inputSchema.type).toBe('object');
         expect(tool.inputSchema.additionalProperties).toBe(false);
@@ -101,16 +124,39 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
           expect((tool.inputSchema.required ?? []).slice().sort()).toEqual(fields!.slice().sort());
           for (const field of fields) {
             const prop = tool.inputSchema.properties?.[field] as Record<string, unknown> | undefined;
-            expect(prop?.type).toBe('string');
-            if (field !== 'content') {
+            expect(prop).toBeDefined();
+            if (UUID_FIELDS.has(field)) {
+              expect(prop?.type).toBe('string');
               expect(prop?.format).toBe('uuid');
             }
           }
         }
       }
-      // 除 study_append_report 外不存在其他写工具。
+      // 写工具精确：仅 study_append_report 与 project_submit_stage_update 两个，
+      // 不存在任何其他写工具（如直接设置关卡状态的工具）。
       const names = tools.map((t) => t.name);
-      expect(names).not.toContain('project_submit_stage_update');
+      expect(names).not.toContain('project_set_stage_status');
+      // project_submit_stage_update 的混合类型字段：uuid 字段为 string+format，
+      // expected_stage_version 为受正数约束的数字，proposed_status 为带枚举的字符串。
+      const submitTool = tools.find((t) => t.name === 'project_submit_stage_update')!;
+      const submitProps = submitTool.inputSchema.properties as Record<
+        string,
+        Record<string, unknown>
+      >;
+      expect(submitProps.request_id!.type).toBe('string');
+      expect(submitProps.request_id!.format).toBe('uuid');
+      expect(submitProps.stage_id!.type).toBe('string');
+      expect(submitProps.stage_id!.format).toBe('uuid');
+      expect(submitProps.expected_stage_version!.type).toBe('integer');
+      const ver = submitProps.expected_stage_version! as Record<string, unknown>;
+      const hasPositiveBound =
+        (typeof ver.minimum === 'number' && (ver.minimum as number) >= 1) ||
+        (typeof ver.exclusiveMinimum === 'number' && (ver.exclusiveMinimum as number) >= 0);
+      expect(hasPositiveBound).toBe(true);
+      expect(submitProps.proposed_status!.type).toBe('string');
+      expect(Array.isArray(submitProps.proposed_status!.enum)).toBe(true);
+      expect((submitProps.proposed_status!.enum as unknown[]).length).toBeGreaterThan(0);
+      expect(submitProps.reason!.type).toBe('string');
     } finally {
       await client.close();
       await server.close();
@@ -373,6 +419,7 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
       studySessionDetailService: throwingDetail,
       studySessionCurrentService: services.studySessionCurrentService,
       studyReportService: services.studyReportService,
+      stageUpdateRequestService: services.stageUpdateRequestService,
       serviceName: 'mingwu-server',
       serviceVersion: '0.1.0',
       logger,
@@ -444,6 +491,7 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
       studySessionDetailService: services.studySessionDetailService,
       studySessionCurrentService: services.studySessionCurrentService,
       studyReportService: services.studyReportService,
+      stageUpdateRequestService: services.stageUpdateRequestService,
       serviceName: 'mingwu-server',
       serviceVersion: '0.1.0',
       logger,
@@ -659,6 +707,7 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
       studySessionDetailService: services.studySessionDetailService,
       studySessionCurrentService: services.studySessionCurrentService,
       studyReportService: services.studyReportService,
+      stageUpdateRequestService: services.stageUpdateRequestService,
       serviceName: 'mingwu-server',
       serviceVersion: '0.1.0',
       logger,
@@ -703,6 +752,7 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
       studySessionDetailService: services.studySessionDetailService,
       studySessionCurrentService: services.studySessionCurrentService,
       studyReportService: services.studyReportService,
+      stageUpdateRequestService: services.stageUpdateRequestService,
       serviceName: 'mingwu-server',
       serviceVersion: '0.1.0',
       logger,

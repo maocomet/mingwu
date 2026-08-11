@@ -1,13 +1,26 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { countCodePoints, STUDY_REPORT_CONTENT_MAX_LENGTH } from '@mingwu/contracts';
+import {
+  countCodePoints,
+  PROJECT_STAGE_STATUSES,
+  STAGE_UPDATE_REASON_MAX_LENGTH,
+  STUDY_REPORT_CONTENT_MAX_LENGTH,
+} from '@mingwu/contracts';
 import type { ProjectStatusService } from '../application/project-status/project-status-service.js';
 import type { StageService } from '../application/stage/stage-service.js';
+import type { StageUpdateRequestService } from '../application/stage-update-request/stage-update-request-service.js';
 import type { StudySessionCurrentService } from '../application/study-session-current/study-session-current-service.js';
 import type { StudySessionDetailService } from '../application/study-session-detail/study-session-detail-service.js';
 import type { StudyReportService } from '../application/study-report/study-report-service.js';
 import { ProjectNotFoundError } from '../domain/project/errors.js';
-import { StageNotFoundError } from '../domain/stage/errors.js';
+import { StageNotFoundError, StageVersionConflictError } from '../domain/stage/errors.js';
+import {
+  StageUpdateRequestExpectedVersionInvalidError,
+  StageUpdateRequestIdInvalidError,
+  StageUpdateRequestIdempotencyConflictError,
+  StageUpdateRequestProposedStatusInvalidError,
+  StageUpdateRequestReasonInvalidError,
+} from '../domain/stage-update-request/errors.js';
 import { StudyParticipantUpdateError } from '../domain/study-participant/errors.js';
 import {
   StudyReportContentInvalidError,
@@ -17,6 +30,7 @@ import {
 } from '../domain/study-report/errors.js';
 import { StudySessionNotFoundError } from '../domain/study-session/errors.js';
 import type { McpAuthContext } from '../domain/mcp-auth/mcp-auth-context.js';
+import { canSubmitStageUpdate } from './stage-update-policy.js';
 import { canAppendStudyReport } from './study-report-policy.js';
 
 /**
@@ -32,6 +46,7 @@ export interface McpServerDeps {
   studySessionDetailService: StudySessionDetailService;
   studySessionCurrentService: StudySessionCurrentService;
   studyReportService: StudyReportService;
+  stageUpdateRequestService: StageUpdateRequestService;
   serviceName: string;
   serviceVersion: string;
   logger: McpLogger;
@@ -77,6 +92,41 @@ const appendReportInputSchema = z
   })
   .strict();
 
+/**
+ * project_submit_stage_update 严格白名单：只允许 request_id / stage_id /
+ * expected_stage_version / proposed_status / reason。.strict() 在运行时拒绝任何
+ * 额外字段，尤其拒绝 projectId / actorId / actor_code / requesterActorId / status /
+ * approvedBy / decidedAt 等身份、决定或受保护字段——projectId 由服务端读取真实
+ * Stage 确定，requesterActorId 只由该连接的服务端认证上下文注入，决定字段本批
+ * 尚未实现、禁止伪造。
+ */
+const submitStageUpdateInputSchema = z
+  .object({
+    request_id: uuidField('申请幂等键（调用方生成的 UUID）'),
+    stage_id: uuidField('目标关卡 UUID'),
+    expected_stage_version: z
+      .number()
+      .int()
+      .positive()
+      .describe('申请所依据的关卡版本（正整数）'),
+    proposed_status: z
+      .enum([...PROJECT_STAGE_STATUSES])
+      .describe('申请变更到的合法关卡状态'),
+    reason: z
+      .string()
+      // 长度上限与服务层完全统一：先 trim 再按 Unicode code point 计数
+      // （countCodePoints 与 JSON Schema maxLength 语义一致），而不是按 UTF-16
+      // code unit 计数的 .max()，否则恰好上限个 astral emoji 会被错误拒绝。
+      // 空字符串 / 纯空白理由不在此拦截，交给 StageUpdateRequestService 的规范化
+      // 与受控业务错误（trim 后为空 → 申请理由不合法），保持单一校验来源。
+      .refine(
+        (value) => countCodePoints(value.trim()) <= STAGE_UPDATE_REASON_MAX_LENGTH,
+        '申请理由超长',
+      )
+      .describe('变更理由'),
+  })
+  .strict();
+
 /** 业务错误转换为稳定、不泄露堆栈/内部配置/请求头的 MCP 错误结果。 */
 function toolErrorResult(message: string) {
   return { content: [{ type: 'text' as const, text: message }], isError: true as const };
@@ -100,12 +150,14 @@ function textContent(value: unknown) {
 }
 
 /**
- * 构建一个全新的 MCP Server 实例：五个只读工具 + 一个写工具 study_append_report。
+ * 构建一个全新的 MCP Server 实例：五个只读工具 + 两个写工具
+ * （study_append_report / project_submit_stage_update）。
  * 每个 MCP session 都必须使用独立的 Server 实例（SDK 的 Server 一次只安全地
  * 连接一个 transport，不能跨 session 共享临时协议状态）；本工厂只依赖共享的
  * 只读应用服务与 Session 私有 authContext，不复制业务算法、不回调自身 HTTP 接口。
  * 写工具按服务端认证身份落账：authContext 为空（匿名只读模式）时工具可见但写入
- * fail-closed 拒绝；授权策略集中在 study-report-policy.ts。
+ * fail-closed 拒绝；授权策略分别集中在 study-report-policy.ts 与
+ * stage-update-policy.ts。
  */
 export function buildMcpServer(deps: McpServerDeps): McpServer {
   const server = new McpServer({ name: deps.serviceName, version: deps.serviceVersion });
@@ -267,6 +319,72 @@ export function buildMcpServer(deps: McpServerDeps): McpServer {
         }
         if (err instanceof StudyParticipantUpdateError) {
           return toolErrorResult('参与者更新失败，请使用相同报告 ID 重试');
+        }
+        return unexpectedError(deps, err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'project_submit_stage_update',
+    {
+      title: 'Submit stage update request',
+      description:
+        '写：以服务端认证身份提交关卡状态更新申请。request_id 为调用方生成的 UUID ' +
+        '幂等键；同一 request_id + 同一关卡 + 同一身份 + 同 expectedStageVersion + ' +
+        '同 proposedStatus + 同规范化理由重试为幂等成功，不同语义为受控冲突，绝不覆盖。' +
+        '系统只新增一条待处理申请，绝不修改正式关卡进度；批准 / 拒绝 / 要求补充由' +
+        '后续用户接口批次处理。身份只能由服务端 Bearer 凭据决定，不接受任何身份字段；' +
+        '匿名连接或未获授权的身份会被拒绝。',
+      inputSchema: submitStageUpdateInputSchema,
+    },
+    async ({ request_id, stage_id, expected_stage_version, proposed_status, reason }) => {
+      const authContext = deps.authContext;
+      // 匿名只读上下文 fail-closed：工具可见，但任何写入都拒绝，不产生申请。
+      if (authContext === null) {
+        deps.logger.error(
+          { errType: 'McpAuthContextMissing' },
+          'project_submit_stage_update denied: no bound identity',
+        );
+        return toolErrorResult('当前连接未授权写操作');
+      }
+      if (!canSubmitStageUpdate(authContext)) {
+        deps.logger.error(
+          { errType: 'McpStageUpdatePermissionDenied' },
+          'project_submit_stage_update denied: policy rejected',
+        );
+        return toolErrorResult('当前身份无权提交关卡更新申请');
+      }
+      try {
+        const request = await deps.stageUpdateRequestService.submit(authContext, {
+          id: request_id,
+          stageId: stage_id,
+          expectedStageVersion: expected_stage_version,
+          proposedStatus: proposed_status,
+          reason,
+        });
+        return textContent(request);
+      } catch (err) {
+        if (err instanceof StageUpdateRequestIdInvalidError) {
+          return toolErrorResult('申请 ID 不合法');
+        }
+        if (err instanceof StageUpdateRequestReasonInvalidError) {
+          return toolErrorResult('申请理由不合法');
+        }
+        if (err instanceof StageUpdateRequestProposedStatusInvalidError) {
+          return toolErrorResult('目标状态不合法');
+        }
+        if (err instanceof StageUpdateRequestExpectedVersionInvalidError) {
+          return toolErrorResult('版本号不合法');
+        }
+        if (err instanceof StageNotFoundError) {
+          return toolErrorResult('关卡不存在');
+        }
+        if (err instanceof StageVersionConflictError) {
+          return toolErrorResult('关卡版本已变化，请刷新后重试');
+        }
+        if (err instanceof StageUpdateRequestIdempotencyConflictError) {
+          return toolErrorResult('申请已存在且语义冲突，不覆盖旧申请');
         }
         return unexpectedError(deps, err);
       }

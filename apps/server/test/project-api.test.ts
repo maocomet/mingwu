@@ -15,6 +15,7 @@ function setup() {
     studySessionCurrentService,
     studySummaryService,
     studyReportService,
+    stageUpdateRequestService,
   } = makeServices();
   const app = buildApp({
     config,
@@ -27,6 +28,7 @@ function setup() {
     studySessionCurrentService,
     studySummaryService,
     studyReportService,
+    stageUpdateRequestService,
   });
   return { app, projectService };
 }

@@ -34,6 +34,7 @@ describe('MCP Streamable HTTP real-HTTP auth smoke (127.0.0.1, ephemeral port)',
       studySessionCurrentService: services.studySessionCurrentService,
       studySummaryService: services.studySummaryService,
       studyReportService: services.studyReportService,
+      stageUpdateRequestService: services.stageUpdateRequestService,
       mcpAuthenticator: makeAuthenticator(),
     });
     await app.listen({ host: '127.0.0.1', port: 0 });
@@ -108,6 +109,7 @@ describe('MCP Streamable HTTP real-HTTP auth smoke (127.0.0.1, ephemeral port)',
         'project_get_stage',
         'project_get_status',
         'project_list_stages',
+        'project_submit_stage_update',
         'study_append_report',
         'study_get_current_session',
         'study_get_session',
@@ -166,7 +168,7 @@ describe('MCP Streamable HTTP real-HTTP auth smoke (127.0.0.1, ephemeral port)',
       ).toBe(1);
 
       const bList = await b.client.listTools();
-      expect(bList.tools).toHaveLength(6);
+      expect(bList.tools).toHaveLength(7);
 
       // B 也通过 DELETE 显式清理（client.close 不保证发送 DELETE）。
       await b.transport.terminateSession();

@@ -33,6 +33,7 @@ function setup(logger?: AppDeps['logger']) {
     studySessionCurrentService: services.studySessionCurrentService,
     studySummaryService: services.studySummaryService,
     studyReportService: services.studyReportService,
+    stageUpdateRequestService: services.stageUpdateRequestService,
     logger,
   });
   return { app, ...services };
@@ -144,6 +145,7 @@ describe('MCP Streamable HTTP via /mcp', () => {
         'project_get_stage',
         'project_get_status',
         'project_list_stages',
+        'project_submit_stage_update',
         'study_append_report',
         'study_get_current_session',
         'study_get_session',
@@ -172,6 +174,16 @@ describe('MCP Streamable HTTP via /mcp', () => {
         'report_id',
         'session_id',
       ]);
+      // 写工具 project_submit_stage_update 恰好五个必填字段，且只读工具不误标只读。
+      const submitTool = tools.find((t) => t.name === 'project_submit_stage_update')!;
+      expect([...(submitTool.inputSchema.required ?? [])].sort()).toEqual([
+        'expected_stage_version',
+        'proposed_status',
+        'reason',
+        'request_id',
+        'stage_id',
+      ]);
+      expect(submitTool.description).not.toContain('只读');
       for (const tool of tools.filter(
         (t) => READ_ONLY_TOOLS.has(t.name) && t.name !== 'study_get_current_session',
       )) {
@@ -587,6 +599,7 @@ describe('MCP Streamable HTTP via /mcp', () => {
     studySessionCurrentService: services.studySessionCurrentService,
     studySummaryService: services.studySummaryService,
     studyReportService: services.studyReportService,
+    stageUpdateRequestService: services.stageUpdateRequestService,
       logger: capture.logger,
     });
     try {
@@ -627,6 +640,7 @@ describe('MCP Streamable HTTP via /mcp', () => {
     studySessionCurrentService: services.studySessionCurrentService,
     studySummaryService: services.studySummaryService,
     studyReportService: services.studyReportService,
+    stageUpdateRequestService: services.stageUpdateRequestService,
       logger: { level: 'silent' },
     });
     try {

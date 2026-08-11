@@ -3,6 +3,7 @@ import type {
   Project,
   ProjectStage,
   ProjectTask,
+  StageUpdateRequest,
   StudyParticipant,
   StudyReport,
   StudySession,
@@ -17,6 +18,7 @@ import { StudySessionCurrentService } from '../src/application/study-session-cur
 import { StudySessionDetailService } from '../src/application/study-session-detail/study-session-detail-service.js';
 import { StudySummaryService } from '../src/application/study-summary/study-summary-service.js';
 import { StudyReportService } from '../src/application/study-report/study-report-service.js';
+import { StageUpdateRequestService } from '../src/application/stage-update-request/stage-update-request-service.js';
 import { InMemoryProjectRepository } from '../src/infrastructure/repositories/in-memory-project-repository.js';
 import { InMemoryStageRepository } from '../src/infrastructure/repositories/in-memory-stage-repository.js';
 import { InMemoryProjectTaskRepository } from '../src/infrastructure/repositories/in-memory-project-task-repository.js';
@@ -24,6 +26,7 @@ import { InMemoryStudySessionRepository } from '../src/infrastructure/repositori
 import { InMemoryStudySummaryRepository } from '../src/infrastructure/repositories/in-memory-study-summary-repository.js';
 import { InMemoryStudyReportRepository } from '../src/infrastructure/repositories/in-memory-study-report-repository.js';
 import { InMemoryStudyParticipantRepository } from '../src/infrastructure/repositories/in-memory-study-participant-repository.js';
+import { InMemoryStageUpdateRequestRepository } from '../src/infrastructure/repositories/in-memory-stage-update-request-repository.js';
 
 /** 共享同一组仓储，保证项目 / 关卡 / 任务 / 学习会话写入互相可见。 */
 export function makeServices() {
@@ -34,6 +37,7 @@ export function makeServices() {
   const studySummaryRepository = new InMemoryStudySummaryRepository();
   const studyReportRepository = new InMemoryStudyReportRepository();
   const studyParticipantRepository = new InMemoryStudyParticipantRepository();
+  const stageUpdateRequestRepository = new InMemoryStageUpdateRequestRepository();
   const projectService = new ProjectService(projectRepository);
   const stageService = new StageService(stageRepository, projectRepository);
   const taskService = new ProjectTaskService(taskRepository, stageRepository, projectRepository);
@@ -61,6 +65,10 @@ export function makeServices() {
     studySessionRepository,
     studySessionDetailService,
   );
+  const stageUpdateRequestService = new StageUpdateRequestService(
+    stageUpdateRequestRepository,
+    stageRepository,
+  );
   return {
     projectRepository,
     stageRepository,
@@ -69,6 +77,7 @@ export function makeServices() {
     studySummaryRepository,
     studyReportRepository,
     studyParticipantRepository,
+    stageUpdateRequestRepository,
     projectService,
     stageService,
     taskService,
@@ -78,6 +87,7 @@ export function makeServices() {
     studySessionCurrentService,
     studySummaryService,
     studyReportService,
+    stageUpdateRequestService,
   };
 }
 
@@ -209,5 +219,22 @@ export function makeActorContext(
     actorId: overrides.actorId ?? uuid(),
     actorCode: overrides.actorCode ?? 'ai-actor',
     actorType: overrides.actorType ?? 'resident_ai',
+  };
+}
+
+export function makeStageUpdateRequest(
+  overrides: Partial<StageUpdateRequest> = {},
+): StageUpdateRequest {
+  const now = new Date().toISOString();
+  return {
+    id: overrides.id ?? uuid(),
+    projectId: overrides.projectId ?? uuid(),
+    stageId: overrides.stageId ?? uuid(),
+    requesterActorId: overrides.requesterActorId ?? uuid(),
+    expectedStageVersion: overrides.expectedStageVersion ?? 1,
+    proposedStatus: overrides.proposedStatus ?? 'in_progress',
+    reason: overrides.reason ?? '进入下一阶段',
+    status: overrides.status ?? 'pending',
+    createdAt: overrides.createdAt ?? now,
   };
 }

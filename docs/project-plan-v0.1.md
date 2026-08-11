@@ -173,7 +173,7 @@ Windows App
 - [x] 修改关卡
 - [x] 设置关卡状态
 - [ ] 获取关卡报告
-- [ ] 提交关卡更新申请
+- [x] 提交关卡更新申请
 - [ ] 批准更新申请
 - [ ] 拒绝更新申请
 - [ ] 要求 AI 补充说明
@@ -220,7 +220,7 @@ Windows App
 - [x] project_get_status
 - [x] project_list_stages
 - [x] project_get_stage
-- [ ] project_submit_stage_update
+- [x] project_submit_stage_update
 - [ ] project_list_reports
 - [ ] task_list_my_tasks
 - [ ] task_create

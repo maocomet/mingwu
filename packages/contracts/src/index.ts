@@ -8,3 +8,4 @@ export * from './study-actor.js';
 export * from './study-participant.js';
 export * from './study-report.js';
 export * from './study-session-detail.js';
+export * from './stage-update-request.js';

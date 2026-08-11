@@ -23,6 +23,7 @@ function setup(now?: () => string) {
     studySessionCurrentService: services.studySessionCurrentService,
     studySummaryService: services.studySummaryService,
     studyReportService: services.studyReportService,
+    stageUpdateRequestService: services.stageUpdateRequestService,
   });
   return { app, services };
 }

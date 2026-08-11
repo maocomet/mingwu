@@ -23,6 +23,7 @@ function setup() {
     studySessionCurrentService: services.studySessionCurrentService,
     studySummaryService: services.studySummaryService,
     studyReportService: services.studyReportService,
+    stageUpdateRequestService: services.stageUpdateRequestService,
   });
   return { app, services };
 }
@@ -269,6 +270,7 @@ describe('GET /api/v1/study-sessions/:id/detail real HTTP fail-fast body rejecti
       studySessionCurrentService: services.studySessionCurrentService,
       studySummaryService: services.studySummaryService,
       studyReportService: services.studyReportService,
+      stageUpdateRequestService: services.stageUpdateRequestService,
     });
     await app.listen({ host: '127.0.0.1', port: 0 });
     const address = app.server.address();
