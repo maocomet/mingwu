@@ -17,6 +17,7 @@ function setup() {
     studySessionDetailService,
     studySessionCurrentService,
     studySummaryService,
+    studyReportService,
   } = makeServices();
   const app = buildApp({
     config,
@@ -28,6 +29,7 @@ function setup() {
     studySessionDetailService,
     studySessionCurrentService,
     studySummaryService,
+    studyReportService,
   });
   return { app, taskRepository };
 }

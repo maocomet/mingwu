@@ -35,6 +35,7 @@ function setupAuth(
     studySessionDetailService: services.studySessionDetailService,
     studySessionCurrentService: services.studySessionCurrentService,
     studySummaryService: services.studySummaryService,
+    studyReportService: services.studyReportService,
     mcpAuthenticator: authenticator,
     logger,
   });

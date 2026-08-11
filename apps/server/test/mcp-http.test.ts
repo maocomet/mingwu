@@ -32,6 +32,7 @@ function setup(logger?: AppDeps['logger']) {
     studySessionDetailService: services.studySessionDetailService,
     studySessionCurrentService: services.studySessionCurrentService,
     studySummaryService: services.studySummaryService,
+    studyReportService: services.studyReportService,
     logger,
   });
   return { app, ...services };
@@ -121,7 +122,7 @@ async function createProjectWithData(app: App): Promise<{ projectId: string; sta
 }
 
 describe('MCP Streamable HTTP via /mcp', () => {
-  it('initialize establishes a session; tools/list exposes exactly five read-only tools', async () => {
+  it('initialize establishes a session; tools/list exposes five read-only tools plus study_append_report', async () => {
     const { app } = setup();
     try {
       const { sessionId, protocolVersion } = await initialize(app);
@@ -143,18 +144,37 @@ describe('MCP Streamable HTTP via /mcp', () => {
         'project_get_stage',
         'project_get_status',
         'project_list_stages',
+        'study_append_report',
         'study_get_current_session',
         'study_get_session',
       ]);
+      const READ_ONLY_TOOLS = new Set([
+        'project_get_stage',
+        'project_get_status',
+        'project_list_stages',
+        'study_get_session',
+        'study_get_current_session',
+      ]);
       for (const tool of tools) {
-        expect(tool.description).toContain('只读');
+        if (READ_ONLY_TOOLS.has(tool.name)) {
+          expect(tool.description).toContain('只读');
+        }
         expect(tool.inputSchema.type).toBe('object');
         expect(tool.inputSchema.additionalProperties).toBe(false);
       }
-      // 无参工具（严格空对象）没有必填字段；其余工具各有一个必填 UUID 字段。
+      // 无参工具（严格空对象）没有必填字段；只读 UUID 工具各一个必填；
+      // 写工具 study_append_report 恰好三个必填字段。
       const currentTool = tools.find((t) => t.name === 'study_get_current_session')!;
       expect(currentTool.inputSchema.required ?? []).toEqual([]);
-      for (const tool of tools.filter((t) => t.name !== 'study_get_current_session')) {
+      const appendTool = tools.find((t) => t.name === 'study_append_report')!;
+      expect([...(appendTool.inputSchema.required ?? [])].sort()).toEqual([
+        'content',
+        'report_id',
+        'session_id',
+      ]);
+      for (const tool of tools.filter(
+        (t) => READ_ONLY_TOOLS.has(t.name) && t.name !== 'study_get_current_session',
+      )) {
         expect(tool.inputSchema.required).toHaveLength(1);
       }
     } finally {
@@ -566,6 +586,7 @@ describe('MCP Streamable HTTP via /mcp', () => {
       studySessionDetailService: services.studySessionDetailService,
     studySessionCurrentService: services.studySessionCurrentService,
     studySummaryService: services.studySummaryService,
+    studyReportService: services.studyReportService,
       logger: capture.logger,
     });
     try {
@@ -605,6 +626,7 @@ describe('MCP Streamable HTTP via /mcp', () => {
       studySessionDetailService: services.studySessionDetailService,
     studySessionCurrentService: services.studySessionCurrentService,
     studySummaryService: services.studySummaryService,
+    studyReportService: services.studyReportService,
       logger: { level: 'silent' },
     });
     try {

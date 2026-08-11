@@ -63,6 +63,7 @@ async function main(): Promise<void> {
     studySessionDetailService,
     studySessionCurrentService,
     studySummaryService,
+    studyReportService,
   });
 
   const shutdown = async (signal: string): Promise<void> => {

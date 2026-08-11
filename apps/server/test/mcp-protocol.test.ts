@@ -21,6 +21,7 @@ function buildTestServer() {
     stageService: services.stageService,
     studySessionDetailService: services.studySessionDetailService,
     studySessionCurrentService: services.studySessionCurrentService,
+    studyReportService: services.studyReportService,
     serviceName: 'mingwu-server',
     serviceVersion: '0.1.0',
     logger: { error: () => undefined },
@@ -51,7 +52,7 @@ function firstText(result: {
 }
 
 describe('MCP protocol (official Client + InMemoryTransport)', () => {
-  it('initialize succeeds and exposes exactly the five read-only tools with strict schemas', async () => {
+  it('initialize succeeds and exposes the five read-only tools plus one write tool with strict schemas', async () => {
     const { server } = buildTestServer();
     const client = await connectClient(server);
     try {
@@ -60,41 +61,56 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
         'project_get_stage',
         'project_get_status',
         'project_list_stages',
+        'study_append_report',
         'study_get_current_session',
         'study_get_session',
       ]);
-      // 每个工具都明确只读。
-      for (const tool of tools) {
+      // 五个只读工具都明确只读；study_append_report 是唯一写工具，不得标“只读”。
+      const READ_ONLY_TOOLS = new Set([
+        'project_get_stage',
+        'project_get_status',
+        'project_list_stages',
+        'study_get_session',
+        'study_get_current_session',
+      ]);
+      const writeTools = tools.filter((t) => !READ_ONLY_TOOLS.has(t.name));
+      expect(writeTools.map((t) => t.name)).toEqual(['study_append_report']);
+      for (const tool of tools.filter((t) => READ_ONLY_TOOLS.has(t.name))) {
         expect(tool.description).toContain('只读');
       }
+      expect(writeTools[0]!.description).not.toContain('只读');
       // 严格 input schema：禁止未知字段。需要 UUID 字段的工具只允许指定字段；
       // study_get_current_session 是严格空对象（无任何输入参数）。
-      const fieldByTool: Record<string, string | null> = {
-        project_get_stage: 'stage_id',
-        project_get_status: 'project_id',
-        project_list_stages: 'project_id',
-        study_get_session: 'session_id',
+      const fieldByTool: Record<string, string[] | null> = {
+        project_get_stage: ['stage_id'],
+        project_get_status: ['project_id'],
+        project_list_stages: ['project_id'],
+        study_get_session: ['session_id'],
         study_get_current_session: null,
+        study_append_report: ['report_id', 'session_id', 'content'],
       };
       for (const tool of tools) {
         expect(tool.inputSchema.type).toBe('object');
         expect(tool.inputSchema.additionalProperties).toBe(false);
-        const field = fieldByTool[tool.name]!;
-        if (field === null) {
+        const fields = fieldByTool[tool.name];
+        if (fields == null) {
           // 严格空对象：SDK 生成 JSON Schema 时会省略空 required 数组。
           expect(tool.inputSchema.required ?? []).toEqual([]);
           expect(tool.inputSchema.properties ?? {}).toEqual({});
         } else {
-          expect(tool.inputSchema.required).toEqual([field]);
-          const prop = tool.inputSchema.properties?.[field] as Record<string, unknown> | undefined;
-          expect(prop?.type).toBe('string');
-          expect(prop?.format).toBe('uuid');
+          expect((tool.inputSchema.required ?? []).slice().sort()).toEqual(fields!.slice().sort());
+          for (const field of fields) {
+            const prop = tool.inputSchema.properties?.[field] as Record<string, unknown> | undefined;
+            expect(prop?.type).toBe('string');
+            if (field !== 'content') {
+              expect(prop?.format).toBe('uuid');
+            }
+          }
         }
       }
-      // 不存在任何写工具。
+      // 除 study_append_report 外不存在其他写工具。
       const names = tools.map((t) => t.name);
       expect(names).not.toContain('project_submit_stage_update');
-      expect(names).not.toContain('study_append_report');
     } finally {
       await client.close();
       await server.close();
@@ -356,6 +372,7 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
       stageService: services.stageService,
       studySessionDetailService: throwingDetail,
       studySessionCurrentService: services.studySessionCurrentService,
+      studyReportService: services.studyReportService,
       serviceName: 'mingwu-server',
       serviceVersion: '0.1.0',
       logger,
@@ -426,6 +443,7 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
       stageService: services.stageService,
       studySessionDetailService: services.studySessionDetailService,
       studySessionCurrentService: services.studySessionCurrentService,
+      studyReportService: services.studyReportService,
       serviceName: 'mingwu-server',
       serviceVersion: '0.1.0',
       logger,
@@ -640,6 +658,7 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
       stageService: services.stageService,
       studySessionDetailService: services.studySessionDetailService,
       studySessionCurrentService: services.studySessionCurrentService,
+      studyReportService: services.studyReportService,
       serviceName: 'mingwu-server',
       serviceVersion: '0.1.0',
       logger,
@@ -683,6 +702,7 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
       stageService: services.stageService,
       studySessionDetailService: services.studySessionDetailService,
       studySessionCurrentService: services.studySessionCurrentService,
+      studyReportService: services.studyReportService,
       serviceName: 'mingwu-server',
       serviceVersion: '0.1.0',
       logger,

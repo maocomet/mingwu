@@ -210,7 +210,7 @@ Windows App
 - [x] 恢复 Session
 - [x] 结束 Session
 - [x] 用户提交总结
-- [ ] AI 追加自己的报告
+- [x] AI 追加自己的报告
 - [x] 多个 AI 报告互不覆盖
 - [x] 查询 Study Session 历史
 - [ ] 查询单次 Session 完整详情
@@ -227,7 +227,7 @@ Windows App
 - [ ] task_update
 - [ ] task_complete
 - [x] study_get_current_session
-- [ ] study_append_report
+- [x] study_append_report
 - [x] study_get_session
 - [ ] asset_list
 - [ ] asset_get

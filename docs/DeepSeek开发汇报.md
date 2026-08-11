@@ -4284,3 +4284,250 @@ PUT 使用严格白名单请求体：
 - 检查点 #16 的 MCP 连接身份绑定基础与检查点 #17 的白名单复制返修一起验收。
 - 本批本来就没有对应计划复选框，因此不修改 `docs/project-plan-v0.1.md`。
 - 可以归档并提交推送；下一批由小喵另行追加任务说明。
+
+---
+
+## 小喵任务 #18 · 实现 `study_append_report` MCP 写工具 · 2026-08-10
+
+### 本批目标
+
+在已经验收的 MCP 连接身份绑定基础上，提供第一个真正按服务端 Actor 身份落账的写工具 `study_append_report`。复用现有 `StudyReportService`、追加式报告仓储和 Participant 维护规则，不复制业务算法，不回调 HTTP API。
+
+候选完成的计划原文（DS 不打勾，由小喵验收后决定）：
+
+- `- [ ] AI 追加自己的报告`
+- `- [ ] study_append_report`
+
+本批不要申报全局的“给写操作增加权限验证”或“确保工具重复调用不会产生重复数据”；只能证明本工具自己的身份、权限与幂等边界。
+
+### 必须实现
+
+1. 在 MCP Server 依赖中接入现有 `StudyReportService`，注册 `study_append_report`。
+2. 工具输入只允许：
+   - `report_id`：调用方生成的 UUID 幂等键；
+   - `session_id`：目标 Study Session UUID；
+   - `content`：报告正文。
+   使用严格 schema，拒绝额外字段，尤其拒绝 `actorId`、`actor_id`、`actorCode`、`author`、`connectionId`、`permissionProfile`、`sequenceNumber`、`submittedAt`。
+3. `actorId / actorCode / actorType` 只能从该 MCP Server 实例私有的 `deps.authContext` 取得并传给 `StudyReportService.appendReport()`；客户端输入、MCP Session ID、平台名和显示名称均不得参与推导身份。
+4. 匿名上下文 `authContext === null` 必须 fail-closed：工具可见但写入返回稳定受控错误，报告与 Participant 均不得产生。
+5. 为本工具建立最小显式授权策略：
+   - `permissionProfile === 'default'` 且 `actorType` 为 `resident_ai` 或 `temporary_ai` 时允许追加学习报告；
+   - `reviewer`、未知 permission profile 或缺失身份均拒绝；
+   - 拒绝结果不得泄露内部身份、凭据、报告正文或堆栈。
+   授权判断应集中成可测试的小函数 / 策略，不要把权限字符串散落在工具回调中。第六关接数据库权限表时应能替换该临时策略。
+6. 复用既有追加语义：同一 `report_id` + 同 Session + 同认证 Actor + 同规范化正文为幂等成功；同 id 不同语义为受控冲突；不得覆盖旧报告；同 Actor 的 sequenceNumber 继续递增，不同 Actor 独立。
+7. 正确映射现有业务错误：Session 不存在、created 状态不可追加、内容 / id 非法、幂等冲突、Participant 更新失败以及未知异常都返回稳定、脱敏的 MCP 错误结果。未知异常日志只记录错误类型，不记录正文、AuthContext、Authorization 或原始异常 message / stack。
+8. 成功结果至少返回新建或幂等命中的完整 `StudyReport`；不得回显 token、connectionId 或 permissionProfile。
+
+### 必须测试
+
+- 已认证常驻 AI 成功追加，报告 `actorId` 来自绑定身份，Participant 同步建立。
+- 临时 AI 在 `default` 权限下可以追加；reviewer、未知 profile、匿名上下文全部拒绝且零写入。
+- 输入夹带任意身份 / 受保护字段被严格拒绝，不能借此为其他 Actor 写报告。
+- 两个不同连接映射同一 Actor 时，报告仍归同一 actorId；另一 Actor 写入同一 Session 时互不覆盖、序号各自独立。
+- 同 id 同语义重试只有一份报告；同 id 不同正文、不同 Session 或不同 Actor 均受控冲突。
+- Session 不存在、created 状态、正文空白 / Unicode 上下界、Participant 恢复重试和未知异常脱敏均覆盖。
+- `tools/list` 精确增加本工具；现有五个只读工具、认证、会话隔离与真实 HTTP smoke 不回归。
+- 至少增加一次真实 MCP HTTP + Bearer 冒烟：initialize → `study_append_report` → `study_get_session`，确认写入归属与读取一致；结束后释放端口。
+
+### 边界与汇报
+
+- 不实现 App API 写路由、OAuth、数据库、AuditLog、其他 MCP Tool 或前端。
+- 不修改计划复选框，不执行 Git / GitHub / VPS 操作，不触碰 `.claude/` 与 `ui素材mingwu/`。
+- 完成这一小批后，把检查点追加到本文件末尾，列出代码、授权规则、错误映射、测试真实数字和风险，然后暂停等待小喵审核；不要自行开始下一批。
+
+---
+
+## 检查点 #18 · `study_append_report` MCP 写工具 · 2026-08-10
+
+### 本批次目标
+
+响应小喵任务 #18：在已验收的 MCP 连接身份绑定基础上，提供第一个真正按服务端 Actor 身份落账的写工具 `study_append_report`。接入现有 `StudyReportService` 与追加式报告仓储，不复制业务算法、不回调 HTTP API；只证明本工具自己的身份、权限与幂等边界。
+
+### 候选完成的计划项目原文（DS 不打勾）
+
+- `- [ ] AI 追加自己的报告`
+- `- [ ] study_append_report`
+
+以上仅为候选完成项；未修改 `docs/project-plan-v0.1.md` 任何复选框，是否打勾由小喵验收后决定。
+
+### 实际完成内容
+
+1. **`McpServerDeps` 接入 `StudyReportService`**：`mcp-server.ts` 新增必填依赖 `studyReportService`，注册写工具 `study_append_report`；`app.ts` / `index.ts` 完成依赖注入。
+2. **严格输入 schema**：`appendReportInputSchema`（zod `.strict()`）只接受 `report_id`（调用方 UUID 幂等键）、`session_id`（UUID）、`content`；拒绝额外字段，尤其 `actorId / actor_id / actorCode / author / connectionId / permissionProfile / sequenceNumber / submittedAt`。
+3. **服务端身份归属**：`actorId / actorCode / actorType` 只从该 MCP Server 实例私有的 `deps.authContext` 取得并传给 `StudyReportService.appendReport()`；客户端输入、MCP Session ID、平台名、显示名称均不参与推导身份。
+4. **fail-closed 匿名模式**：`authContext === null` 时工具仍可见，但调用返回稳定受控错误 `'当前连接未授权写操作'`，报告与 Participant 均不产生（专项测试验证零写入）。
+5. **集中式授权策略** `apps/server/src/mcp/study-report-policy.ts`：
+   - `canAppendStudyReport(ctx)`：`permissionProfile === 'default'` 且 `actorType ∈ {resident_ai, temporary_ai}` 允许；
+   - `reviewer`、未知 permission profile、缺失身份均拒绝；
+   - 拒绝结果不泄露内部身份、凭据、报告正文或堆栈。策略集中成可测试小函数，第六关接数据库权限表时可直接替换。
+6. **幂等语义**：`report_id` 全局唯一；同 id + 同 Session + 同认证 Actor + 同规范化正文为幂等成功；同 id 不同语义为受控冲突，不覆盖旧报告；同 Actor 的 `sequenceNumber` 继续递增，不同 Actor 独立。
+7. **错误映射与脱敏**：Session 不存在 → `'自习记录不存在'`；created 状态不可追加 → `'自习记录尚未开始，无法追加报告'`；id / 正文非法 → `'报告 ID 不合法'` / `'报告正文不合法'`；幂等冲突 → `'报告已存在且语义冲突，不覆盖旧报告'`；Participant 更新失败 → `'参与者更新失败，请使用相同报告 ID 重试'`；未知异常 → 统一 `unexpectedError`。未知异常日志只记录 `errType`，不记录正文、AuthContext、Authorization 或原始异常 message / stack。
+8. **成功结果**：返回新建或幂等命中的完整 `StudyReport`，不回显 token、connectionId 或 permissionProfile。
+
+### 新增、修改、删除的文件清单
+
+新增：
+- `apps/server/src/mcp/study-report-policy.ts` — 授权策略小函数（集中、可测试、可替换）。
+- `apps/server/test/mcp-append-report.test.ts` — 专项测试 8 条。
+
+修改（16 个）：
+- `apps/server/src/mcp/mcp-server.ts`（新增依赖 + schema + 工具注册 + 错误映射）。
+- `apps/server/src/app.ts`（AppDeps 注入 `studyReportService`）。
+- `apps/server/src/index.ts`（buildApp 调用传入 `studyReportService`）。
+- `apps/server/test/mcp-protocol.test.ts`（buildTestServer / 直接调用点补依赖，tools/list 断言 5→6）。
+- `apps/server/test/mcp-http-auth.test.ts`、`apps/server/test/mcp-http-smoke-auth.test.ts`、`apps/server/test/mcp-http.test.ts`、`apps/server/test/mcp-http-smoke.test.ts`（buildApp 调用点 + tools/list 断言；smoke-auth 新增真实 HTTP 冒烟）。
+- `apps/server/test/mcp-session-registry.test.ts`、`apps/server/test/health.test.ts`（buildApp / buildMcpServer 调用点补依赖）。
+- `apps/server/test/project-api.test.ts`、`apps/server/test/project-status-api.test.ts`、`apps/server/test/project-task-api.test.ts`、`apps/server/test/stage-api.test.ts`、`apps/server/test/study-session-api.test.ts`、`apps/server/test/study-summary-api.test.ts`（buildApp 调用点补依赖）。
+
+删除：无。
+
+### 关键设计决定及其依据
+
+1. **身份只从 per-session 私有 authContext 取得**：每个连接持有独立的 `McpServer` 实例，`deps.authContext` 是唯一身份来源；客户端无从指定 `actorId`，杜绝跨 Actor 冒写。
+2. **fail-closed 而非 fail-open**：匿名上下文让写工具"可见但拒绝"，比"不可见"更利于客户端感知权限缺失，同时零写入保证安全。
+3. **授权集中成策略函数**：权限字符串不散落在工具回调，`canAppendStudyReport(ctx)` 单点判断且可单测；未来数据库权限表只需替换策略实现。
+4. **严格 schema 拒绝夹带**：`.strict()` 拒绝任何额外字段，防止借输入字段为其他 Actor 写报告或回写受保护字段。
+5. **幂等键全局唯一 + per-actor 序号**：重试同 id 同语义只落一份；不同 Actor 序号独立、互不覆盖，与既有 `StudyReportService` 追加语义完全复用。
+6. **错误全量映射并脱敏**：业务错误都有稳定文案，未知异常只记 `errType`，不泄露正文、上下文或凭据。
+
+### 执行过的测试或检查、命令与真实结果
+
+- MCP 专项（8 个文件）：`npx vitest run test/mcp-authenticator.test.ts test/mcp-session-registry.test.ts test/mcp-http-auth.test.ts test/mcp-protocol.test.ts test/mcp-append-report.test.ts test/mcp-http-smoke-auth.test.ts test/mcp-http.test.ts test/mcp-http-smoke.test.ts` — **70/70 通过**。
+- 根目录 `npm run typecheck`（contracts + server）：通过，exit 0。
+- `npm test`（全量）：**35 个文件 647/647 通过**（原 638 + 新增 9）。
+- 真实 HTTP + Bearer 冒烟（`mcp-http-smoke-auth.test.ts` 新增）：initialize → 创建/启动 Session（App API）→ `study_append_report` 写入（报告 `actorId` 等于 Bearer 绑定身份的 actorA、`sequenceNumber` 1）→ `study_get_session` 读回一致 → 释放端口。
+- `.ts` 全量 NUL 字节扫描（Python `b'\x00'` 精确检测）：**0 bad files**。
+- `git diff --check`：exit 0，仅 Windows LF→CRLF 提示（无害）。
+
+### 未完成内容、已知问题和风险
+
+- 未实现 App API 写路由、OAuth、数据库、AuditLog、其他 MCP Tool 或前端。
+- 授权策略仍是内存临时策略（`default` profile），第六关需接数据库权限表替换；当前测试与运行均为该策略下的行为。
+- 测试使用 `makeServices()` 内存仓储，非真实数据库持久化。
+- 生产未注入场景的既有 info 日志会打印到 stdout（沿用既有测试行为，非本批引入），不影响结果。
+- 未修改任何计划复选框；未执行 Git / GitHub / VPS 操作；未改动 `docs/project-plan-v0.1.md`、`第一关卡完成报告.txt`、`第二关卡报告.txt`；未触碰 `.claude/` 与 `ui素材mingwu/`。
+
+### 是否涉及数据库、身份权限、密钥、外部服务或破坏性变化
+
+是：本批新增 MCP 写工具并引入集中式授权策略，属于身份认证 / 权限处理逻辑变化，是 CLAUDE.md 强制检查点的直接对象。不涉及数据库 / Migration、密钥、外部服务；无破坏性变化；无新增依赖（复用既有 `StudyReportService`）。
+
+### 建议下一批任务
+
+等待小喵审核本批次。若通过，建议后续批次方向：MCP 写工具向 OAuth / 数据库权限表扩展，或实现 App API 侧的对称写路由（由小喵在计划 / 汇报中指定）。
+
+等待小喵审核。
+
+---
+
+## 小喵审核结果 #18 · 需要一处 Unicode 边界返修 · 2026-08-10
+
+### 审核结论
+
+本批身份归属、匿名 fail-closed、最小权限策略、跨 Actor 隔离、幂等冲突、Participant 恢复与错误脱敏均符合任务要求；专项 **70/70**、全量 **647/647**、根目录 typecheck、真实 HTTP + Bearer 冒烟、`git diff --check` 与 NUL 扫描均通过。
+
+但 `study_append_report` 的 MCP 输入契约与既有 `StudyReportService` 的 Unicode 长度语义不一致，暂不能验收或打勾：
+
+- `appendReportInputSchema.content` 当前使用 Zod `.max(STUDY_REPORT_CONTENT_MAX_LENGTH)`。Zod 在这里按 JavaScript UTF-16 code unit 计数，而服务层使用 `countCodePoints()` 按 Unicode code point 计数。小喵实际复现：`'😀'.repeat(5000)` 的 code point 数为 5000、JS length 为 10000，服务层应允许，但 MCP schema 在调用服务前已经拒绝。当前测试只用了 BMP 中文字符，未覆盖这个差异。
+- schema 在 trim 之前执行长度上限，服务层则 trim 后再计数，因此“合法 5000 个字符 + 首尾空白”也可能被入口提前误拒绝。
+
+### 必须返修（只修这一处语义，不扩大批次）
+
+1. MCP 工具的正文上限必须与服务层完全统一：按 `countCodePoints(content.trim())` 判断 `STUDY_REPORT_CONTENT_MAX_LENGTH`，不要使用按 UTF-16 code unit 计数的 `.max(...)` 作为这一上限。可以复用 contracts 中现有 `countCodePoints`，业务服务仍作为最终防线。
+2. 保留当前纯空白正文的受控业务错误语义；不要让改动绕过 `StudyReportService` 的规范化与校验。
+3. 在官方 MCP Client 调用层补齐以下边界测试：
+   - 恰好 5000 个 emoji（astral code point）成功；
+   - 5001 个 emoji 被拒绝且零新增；
+   - 首尾带空白、trim 后恰好 5000 个 emoji 成功，保存内容为规范化后的正文。
+4. 现有身份、权限、幂等、脱敏与 HTTP Bearer 冒烟不得回归。返修后重新执行 MCP 专项、根目录 typecheck、全量测试、NUL 扫描和 `git diff --check`，把真实结果追加到文件末尾后暂停。
+
+### 边界
+
+- 不修改计划复选框，不提交或推送，不开始下一批。
+- 只修正文 Unicode / trim 长度一致性及对应测试；不新增 API、数据库、OAuth、AuditLog 或其他工具。
+
+等待 DS 返修后由小喵复验。
+
+---
+
+## 检查点 #19 · `study_append_report` 正文 Unicode / trim 长度语义统一（响应小喵审核 #18）· 2026-08-10
+
+### 本批次目标
+
+响应小喵审核 #18 的唯一返修：统一 MCP 入口与 `StudyReportService` 的正文长度语义。当前入口 `.max(STUDY_REPORT_CONTENT_MAX_LENGTH)` 按 JavaScript UTF-16 code unit 计数，服务层按 `countCodePoints()`（Unicode code point）计数，导致恰好 5000 个 astral emoji 被入口误拒绝。只修这一处语义与对应测试，不扩大批次。
+
+### 候选完成的计划项目原文（DS 不打勾）
+
+- `- [ ] AI 追加自己的报告`
+- `- [ ] study_append_report`
+
+以上仅为候选完成项（承接审核 #18 同两项）；未修改 `docs/project-plan-v0.1.md` 任何复选框。
+
+### 实际完成内容
+
+1. **`mcp-server.ts` 正文长度校验改为与服务层统一**：`content` 字段移除 `.min(1)` 与按 UTF-16 code unit 计数的 `.max(STUDY_REPORT_CONTENT_MAX_LENGTH)`，改为 `.refine((value) => countCodePoints(value.trim()) <= STUDY_REPORT_CONTENT_MAX_LENGTH)`。复用 contracts 现有 `countCodePoints`（`Array.from(value).length`，与 JSON Schema `maxLength` 语义一致）。
+2. **空字符串 / 纯空白正文交给服务层**：schema 不再拦截空/纯空白，交由 `StudyReportService` 统一规范化与受控业务错误（trim 后为空 → `StudyReportContentInvalidError` → `'报告正文不合法'`），不绕过服务层校验，单一校验来源。
+3. **新增 1 条边界测试**（官方 MCP Client 调用层）：恰好 5000 个 emoji 成功（`countCodePoints` 验证为 5000）；5001 个 emoji 被拒绝且零新增；首尾带空白、trim 后恰好 5000 个 emoji 成功，保存内容为规范化后的正文。同一测试内最后只落账两条成功报告。
+
+### 新增、修改、删除的文件清单
+
+- 修改 `apps/server/src/mcp/mcp-server.ts`（import 增加 `countCodePoints`；`appendReportInputSchema.content` 由 `.min(1).max(...)` 改为按 code point / trim 的 `.refine` 校验，并更新注释）。
+- 修改 `apps/server/test/mcp-append-report.test.ts`（import 增加 `countCodePoints`；新增 1 条 astral emoji / trim 边界测试）。
+- 无新增、无删除文件。
+
+### 关键设计决定及其依据
+
+1. **长度上限在入口也按 `countCodePoints(trim)` 判断**：把超长内容拒绝在到达服务层之前（fail-closed 上界），同时语义与服务层完全一致，不再出现"入口能过 / 服务层拒"或相反的错误分割。业务服务仍作为最终防线，未改动。
+2. **不在入口拦截空 / 纯空白**：`trim` 后为空的判定与 `StudyReportContentInvalidError` 的业务文案由服务层一处负责，避免 schema 与业务逻辑重复定义空白语义；这与"不要绕过 StudyReportService 的规范化与校验"的返修要求一致。
+3. **复用 contracts 既有 `countCodePoints`**：不引入新的长度工具，契约层 / 服务层 / MCP 入口共用同一 code point 算法，杜绝第三套长度口径。
+
+### 执行过的测试或检查、命令与真实结果
+
+- `npx vitest run test/mcp-append-report.test.ts`（apps/server）：**9/9 通过**（原 8 + 新增 1）。
+- MCP 专项（8 个文件）：`npx vitest run test/mcp-authenticator.test.ts test/mcp-session-registry.test.ts test/mcp-http-auth.test.ts test/mcp-protocol.test.ts test/mcp-append-report.test.ts test/mcp-http-smoke-auth.test.ts test/mcp-http.test.ts test/mcp-http-smoke.test.ts` — **71/71 通过**（原 70 + 新增 1）。
+- 根目录 `npm run typecheck`（contracts + server）：通过，exit 0。
+- `npm test`（全量）：**35 个文件 648/648 通过**（原 647 + 新增 1）。
+- `.ts` 全量 NUL 字节扫描（Python `b'\x00'` 精确检测）：**0 bad files**。
+- `git diff --check`：exit 0，仅 Windows LF→CRLF 提示（无害）。
+
+### 未完成内容、已知问题和风险
+
+- 本批只修正文长度语义一致性；未新增 API、数据库、OAuth、AuditLog 或其他工具。
+- 授权策略仍是内存临时策略（`default` profile），第六关需接数据库权限表替换（承接审核 #18 已列风险）。
+- 测试使用 `makeServices()` 内存仓储，非真实数据库持久化。
+- 生产未注入场景的既有 info 日志会打印到 stdout（沿用既有测试行为，非本批引入）。
+- 未修改任何计划复选框；未执行 Git / GitHub / VPS 操作；未改动 `docs/project-plan-v0.1.md`、`第一关卡完成报告.txt`、`第二关卡报告.txt`；未触碰 `.claude/` 与 `ui素材mingwu/`。
+
+### 是否涉及数据库、身份权限、密钥、外部服务或破坏性变化
+
+否。本批为纯正文长度校验语义一致性返修，不改变身份 / 权限 / 密钥 / 幂等逻辑，不涉及数据库 / Migration、密钥、外部服务；无破坏性变化；无新增依赖。
+
+### 建议下一批任务
+
+等待小喵复验本返修。通过后按 #18 建议方向推进：MCP 写工具向 OAuth / 数据库权限表扩展，或 App API 侧对称写路由（由小喵在计划 / 汇报中指定）。
+
+等待小喵审核。
+
+---
+
+## 小喵复验结果 #18 / #19 · 通过 · 2026-08-10
+
+### 验收结论
+
+通过。`study_append_report` 已按每个 MCP 连接的服务端认证 Actor 身份追加报告，匿名与无权限上下文 fail-closed，不接受客户端身份字段；同 Actor 重试幂等、跨 Actor 报告与序号互不覆盖，Participant 恢复和错误脱敏符合要求。Unicode 返修后，MCP 入口与服务层统一按 `countCodePoints(content.trim())` 计算长度，astral emoji 与首尾空白边界一致。
+
+### 小喵独立复验结果
+
+- 根目录 `npm run typecheck`：通过。
+- MCP 专项：8 个文件，**71/71 通过**。
+- 全量测试：35 个文件，**648/648 通过**。
+- 真实 HTTP + Bearer 写入 / 读回冒烟：通过。
+- `git diff --check`：通过，仅 Windows LF→CRLF 提示。
+- NUL 扫描：0。
+
+### 计划更新
+
+- `[x] AI 追加自己的报告`
+- `[x] study_append_report`
+
+本批可以归档并提交推送。全局“给写操作增加权限验证”和“确保工具重复调用不会产生重复数据”仍不打勾；本轮只证明了 `study_append_report` 自己的权限与幂等边界。

@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import type { StudyReport } from '@mingwu/contracts';
 import { buildApp } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
 import { AUTH_FIXTURES, makeAuthenticator } from './mcp-auth-fixtures.js';
-import { makeServices } from './helpers.js';
+import { makeServices, uuid } from './helpers.js';
 
 type App = ReturnType<typeof buildApp>;
 
@@ -32,6 +33,7 @@ describe('MCP Streamable HTTP real-HTTP auth smoke (127.0.0.1, ephemeral port)',
       studySessionDetailService: services.studySessionDetailService,
       studySessionCurrentService: services.studySessionCurrentService,
       studySummaryService: services.studySummaryService,
+      studyReportService: services.studyReportService,
       mcpAuthenticator: makeAuthenticator(),
     });
     await app.listen({ host: '127.0.0.1', port: 0 });
@@ -59,6 +61,18 @@ describe('MCP Streamable HTTP real-HTTP auth smoke (127.0.0.1, ephemeral port)',
     });
     await client.connect(transport);
     return { client, transport };
+  }
+
+  /** 取工具调用的首个文本内容块。 */
+  function toolText(result: {
+    [key: string]: unknown;
+    content?: ReadonlyArray<{ type: string; text?: string }>;
+  }): string {
+    const block = result.content?.[0];
+    if (!block || block.type !== 'text' || typeof block.text !== 'string') {
+      throw new Error('expected text content block');
+    }
+    return block.text;
   }
 
   it('real socket: authorized initialize + tools/list + isolated sessions + DELETE cleanup', async () => {
@@ -94,6 +108,7 @@ describe('MCP Streamable HTTP real-HTTP auth smoke (127.0.0.1, ephemeral port)',
         'project_get_stage',
         'project_get_status',
         'project_list_stages',
+        'study_append_report',
         'study_get_current_session',
         'study_get_session',
       ]);
@@ -151,11 +166,70 @@ describe('MCP Streamable HTTP real-HTTP auth smoke (127.0.0.1, ephemeral port)',
       ).toBe(1);
 
       const bList = await b.client.listTools();
-      expect(bList.tools).toHaveLength(5);
+      expect(bList.tools).toHaveLength(6);
 
       // B 也通过 DELETE 显式清理（client.close 不保证发送 DELETE）。
       await b.transport.terminateSession();
       await b.client.close();
+      expect(
+        (app as unknown as { mcpSessions: { size: number } }).mcpSessions.size,
+      ).toBe(0);
+    } finally {
+      await close();
+    }
+  });
+
+  it('real socket: study_append_report writes under the bound identity and study_get_session reads it back', async () => {
+    const { app, baseUrl, close } = await startServer();
+    try {
+      // 用 App HTTP API 创建并开始一个可追加报告的 running Session。
+      const sessionId = uuid();
+      const created = await fetch(`${baseUrl}/api/v1/study-sessions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          id: sessionId,
+          timerMode: 'count_down',
+          taskText: '真实冒烟学习',
+          plannedDurationSeconds: 600,
+        }),
+      });
+      expect(created.status).toBe(201);
+      const started = await fetch(`${baseUrl}/api/v1/study-sessions/${sessionId}/start`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ expectedVersion: 1 }),
+      });
+      expect(started.status).toBe(200);
+
+      // 客户端 A：连接 1（actorA）经真实 socket + Bearer 写入报告。
+      const a = await connectClient(`${baseUrl}/mcp`, AUTH_FIXTURES.connection1.token);
+      const reportId = uuid();
+      const append = await a.client.callTool({
+        name: 'study_append_report',
+        arguments: { report_id: reportId, session_id: sessionId, content: '真实 HTTP 冒烟报告' },
+      });
+      expect(append.isError).not.toBe(true);
+      const report = JSON.parse(toolText(append)) as StudyReport;
+      expect(report.id).toBe(reportId);
+      // 写入归属：actorId 必须来自服务端 Bearer 解析的绑定身份（actorA）。
+      expect(report.actorId).toBe(AUTH_FIXTURES.actorA.actorId);
+      expect(report.sequenceNumber).toBe(1);
+
+      // 用 study_get_session 读回同一 Session，确认写入归属与读取一致。
+      const read = await a.client.callTool({
+        name: 'study_get_session',
+        arguments: { session_id: sessionId },
+      });
+      expect(read.isError).not.toBe(true);
+      const detail = JSON.parse(toolText(read)) as { reports: StudyReport[] };
+      expect(detail.reports).toHaveLength(1);
+      expect(detail.reports[0]!.id).toBe(reportId);
+      expect(detail.reports[0]!.actorId).toBe(AUTH_FIXTURES.actorA.actorId);
+      expect(detail.reports[0]!.content).toBe('真实 HTTP 冒烟报告');
+
+      await a.transport.terminateSession();
+      await a.client.close();
       expect(
         (app as unknown as { mcpSessions: { size: number } }).mcpSessions.size,
       ).toBe(0);
