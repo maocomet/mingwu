@@ -327,3 +327,241 @@ describe('StageUpdateRequestService.requestChanges', () => {
     }
   });
 });
+
+describe('StageUpdateRequestService.reject', () => {
+  it('marks a pending request as rejected: revision 1->2, note/decidedAt correct, original fields unchanged, Stage unchanged', async () => {
+    const services = makeServices();
+    const { projectId, stage } = await seedStage(services);
+    const service = new StageUpdateRequestService(
+      services.stageUpdateRequestRepository,
+      services.stageRepository,
+      makeAdvancingClock(FIXED_NOW),
+    );
+    const request = await createPending(service, stage);
+
+    const before = await readStageSnapshot(services, stage.id);
+    const decided = await service.reject(request.id, {
+      expectedRevision: 1,
+      note: '  不符合验收标准，予以拒绝  ',
+    });
+    const after = await readStageSnapshot(services, stage.id);
+
+    expect(decided.status).toBe('rejected');
+    expect(decided.revision).toBe(2);
+    expect(decided.decision).toEqual({
+      type: 'rejected',
+      note: '不符合验收标准，予以拒绝',
+      decidedAt: expect.any(String),
+    });
+    // updatedAt / decidedAt 由服务端刷新，不再等于创建时间。
+    expect(decided.updatedAt).toBe(decided.decision!.decidedAt);
+    expect(decided.updatedAt).not.toBe(decided.createdAt);
+    // 原申请核心字段逐项不变。
+    expect(decided.projectId).toBe(projectId);
+    expect(decided.stageId).toBe(stage.id);
+    expect(decided.requesterActorId).toBe(request.requesterActorId);
+    expect(decided.expectedStageVersion).toBe(1);
+    expect(decided.proposedStatus).toBe('in_progress');
+    expect(decided.reason).toBe(request.reason);
+    expect(decided.createdAt).toBe(request.createdAt);
+    // 正式 Stage 完全不变。
+    expect(after).toEqual(before);
+  });
+
+  it('identical reject retry returns the same decided request without advancing revision/updatedAt', async () => {
+    const services = makeServices();
+    const { stage } = await seedStage(services);
+    const service = makeService(services);
+    const request = await createPending(service, stage);
+
+    const first = await service.reject(request.id, {
+      expectedRevision: 1,
+      note: '不符合要求',
+    });
+    expect(first.status).toBe('rejected');
+    expect(first.revision).toBe(2);
+
+    // 完全相同请求（note 带排版差异也归一化）重试：幂等返回原决定，revision 不再 +1。
+    const retry = await service.reject(request.id, {
+      expectedRevision: 1,
+      note: '  不符合要求  ',
+    });
+    expect(retry).toEqual(first);
+    expect(retry.revision).toBe(2);
+    expect(retry.updatedAt).toBe(first.updatedAt);
+    expect(await service.listByStage(stage.id)).toHaveLength(1);
+  });
+
+  it('a different note or wrong expectedRevision after rejection is a controlled conflict and never overwrites the first decision', async () => {
+    const services = makeServices();
+    const { stage } = await seedStage(services);
+    const service = makeService(services);
+    const request = await createPending(service, stage);
+
+    const first = await service.reject(request.id, { expectedRevision: 1, note: '不符合要求' });
+
+    await expect(
+      service.reject(request.id, { expectedRevision: 1, note: '不同说明' }),
+    ).rejects.toBeInstanceOf(StageUpdateRequestDecisionConflictError);
+    await expect(
+      service.reject(request.id, { expectedRevision: 2, note: '不符合要求' }),
+    ).rejects.toBeInstanceOf(StageUpdateRequestDecisionConflictError);
+    await expect(
+      service.reject(request.id, { expectedRevision: 99, note: '另一个说明' }),
+    ).rejects.toBeInstanceOf(StageUpdateRequestDecisionConflictError);
+
+    const read = await service.getById(request.id);
+    expect(read?.status).toBe('rejected');
+    expect(read?.revision).toBe(2);
+    expect(read?.decision?.note).toBe('不符合要求');
+    expect(read).toEqual(first);
+  });
+
+  it('rejects a stale/wrong expectedRevision while still pending without writing any decision', async () => {
+    const services = makeServices();
+    const { stage } = await seedStage(services);
+    const service = makeService(services);
+    const request = await createPending(service, stage);
+
+    await expect(
+      service.reject(request.id, { expectedRevision: 2, note: '说明' }),
+    ).rejects.toBeInstanceOf(StageUpdateRequestDecisionConflictError);
+    await expect(
+      service.reject(request.id, { expectedRevision: 99, note: '说明' }),
+    ).rejects.toBeInstanceOf(StageUpdateRequestDecisionConflictError);
+
+    const read = await service.getById(request.id);
+    expect(read?.status).toBe('pending');
+    expect(read?.decision).toBeNull();
+    expect(read?.revision).toBe(1);
+  });
+
+  it('rejects an unknown request id with StageUpdateRequestNotFoundError', async () => {
+    const services = makeServices();
+    const { stage } = await seedStage(services);
+    const service = makeService(services);
+    await createPending(service, stage);
+
+    await expect(
+      service.reject(uuid(), { expectedRevision: 1, note: '说明' }),
+    ).rejects.toBeInstanceOf(StageUpdateRequestNotFoundError);
+  });
+
+  it('rejects non-positive / non-integer expectedRevision as a revision error with no side effects', async () => {
+    const services = makeServices();
+    const { stage } = await seedStage(services);
+    const service = makeService(services);
+    const request = await createPending(service, stage);
+
+    await expect(
+      service.reject(request.id, { expectedRevision: 0, note: '说明' }),
+    ).rejects.toBeInstanceOf(StageUpdateRequestRevisionInvalidError);
+    await expect(
+      service.reject(request.id, { expectedRevision: -1, note: '说明' }),
+    ).rejects.toBeInstanceOf(StageUpdateRequestRevisionInvalidError);
+    await expect(
+      service.reject(request.id, { expectedRevision: 1.5, note: '说明' }),
+    ).rejects.toBeInstanceOf(StageUpdateRequestRevisionInvalidError);
+
+    const read = await service.getById(request.id);
+    expect(read?.status).toBe('pending');
+    expect(read?.decision).toBeNull();
+  });
+
+  it('rejects blank note and enforces the code-point boundary (astral emoji MAX passes, MAX+1 fails)', async () => {
+    const services = makeServices();
+    const { stage } = await seedStage(services);
+    const service = makeService(services);
+    const request = await createPending(service, stage);
+
+    await expect(
+      service.reject(request.id, { expectedRevision: 1, note: '' }),
+    ).rejects.toBeInstanceOf(StageUpdateRequestNoteInvalidError);
+    await expect(
+      service.reject(request.id, { expectedRevision: 1, note: '   ' }),
+    ).rejects.toBeInstanceOf(StageUpdateRequestNoteInvalidError);
+
+    // 恰好上限个 astral emoji 放行（按 code point 计数）。
+    const exact = await service.reject(request.id, {
+      expectedRevision: 1,
+      note: '😀'.repeat(STAGE_UPDATE_NOTE_MAX_LENGTH),
+    });
+    expect(countCodePoints(exact.decision!.note)).toBe(STAGE_UPDATE_NOTE_MAX_LENGTH);
+
+    // 上限 + 1 拒绝（新的 pending 申请，避免撞上已决定冲突）。
+    const second = await createPending(service, stage);
+    await expect(
+      service.reject(second.id, {
+        expectedRevision: 1,
+        note: '😀'.repeat(STAGE_UPDATE_NOTE_MAX_LENGTH + 1),
+      }),
+    ).rejects.toBeInstanceOf(StageUpdateRequestNoteInvalidError);
+    const read = await service.getById(second.id);
+    expect(read?.status).toBe('pending');
+    expect(read?.decision).toBeNull();
+  });
+
+  it('20 concurrent same-revision different-note rejections: exactly one winner, rest are controlled conflicts, final revision 2', async () => {
+    const services = makeServices();
+    const { stage } = await seedStage(services);
+    const service = makeService(services);
+    const request = await createPending(service, stage);
+
+    const results = await Promise.all(
+      Array.from({ length: 20 }, (_, i) =>
+        service
+          .reject(request.id, { expectedRevision: 1, note: `拒绝理由 ${i}` })
+          .catch((err: unknown) => err),
+      ),
+    );
+    const successes = results.filter((r) => !(r instanceof Error));
+    const conflicts = results.filter((r) => r instanceof StageUpdateRequestDecisionConflictError);
+    // 不同 note：恰好一个决定胜出，其余全部为受控冲突。
+    expect(successes.length).toBe(1);
+    expect(conflicts.length).toBe(19);
+
+    const read = await service.getById(request.id);
+    expect(read?.status).toBe('rejected');
+    expect(read?.revision).toBe(2);
+    expect(read?.decision?.note).toBe((successes[0] as StageUpdateRequest).decision?.note);
+    // 决定前后正式 Stage 不变。
+    const after = await readStageSnapshot(services, stage.id);
+    expect(after.status).toBe('not_started');
+    expect(after.version).toBe(1);
+  });
+
+  it('cross-type conflicts: a rejected request cannot be requestChanges’d, a needs_changes request cannot be rejected', async () => {
+    const services = makeServices();
+    const { stage } = await seedStage(services);
+    const service = makeService(services);
+
+    // 先拒绝一个申请：之后任何 requestChanges 都必须 409，绝不覆盖拒绝决定。
+    const rejected = await createPending(service, stage);
+    const first = await service.reject(rejected.id, { expectedRevision: 1, note: '不符合要求' });
+    await expect(
+      service.requestChanges(rejected.id, { expectedRevision: 1, note: '请补充' }),
+    ).rejects.toBeInstanceOf(StageUpdateRequestDecisionConflictError);
+    // 但完全相同类型与内容的 reject 重试仍幂等返回原决定。
+    const retry = await service.reject(rejected.id, { expectedRevision: 1, note: '不符合要求' });
+    expect(retry).toEqual(first);
+
+    // 对称：先要求补充，之后任何 reject 都必须 409，绝不覆盖 needs_changes 决定。
+    const changed = await createPending(service, stage);
+    const second = await service.requestChanges(changed.id, { expectedRevision: 1, note: '请补充' });
+    await expect(
+      service.reject(changed.id, { expectedRevision: 1, note: '不符合要求' }),
+    ).rejects.toBeInstanceOf(StageUpdateRequestDecisionConflictError);
+    const retryChanged = await service.requestChanges(changed.id, {
+      expectedRevision: 1,
+      note: '请补充',
+    });
+    expect(retryChanged).toEqual(second);
+
+    const readRejected = await service.getById(rejected.id);
+    expect(readRejected?.status).toBe('rejected');
+    expect(readRejected?.decision?.type).toBe('rejected');
+    const readChanged = await service.getById(changed.id);
+    expect(readChanged?.status).toBe('needs_changes');
+    expect(readChanged?.decision?.type).toBe('needs_changes');
+  });
+});

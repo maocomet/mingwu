@@ -169,6 +169,7 @@ describe('InMemoryStageUpdateRequestRepository.decideIfPending (decision CAS)', 
     await repo.insertIfAbsent(pending);
 
     const saved = await repo.decideIfPending(pending.id, 1, {
+      type: 'needs_changes',
       note: '请补充细节',
       decidedAt: DECIDED_AT,
       updatedAt: DECIDED_AT,
@@ -213,6 +214,7 @@ describe('InMemoryStageUpdateRequestRepository.decideIfPending (decision CAS)', 
     await repo.insertIfAbsent(pending);
 
     const saved = await repo.decideIfPending(pending.id, 1, {
+      type: 'needs_changes',
       note: '决定说明',
       decidedAt: DECIDED_AT,
       updatedAt: DECIDED_AT,
@@ -243,7 +245,12 @@ describe('InMemoryStageUpdateRequestRepository.decideIfPending (decision CAS)', 
     const repo = new InMemoryStageUpdateRequestRepository();
     const pending = makeStageUpdateRequest({ status: 'pending', revision: 1 });
     await repo.insertIfAbsent(pending);
-    const decision = { note: '第一次决定', decidedAt: DECIDED_AT, updatedAt: DECIDED_AT };
+    const decision = {
+      type: 'needs_changes' as const,
+      note: '第一次决定',
+      decidedAt: DECIDED_AT,
+      updatedAt: DECIDED_AT,
+    };
 
     // 不存在。
     expect(await repo.decideIfPending(uuid(), 1, decision)).toBeNull();
@@ -252,7 +259,7 @@ describe('InMemoryStageUpdateRequestRepository.decideIfPending (decision CAS)', 
     // 已决定后再次决定：不再 pending。
     await repo.decideIfPending(pending.id, 1, decision);
     expect(
-      await repo.decideIfPending(pending.id, 2, { note: '第二次决定', decidedAt: '2026-01-01T11:00:00.000Z', updatedAt: '2026-01-01T11:00:00.000Z' }),
+      await repo.decideIfPending(pending.id, 2, { type: 'needs_changes', note: '第二次决定', decidedAt: '2026-01-01T11:00:00.000Z', updatedAt: '2026-01-01T11:00:00.000Z' }),
     ).toBeNull();
 
     // 原决定从未被覆盖（revision / updatedAt / decision 保持第一次决定）。
@@ -271,6 +278,7 @@ describe('InMemoryStageUpdateRequestRepository.decideIfPending (decision CAS)', 
     const results = await Promise.all(
       Array.from({ length: 20 }, (_, i) =>
         repo.decideIfPending(pending.id, 1, {
+          type: 'needs_changes',
           note: `决定 ${i}`,
           decidedAt: `2026-01-0${i}`,
           updatedAt: `2026-01-0${i}`,
@@ -294,6 +302,7 @@ describe('InMemoryStageUpdateRequestRepository.decideIfPending (decision CAS)', 
     await repo.insertIfAbsent(pending);
 
     const saved = await repo.decideIfPending(pending.id, 1, {
+      type: 'needs_changes',
       note: '请补充细节',
       decidedAt: DECIDED_AT,
       updatedAt: DECIDED_AT,
@@ -312,5 +321,86 @@ describe('InMemoryStageUpdateRequestRepository.decideIfPending (decision CAS)', 
     expect(read?.createdAt).toBe(pending.createdAt);
     expect(read?.revision).toBe(2);
     expect(read?.decision?.note).toBe('请补充细节');
+  });
+
+  it('atomically writes a rejected decision: status rejected, revision +1, core fields unchanged', async () => {
+    const repo = new InMemoryStageUpdateRequestRepository();
+    const pending = makeStageUpdateRequest({ status: 'pending', revision: 1 });
+    await repo.insertIfAbsent(pending);
+
+    const saved = await repo.decideIfPending(pending.id, 1, {
+      type: 'rejected',
+      note: '本次申请被拒绝',
+      decidedAt: DECIDED_AT,
+      updatedAt: DECIDED_AT,
+    });
+    expect(saved).not.toBeNull();
+    expect(saved!.status).toBe('rejected');
+    expect(saved!.revision).toBe(2);
+    expect(saved!.decision).toEqual({
+      type: 'rejected',
+      note: '本次申请被拒绝',
+      decidedAt: DECIDED_AT,
+    });
+    expect(saved!.updatedAt).toBe(DECIDED_AT);
+
+    const read = await repo.findById(pending.id);
+    expect(read).toEqual(saved);
+    // 核心字段与 createdAt 全部来自 current，未被改写。
+    expect(read?.projectId).toBe(pending.projectId);
+    expect(read?.stageId).toBe(pending.stageId);
+    expect(read?.requesterActorId).toBe(pending.requesterActorId);
+    expect(read?.createdAt).toBe(pending.createdAt);
+  });
+
+  it('runtime-rejects a decision type not in the exhaustive whitelist and never persists it', async () => {
+    const repo = new InMemoryStageUpdateRequestRepository();
+    const pending = makeStageUpdateRequest({ status: 'pending', revision: 1 });
+    await repo.insertIfAbsent(pending);
+
+    // 'approved' 不在决定类型白名单内：绕过 TS 类型（接口只收联合类型）注入非法类型，
+    // 仓储必须运行时拒绝（穷尽分支 default → assertNever）且不落账。
+    await expect(
+      repo.decideIfPending(pending.id, 1, {
+        type: 'approved' as never,
+        note: '尝试伪造批准决定',
+        decidedAt: DECIDED_AT,
+        updatedAt: DECIDED_AT,
+      }),
+    ).rejects.toThrow('unsupported stage update request decision type');
+
+    // 申请保持 pending，未写入任何决定。
+    const read = await repo.findById(pending.id);
+    expect(read?.status).toBe('pending');
+    expect(read?.revision).toBe(1);
+    expect(read?.decision).toBeNull();
+    expect(read?.updatedAt).toBe(pending.updatedAt);
+  });
+
+  it('20 concurrent same-revision rejected decisions: exactly one wins and final revision is 2 with status rejected', async () => {
+    const repo = new InMemoryStageUpdateRequestRepository();
+    const pending = makeStageUpdateRequest({ status: 'pending', revision: 1 });
+    await repo.insertIfAbsent(pending);
+
+    const results = await Promise.all(
+      Array.from({ length: 20 }, (_, i) =>
+        repo.decideIfPending(pending.id, 1, {
+          type: 'rejected',
+          note: `拒绝理由 ${i}`,
+          decidedAt: `2026-01-0${i}`,
+          updatedAt: `2026-01-0${i}`,
+        }),
+      ),
+    );
+    const wins = results.filter((r) => r !== null);
+    expect(wins.length).toBe(1);
+    const read = await repo.findById(pending.id);
+    expect(read?.status).toBe('rejected');
+    expect(read?.revision).toBe(2);
+    expect(read?.decision?.note).toBe(wins[0]!.decision!.note);
+    expect(read?.decision?.type).toBe('rejected');
+    // 无论谁胜出，revision 固定 +1，核心字段仍来自当前申请。
+    expect(read?.projectId).toBe(pending.projectId);
+    expect(read?.createdAt).toBe(pending.createdAt);
   });
 });

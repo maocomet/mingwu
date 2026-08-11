@@ -153,7 +153,7 @@ describe('StageUpdateRequest contract schemas', () => {
       expect(PROJECT_STAGE_STATUSES).toHaveLength(7);
       expect(STAGE_UPDATE_REASON_MAX_LENGTH).toBeGreaterThan(0);
       expect(STAGE_UPDATE_NOTE_MAX_LENGTH).toBe(STAGE_UPDATE_REASON_MAX_LENGTH);
-      expect(STAGE_UPDATE_REQUEST_DECISION_TYPES).toEqual(['needs_changes']);
+      expect(STAGE_UPDATE_REQUEST_DECISION_TYPES).toEqual(['needs_changes', 'rejected']);
     });
 
     it('stageUpdateRequestJsonSchema declares all four request statuses', () => {
@@ -168,7 +168,7 @@ describe('StageUpdateRequest contract schemas', () => {
       expect(validate(makeStageUpdateRequest())).toBe(true);
     });
 
-    it('stageUpdateRequestJsonSchema requires decision (nullable) with only needs_changes', () => {
+    it('stageUpdateRequestJsonSchema requires decision (nullable) with only the declared decision types', () => {
       const validate = compile({ ...stageUpdateRequestJsonSchema });
       // decision 必填且可为 null（pending 申请）。
       const base = makeStageUpdateRequest();
@@ -176,13 +176,20 @@ describe('StageUpdateRequest contract schemas', () => {
       expect(validate({ ...missingDecision })).toBe(false);
       expect(validate(makeStageUpdateRequest())).toBe(true);
 
-      // 已决定：type 只允许 STAGE_UPDATE_REQUEST_DECISION_TYPES 声明的类型。
+      // 已决定：type 只允许 STAGE_UPDATE_REQUEST_DECISION_TYPES 声明的类型
+      // （needs_changes / rejected）。
       const decided = makeStageUpdateRequest({
         status: 'needs_changes',
         revision: 2,
         decision: { type: 'needs_changes', note: '请补充细节', decidedAt: '2026-08-11T08:00:00.000Z' },
       });
       expect(validate(decided)).toBe(true);
+      const rejected = makeStageUpdateRequest({
+        status: 'rejected',
+        revision: 2,
+        decision: { type: 'rejected', note: '不符合要求', decidedAt: '2026-08-11T08:00:00.000Z' },
+      });
+      expect(validate(rejected)).toBe(true);
       expect(
         validate({ ...decided, decision: { type: 'approved', note: 'x', decidedAt: 't' } }),
       ).toBe(false);

@@ -1,4 +1,8 @@
-import type { StageUpdateRequest } from '@mingwu/contracts';
+import type {
+  StageUpdateRequest,
+  StageUpdateRequestDecisionType,
+  StageUpdateRequestStatus,
+} from '@mingwu/contracts';
 import { StageUpdateRequestIdempotencyConflictError } from '../../domain/stage-update-request/errors.js';
 import type {
   InsertIfAbsentResult,
@@ -6,6 +10,26 @@ import type {
   StageUpdateRequestRepository,
 } from '../../domain/stage-update-request/repository.js';
 import { sameStageUpdateRequestSemantics } from '../../domain/stage-update-request/semantics.js';
+
+/**
+ * 决定类型 → 申请状态的穷尽白名单。新增决定类型必须在仓储显式声明对应的目标状态，
+ * 否则编译期（default 收窄为 never）或运行时（非法 type 走到 default 抛错）都会
+ * 拒绝落账——调用方无法通过任意 type / status 覆盖已保存申请。
+ */
+function statusForDecision(type: StageUpdateRequestDecisionType): StageUpdateRequestStatus {
+  switch (type) {
+    case 'needs_changes':
+      return 'needs_changes';
+    case 'rejected':
+      return 'rejected';
+    default:
+      return assertNever(type);
+  }
+}
+
+function assertNever(value: never): never {
+  throw new Error('unsupported stage update request decision type');
+}
 
 /**
  * 本批接口开发用的内存仓储。JS 单线程模型下，同步 Map 读写构成单个原子临界区，
@@ -43,10 +67,11 @@ export class InMemoryStageUpdateRequestRepository implements StageUpdateRequestR
    * revision === expectedRevision 才落盘；任一前置不满足返回 null，不写任何数据。
    * 不提供普通 update，已决定申请绝不被覆盖。
    *
-   * 派生规则固定：从已保存的 current 构造新版本，status 固定 needs_changes、
-   * revision 固定 current.revision + 1，只写 decision（type 固定 needs_changes）
-   * 与 updatedAt；原申请核心字段、createdAt 一律来自 current，调用方即使传入
-   * 任意 decision 字段也无法改写它们（接口本身不接收这些字段）。
+   * 派生规则固定：从已保存的 current 构造新版本，目标 status 由 decision.type 经
+   * 穷尽白名单派生（needs_changes → needs_changes，rejected → rejected；非法 type
+   * 抛错不落账）、revision 固定 current.revision + 1，只写 decision 与 updatedAt；
+   * 原申请核心字段、createdAt 一律来自 current，调用方即使传入任意 decision 字段
+   * 也无法改写它们（接口本身不接收这些字段）。
    */
   async decideIfPending(
     id: string,
@@ -59,11 +84,11 @@ export class InMemoryStageUpdateRequestRepository implements StageUpdateRequestR
     }
     const updated: StageUpdateRequest = {
       ...current,
-      status: 'needs_changes',
+      status: statusForDecision(decision.type),
       revision: current.revision + 1,
       updatedAt: decision.updatedAt,
       decision: {
-        type: 'needs_changes',
+        type: decision.type,
         note: decision.note,
         decidedAt: decision.decidedAt,
       },

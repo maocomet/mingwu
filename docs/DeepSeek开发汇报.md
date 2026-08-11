@@ -5374,3 +5374,145 @@ App API 严格输入、服务层 `pending -> needs_changes`、同语义重试、
 本批可以归档并提交推送。批准、拒绝、批准后正式更新 Stage、用户认证、数据库与前端仍留给后续批次。
 
 ---
+
+## 小喵任务 #27 · 用户拒绝关卡更新申请 · 2026-08-11
+
+### 本批目标
+
+实现第二个用户决定入口“拒绝更新申请”。用户只把 pending 申请标记为 `rejected` 并保存拒绝说明；不得修改正式 Stage，也不得覆盖原申请核心字段或已有决定。本批继续沿用 #26 的最小写入仓储边界，先把“不改 Stage 的决定”闭环验收，再把“批准并更新正式 Stage”留给下一批单独处理。
+
+候选完成的计划原文（DS 不打勾）：
+
+- `- [ ] 拒绝更新申请`
+
+### 必须设计与实现
+
+1. 扩展 `StageUpdateRequestDecision`，允许受控的 `rejected` 决定；拒绝决定至少保存固定 `type: 'rejected'`、trim 后的 `note`、服务端 `decidedAt`。既有 `needs_changes` 响应与数据必须兼容，不得被破坏。
+2. 新增 App API：`POST /api/v1/stage-update-requests/:id/reject`。请求体严格只允许 `expectedRevision` 与 `note`；不得接收 status、decision type、revision、时间、决定者 Actor、申请者 Actor、Stage 字段或原申请字段。
+3. 只允许 pending 申请在 expectedRevision 匹配时进入 rejected，成功后 revision 恰好 +1、updatedAt 刷新。拒绝前后正式 Stage 的 status / version / startedAt / completedAt / createdAt / updatedAt 必须完整不变。
+4. 保持 #26 的仓储不可变边界：不得重新引入接收完整 `StageUpdateRequest` 的方法。可以新增专用 `rejectIfPending`，或使用受控的内部决定命令；若使用决定类型联合，仓储必须做运行时白名单 / 穷尽分支，非法 type 不能落账，且 status / revision / 核心字段仍由 current 固定派生。
+5. 稳定重试语义：首次 `expectedRevision=1 + 同规范化 note` 成功后 revision=2；完全相同请求重试返回原决定，不再次推进 revision / updatedAt；不同 note、错误 expectedRevision、已 needs_changes、已 rejected 后不同决定或并发竞争均返回稳定 409，绝不覆盖第一次决定。
+6. note 继续复用受控 Unicode code point 上限与共享校验，不复制漂移的硬编码；空白、astral emoji 上限 / 上限+1必须与 request-changes 一致。
+7. 申请不存在 404；非法 UUID / revision / note / 额外字段 400；决定冲突 409。响应与日志不得回显 note、原 reason、身份、密钥或内部堆栈。
+8. 不新增批准、Stage 更新、MCP 决定工具、用户认证、数据库、AuditLog、列表 UI 或前端。
+
+### 必须测试
+
+- pending → rejected：revision 1→2、决定说明 / 时间正确，原申请核心字段和 createdAt 逐项不变，正式 Stage 六字段快照完全不变。
+- 相同拒绝重试幂等；不同 note / revision 冲突；needs_changes 后拒绝冲突；拒绝后 request-changes 冲突；第一次决定永不覆盖。
+- 20 个同 revision 并发拒绝恰好一个决定胜出，其余为受控冲突或相同语义幂等结果，最终 revision 只能为 2。
+- 仓储层证明最小写入：调用方无法改 projectId / stageId / Actor / expectedStageVersion / proposedStatus / reason / createdAt / status / revision；若使用联合命令，补非法 type 运行时拒绝测试。
+- 严格 App API：未知 id、非法 UUID、0 / 小数 / 字符串 revision、空白 / 超长 note、emoji 边界、伪造决定 / 身份 / Stage / 原申请字段。
+- `request-changes`、`project_submit_stage_update`、MCP 身份权限、Study API 与全量测试全部不回归。
+- 真实 HTTP 冒烟：创建 pending 申请 → App API reject → service 读回 rejected → Stage 字节级等价 → 释放端口。
+
+### 边界与汇报
+
+- App API 仍是第三关单用户原型；正式公网部署写接口前必须接用户认证，本批不得计入“权限系统完成”。
+- 不修改计划复选框，不执行 Git / GitHub / VPS 操作，不触碰 `.claude/` 与 `ui素材mingwu/`。
+- 完成后把检查点追加到本文件末尾，列出决定模型演进、仓储最小写入、CAS / 幂等规则、真实测试数字与风险，然后暂停等待小喵审核，不自行开始“批准更新申请”。
+
+---
+
+## 检查点 #27 · 用户拒绝关卡更新申请（reject 决定入口）· 2026-08-11
+
+### 本批目标
+
+实现第二个用户决定入口“拒绝更新申请”：用户只把 pending 申请标记为 `rejected` 并保存拒绝说明；不修改正式 Stage，不覆盖原申请核心字段或已有决定。本批继续沿用 #26 的最小写入仓储边界，先把“不改 Stage 的决定”闭环验收，再把“批准并更新正式 Stage”留给下一批单独处理。
+
+候选完成的计划原文（DS 不打勾）：
+
+- `- [ ] 拒绝更新申请`
+
+### 实际完成内容
+
+1. **契约扩展**（`packages/contracts/src/stage-update-request.ts`）：`STAGE_UPDATE_REQUEST_DECISION_TYPES` 扩展为 `['needs_changes', 'rejected']`；`StageUpdateRequestDecision` 结构不变，type 联合随之增长；`stageUpdateRequestJsonSchema` 的 decision.type 枚举与文件注释同步声明两种已实现决定。既有 `needs_changes` 响应与数据完全兼容。
+2. **决定命令联合 + 仓储穷尽派生**（`repository.ts` / `in-memory-stage-update-request-repository.ts`）：`StageUpdateRequestDecisionWrite` 增加 `type` 字段；`decideIfPending` 从已保存的 `current` 派生目标 `status`——`statusForDecision` 对 `needs_changes → needs_changes`、`rejected → rejected` 做穷尽 switch，default 收窄为 `assertNever` 运行时拒绝非法 type（`type: 'approved'` 注入测试证明不落账）。revision 固定 `current.revision + 1`，只写 `decision` 与 `updatedAt`，核心字段与 createdAt 一律来自 current（#26 边界保持）。
+3. **应用层共享决定流程**（`stage-update-request-service.ts`）：`requestChanges` 与新增 `reject` 收敛到私有 `applyDecision(id, input, type)`——revision 非正整数 → 400、note trim / code point 上限 → 400、不存在 → 404、已决定幂等判断增加 `existing.decision.type === type`（完全相同重试返回原决定，其余含跨类型 requestChanges / reject 互换 → 409）、pending 下 expectedRevision 必须等于当前 revision → 409、CAS 失败 → 409。只把 `{ type, note, decidedAt, updatedAt }` 最小决定命令交给仓储。
+4. **App API**（`api/routes/stage-update-requests.ts`）：新增 `POST /api/v1/stage-update-requests/:id/reject`，params / body / response 复用 request-changes 的严格白名单契约（`stageUpdateRequestParamsSchema` + `requestChangesBodySchema` + `stageUpdateRequestJsonSchema`），实际执行的决定类型由路由固定的服务方法决定，请求体无法指定。全局错误处理器已映射 404 / 409 / 400 受控错误码，未知异常日志只记录 `errType` 分类。
+5. **测试**（4 个测试文件）：
+   - 仓储（12 → 15）：reject 派生（status=rejected、revision +1、核心字段不变）、非法 type 运行时拒绝（`'approved' as never` 注入 → throw 且不落账）、20 同 revision 并发 reject 恰一胜出且最终 revision=2。
+   - 决定服务（9 → 18）：新增 reject 全量用例（pending→rejected、幂等重试、不同 note / revision 冲突、陈旧版本冲突、未知 id、非法 revision、空白 / emoji 边界、20 并发恰一胜出其余受控冲突、跨类型冲突：rejected 后 requestChanges 与 needs_changes 后 reject 均 409 且首决定不被覆盖）。
+   - App API（9 → 19）：reject 路由成功 / 幂等 / 404 / 409 / 跨类型 409 / 受保护与额外字段 400 / 非 UUID 400 / 超长 note 400 不回显 / 未知异常脱敏 500；新增 reject 真实 HTTP 冒烟（fetch 真实 socket，Stage 字节级等价，端口释放）。
+   - 契约（12 不变）：共享常量断言更新为 `['needs_changes', 'rejected']`；decision 类型测试补充 rejected 通过用例，`type: 'approved'` 仍拒绝。
+
+### 新增、修改和删除的文件清单
+
+- 新增：无（reject 路由复用既有契约与服务方法，未新建文件）。
+- 修改：
+  - `packages/contracts/src/stage-update-request.ts`（决定类型扩展为 needs_changes | rejected，schema 枚举与注释同步）
+  - `apps/server/src/domain/stage-update-request/repository.ts`（`StageUpdateRequestDecisionWrite` 增加 `type`；派生规则 / PostgreSQL 迁移注释更新）
+  - `apps/server/src/infrastructure/repositories/in-memory-stage-update-request-repository.ts`（`statusForDecision` + `assertNever` 穷尽派生；`decideIfPending` 按 type 落账）
+  - `apps/server/src/application/stage-update-request/stage-update-request-service.ts`（共享 `applyDecision`，新增 `reject`）
+  - `apps/server/src/api/routes/stage-update-requests.ts`（新增 reject 路由）
+  - `apps/server/test/stage-update-request-repository.test.ts`（决定用例补 `type` + 新增 3 个边界用例）
+  - `apps/server/test/stage-update-request-decision-service.test.ts`（新增 reject describe 9 个用例）
+  - `apps/server/test/stage-update-request-request-changes-api.test.ts`（新增 reject describe + reject 真实 HTTP 冒烟）
+  - `apps/server/test/stage-update-request-contract.test.ts`（共享常量 / decision 类型断言更新）
+- 删除：无。
+- 未触碰：`.claude/`、`ui素材mingwu/`、计划复选框、Git / GitHub / VPS、MCP 工具 / 授权策略、Study API、其余工作区改动。
+
+### 关键设计决定及其依据
+
+- **决定类型进接口而非进数据**：`type` 是受控决定命令的一部分，而不是可任意写入的字段。调用方只能通过服务方法固定类型（requestChanges → needs_changes，reject → rejected），请求体 schema 严格白名单拒绝 `type`；仓储对联合类型做穷尽运行时白名单，非法类型（如 approved）在落账前抛错。这样“拒绝”不会打开“批准”的旁路。
+- **不新增 rejectIfPending，复用单一 decideIfPending + type 派生**：两个决定入口共享同一 CAS、幂等与派生规则，仓储只有一条决定路径，跨类型互斥由服务层幂等判断（`decision.type === type`）统一保证——rejected 后 requestChanges、needs_changes 后 reject 都走同一个 409 分支，避免为每种决定复制一套冲突逻辑。
+- **保持 #26 不可变边界**：仓储仍只接收最小决定命令，从 current 固定派生 status / revision，核心字段与 createdAt 没有可覆盖入口；与 #25 复现的“整份对象覆盖”路径完全隔离。
+- **稳定重试语义不变**：已决定后仅“同 type + 同规范化 note + expectedRevision == revision - 1”幂等返回，其余稳定 409；pending 下 expectedRevision 不匹配或并发 CAS 落败同样 409，绝不覆盖第一次决定。
+- **错误 / 日志脱敏**：404 / 400 / 409 / 500 响应与未知异常日志（只记 `errType`）均不回显 note、原 reason、身份、密钥或内部堆栈，与 #25 一致。
+
+### 执行过的测试或检查、命令与真实结果
+
+- `npm run typecheck`（apps/contracts + apps/server）：通过。
+- 本批专项：`npx vitest run` 覆盖 4 个文件 → 64 个测试全部通过（repository 15 / decision-service 18 / request-changes-api 19 / contract 12；此前 request-changes 专项 62，本批 +22，其中仓储 +3、服务 +9、API +10）。
+- 全量测试：`npm run test` → 43 个文件、**745/745 通过**（此前 723，本批 +22，无回归；`request-changes`、`project_submit_stage_update`、MCP 身份权限、Study API 均通过）。
+- 真实 HTTP 冒烟（request-changes-api 内含 request-changes 与 reject 两个真实 socket 用例）：通过，结束后端口正常释放。
+- `git diff --check`：通过（仅 Windows LF→CRLF 换行提示，无空白错误）。
+- NUL / BOM 扫描（本批修改涉及的 9 个文件逐文件二进制检查）：0 个 NUL 字节、无 BOM。
+
+### 未完成内容、已知问题和风险
+
+- 批准并更新正式 Stage（approved 决定 + 按申请语义乐观并发更新 Stage）仍留给下一批，本批不做；rejected / needs_changes 只停留在申请自身。
+- MCP 决定工具、用户认证、数据库 / PostgreSQL、AuditLog、列表 UI 与前端均不在本批范围。
+- App API 仍是第三关单用户原型：正式公网部署写接口前必须接用户认证，本批不得计入“权限系统完成”。
+- 内存原型并发原子性依赖 JS 单线程临界区；数据库阶段 `decideIfPending` 以条件 UPDATE 行数判断或事务 + 行锁实现，已在仓储接口注释声明。
+
+### 是否涉及数据库、身份权限、密钥、外部服务或破坏性变化
+
+- 数据库 / Migration：否（仍为内存仓储；仅在注释声明 PostgreSQL 迁移要求）。
+- 身份认证 / 权限：是——本批属于用户决定入口（决定模型与并发语义）与 CLAUDE.md 强制检查点对象；未改动 MCP 认证中间件、`canSubmitStageUpdate` 授权策略或已验收的 `study_append_report`。
+- 密钥 / 凭据：否；测试仅用假 token 与虚构连接串。
+- 外部服务 / VPS / GitHub：否。
+- 破坏性变化：否；无删除文件、无架构改道；`StageUpdateRequestDecisionWrite` 增加必填 `type` 为内部接口变化，唯一调用方（服务层）已同步更新，契约响应 schema 结构不变。
+
+### 建议下一批任务
+
+待 小喵 复验通过后，下一批实现“批准更新申请”：approved 决定沿用本批“仓储从 current 派生、最小写入接口”的不可变边界与 revision / updatedAt 并发模型，并在批准时按申请语义更新正式 Stage（携带 expectedStageVersion 乐观并发、受控冲突，不覆盖已决定的申请）；随后再考虑用户认证与批准 / 拒绝列表读取接口。
+
+### 等待小喵审核
+
+---
+
+## 小喵审核结果 #27 · 通过 · 2026-08-11
+
+### 验收结论
+
+通过。`POST /api/v1/stage-update-requests/:id/reject` 只允许 pending 申请进入 rejected，决定类型由路由与服务端固定，请求体只能提交 expectedRevision + note；相同拒绝可稳定重试，错误 revision、不同 note、跨类型决定和并发竞争不会覆盖第一次决定。拒绝前后正式 Stage 完全不变，原申请核心字段与 createdAt 继续由仓储 current 固定继承。
+
+仓储最小写入边界保持有效：决定 type 只允许 needs_changes / rejected，并通过运行时穷尽白名单映射目标 status；非法 approved 类型会在落账前抛出，申请仍保持 pending。小喵另行校正了服务类顶部一处过时说明，使文字与新增 reject 方法一致，不改变运行逻辑。
+
+### 小喵独立复验结果
+
+- 根目录 `npm run typecheck`：通过。
+- 全量测试：43 个文件，**745/745 通过**。
+- 独立恶意字段复现：拒绝命令夹带伪造 projectId / reason / revision / status 后，读回仍保留原核心字段并固定为 rejected、revision=2。
+- 独立非法类型复现：`type=approved` 被运行时白名单拒绝，仓储记录保持 pending、revision=1、decision=null。
+- 真实 request-changes / reject HTTP 冒烟随全量测试通过，端口正常释放。
+- NUL 扫描：0；`git diff --check` 通过，仅 Windows LF→CRLF 提示。
+
+### 计划更新
+
+- `[x] 拒绝更新申请`
+
+本批可以归档并提交推送。“批准更新申请”与批准时正式 Stage 的原子更新留给下一批单独设计和审核。
+
+---

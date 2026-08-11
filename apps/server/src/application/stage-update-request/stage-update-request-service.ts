@@ -2,6 +2,7 @@ import type {
   AuthenticatedAiActorContext,
   RequestChangesInput,
   StageUpdateRequest,
+  StageUpdateRequestDecisionType,
   SubmitStageUpdateRequestInput,
 } from '@mingwu/contracts';
 import {
@@ -36,10 +37,10 @@ import {
 const UUID_REGEX = new RegExp(UUID_PATTERN);
 
 /**
- * StageUpdateRequest 申请服务。提供“提交申请 + 用户要求补充（needs_changes 决定）
- * + 只读查询”，不提供修改、覆盖、删除、批准或拒绝申请的方法。身份边界：
+ * StageUpdateRequest 申请服务。提供“提交申请 + 用户要求补充 / 拒绝决定 + 只读查询”，
+ * 不提供任意修改、覆盖、删除或批准申请的方法。身份边界：
  * - 公开 input 只包含 id / stageId / expectedStageVersion / proposedStatus / reason
- *   （提交）与 expectedRevision / note（要求补充）；
+ *   （提交）与 expectedRevision / note（要求补充 / 拒绝）；
  * - requesterActorId 只从 AuthenticatedAiActorContext 读取，不新增可由客户端指定的
  *   身份字段；
  * - projectId 由服务端读取真实 Stage 后确定，不信任客户端提交的 projectId；
@@ -51,8 +52,8 @@ const UUID_REGEX = new RegExp(UUID_PATTERN);
  * - 仅当申请 id 尚不存在时，才读取真实 Stage 并校验 expectedStageVersion 与当前
  *   Stage.version 一致：不一致返回稳定冲突（复用 StageVersionConflictError），不
  *   创建申请，防止基于陈旧状态的申请；
- * - requestChanges 只修改申请自身的 status / revision / updatedAt / decision，
- *   绝不读取或调用 Stage 更新能力。
+ * - requestChanges / reject 只修改申请自身的 status / revision / updatedAt /
+ *   decision，绝不读取或调用 Stage 更新能力。
  *
  * 身份防线：
  * - 受信上下文必须在写入前通过防守性校验：actorId 是合法 UUID、actorCode 非空且
@@ -72,8 +73,9 @@ const UUID_REGEX = new RegExp(UUID_PATTERN);
  * - 跨表 TOCTOU：PostgreSQL 阶段“校验 Stage 当前版本 + 插入申请”须在同一事务内
  *   完成并对 Stage 加锁 / 条件验证，本内存原型由 JS 单线程原子性覆盖。
  *
- * 决定（requestChanges）并发与幂等：
- * - 本批一次决定即离开 pending 且不可再次决定；成功决定 revision +1 到 2；
+ * 决定（requestChanges / reject）并发与幂等：
+ * - 本批一次决定（要求补充或拒绝）即离开 pending 且不可再次决定；成功决定
+ *   revision +1 到 2；
  * - 已决定后“完全相同”重试（同规范化 note 且 expectedRevision 等于决定所依据的
  *   版本 revision-1）幂等返回，不再次推进 revision / updatedAt；
  * - 已决定后不同 note / 错误 expectedRevision，或 pending 下 expectedRevision 与
@@ -176,18 +178,41 @@ export class StageUpdateRequestService {
 
   /**
    * 用户“要求 AI 补充说明”：把 pending 申请标记为 needs_changes 并保存决定说明。
+   * 校验、稳定幂等与冲突语义见 {@link StageUpdateRequestService.applyDecision}。
+   */
+  async requestChanges(id: string, input: RequestChangesInput): Promise<StageUpdateRequest> {
+    return this.applyDecision(id, input, 'needs_changes');
+  }
+
+  /**
+   * 用户“拒绝更新申请”：把 pending 申请标记为 rejected 并保存拒绝说明。
+   * 校验、稳定幂等与冲突语义见 {@link StageUpdateRequestService.applyDecision}。
+   */
+  async reject(id: string, input: RequestChangesInput): Promise<StageUpdateRequest> {
+    return this.applyDecision(id, input, 'rejected');
+  }
+
+  /**
+   * 共享决定流程（要求补充 / 拒绝）：校验输入，pending 申请经仓储原子 CAS 离开
+   * pending 并写入一次决定。
    * - expectedRevision 非正整数 → StageUpdateRequestRevisionInvalidError（400）；
    * - note trim 后为空或按 code point 计数超上限 → StageUpdateRequestNoteInvalidError（400）；
    * - 申请不存在 → StageUpdateRequestNotFoundError（404）；
-   * - 已决定：只有“完全相同”的重试幂等返回原申请（同规范化 note 且 expectedRevision
-   *   等于决定所依据的版本 revision-1），不再次推进 revision / updatedAt；其余
-   *   （不同 note / 错误 expectedRevision）→ StageUpdateRequestDecisionConflictError（409），
-   *   绝不覆盖第一次决定；
+   * - 已决定：只有“完全相同”的重试幂等返回原申请（decision.type 匹配 + 同规范化
+   *   note + expectedRevision 等于决定所依据的版本 revision-1），不再次推进 revision /
+   *   updatedAt；其余（不同 note / 错误 expectedRevision / 已 needs_changes 后
+   *   reject / 已 rejected 后 requestChanges）→ StageUpdateRequestDecisionConflictError
+   *   （409），绝不覆盖第一次决定；
    * - 仍 pending：expectedRevision 必须等于当前 revision，否则 409；通过后走仓储
    *   原子 decideIfPending（CAS），并发决定竞争落败 → 409；
-   * - 只修改申请自身的 status / revision / updatedAt / decision，不读取 / 修改正式 Stage。
+   * - 只把最小决定命令（type + 规范化 note + 服务端采样时间）交给仓储，目标 status /
+   *   revision +1 与核心字段派生全部由仓储从已保存的 current 完成；不读取 / 修改正式 Stage。
    */
-  async requestChanges(id: string, input: RequestChangesInput): Promise<StageUpdateRequest> {
+  private async applyDecision(
+    id: string,
+    input: RequestChangesInput,
+    type: StageUpdateRequestDecisionType,
+  ): Promise<StageUpdateRequest> {
     if (!Number.isInteger(input.expectedRevision) || input.expectedRevision < 1) {
       throw new StageUpdateRequestRevisionInvalidError();
     }
@@ -205,6 +230,7 @@ export class StageUpdateRequestService {
     if (existing.status !== 'pending') {
       if (
         existing.decision &&
+        existing.decision.type === type &&
         existing.decision.note === note &&
         input.expectedRevision === existing.revision - 1
       ) {
@@ -217,11 +243,9 @@ export class StageUpdateRequestService {
     if (input.expectedRevision !== existing.revision) {
       throw new StageUpdateRequestDecisionConflictError(id);
     }
-    // 只把本次允许写入的最小字段交给仓储（规范化 note + 服务端采样时间）；
-    // status='needs_changes'、revision=current.revision+1 与核心字段派生全部由
-    // 仓储从已保存的 current 完成，服务层不构造可覆盖原申请的新对象。
     const now = this.now();
     const saved = await this.repository.decideIfPending(id, input.expectedRevision, {
+      type,
       note,
       decidedAt: now,
       updatedAt: now,

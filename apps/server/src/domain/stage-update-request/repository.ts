@@ -1,4 +1,4 @@
-import type { StageUpdateRequest } from '@mingwu/contracts';
+import type { StageUpdateRequest, StageUpdateRequestDecisionType } from '@mingwu/contracts';
 
 export interface InsertIfAbsentResult {
   request: StageUpdateRequest;
@@ -7,13 +7,18 @@ export interface InsertIfAbsentResult {
 }
 
 /**
- * 决定写入的最小字段。仓储只接收“本次允许写入的内容”——本批为服务层校验后的
- * 规范化 note 与两个服务端采样的时间戳——绝不让调用方提交一整份申请对象。
+ * 决定写入的最小字段（受控内部决定命令）。仓储只接收“本次允许写入的内容”——
+ * 决定类型、服务层校验后的规范化 note 与两个服务端采样的时间戳——绝不让调用方
+ * 提交一整份申请对象或目标 status / 新 revision。
  * 原申请核心字段（id / projectId / stageId / requesterActorId /
- * expectedStageVersion / proposedStatus / reason / createdAt）、目标 status 与
- * 新 revision 一律由仓储从已保存的 current 派生，调用方无法改写。
+ * expectedStageVersion / proposedStatus / reason / createdAt）一律由仓储从已保存
+ * 的 current 派生；目标 status 由仓储按决定类型穷尽映射固定派生（needs_changes →
+ * needs_changes，rejected → rejected），revision 固定 current.revision + 1。
+ * 仓储对决定类型做运行时白名单：任何未在穷尽分支声明的类型都不得落账。
  */
 export interface StageUpdateRequestDecisionWrite {
+  /** 本次决定的类型；仓储按它派生目标 status（穷尽白名单，非法类型拒绝落账）。 */
+  type: StageUpdateRequestDecisionType;
   /** 去除首尾空白后的决定说明（服务层已校验非空且按 code point 计数 ≤ 上限）。 */
   note: string;
   /** 服务端采样的决定时间。 */
@@ -48,17 +53,18 @@ export interface StageUpdateRequestRepository {
   /**
    * 原子决定（CAS）：仅当 request 存在、当前 status 为 pending 且 revision 等于
    * expectedRevision 时，从已保存的 current 派生新版本并保存；否则返回 null
-   * （不写入任何数据）。派生规则固定：status = 'needs_changes'、
-   * revision = current.revision + 1，只写 decision（type 固定 needs_changes）与
-   * updatedAt；id / projectId / stageId / requesterActorId / expectedStageVersion /
-   * proposedStatus / reason / createdAt 全部取自 current，调用方无法改写。
-   * 不提供普通任意 update，杜绝覆盖已决定申请。返回的新申请使用深拷贝。
+   * （不写入任何数据）。派生规则固定：目标 status 由 decision.type 经穷尽白名单
+   * 映射（needs_changes → needs_changes，rejected → rejected），revision 固定
+   * current.revision + 1，只写 decision 与 updatedAt；id / projectId / stageId /
+   * requesterActorId / expectedStageVersion / proposedStatus / reason / createdAt
+   * 全部取自 current，调用方无法改写。决定类型未在穷尽分支声明时运行时拒绝，绝不
+   * 落账。不提供普通任意 update，杜绝覆盖已决定申请。返回的新申请使用深拷贝。
    *
-   * PostgreSQL 阶段（第六关）：`UPDATE stage_update_requests SET status =
-   * 'needs_changes', revision = revision + 1, updated_at = ?, decision = ? WHERE
-   * id = ? AND status = 'pending' AND revision = ?` 的行数判断（或 `SELECT ...
-   * FOR UPDATE` 后条件写入）保证 CAS 原子；条件 UPDATE 只 SET 决定所需列，绝不能
-   * 接受或覆盖原申请核心列。两个操作在同一事务内完成。
+   * PostgreSQL 阶段（第六关）：`UPDATE stage_update_requests SET status = ?,
+   * revision = revision + 1, updated_at = ?, decision = ? WHERE id = ? AND
+   * status = 'pending' AND revision = ?` 的行数判断（或 `SELECT ... FOR UPDATE`
+   * 后条件写入）保证 CAS 原子；条件 UPDATE 只 SET 决定所需列，绝不能接受或覆盖
+   * 原申请核心列。两个操作在同一事务内完成。
    */
   decideIfPending(
     id: string,
