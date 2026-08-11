@@ -49,7 +49,9 @@ import {
   StageUpdateRequestDecisionConflictError,
   StageUpdateRequestNoteInvalidError,
   StageUpdateRequestNotFoundError,
+  StageUpdateRequestProposedStatusInvalidError,
   StageUpdateRequestRevisionInvalidError,
+  StageUpdateRequestStageOwnershipConflictError,
 } from './domain/stage-update-request/errors.js';
 import {
   StudySessionHistoryCursorInvalidError,
@@ -359,8 +361,9 @@ export function buildApp(deps: AppDeps): FastifyInstance {
       });
     }
     // StageUpdateRequest 用户决定入口：404 申请不存在；409 决定冲突（非 pending /
-    // revision 不匹配 / 已决定后语义不同，绝不覆盖）；400 非法 revision 与 note。
-    // 消息不回显 note、原申请 reason、身份或内部堆栈。
+    // revision 不匹配 / 已决定后语义不同 / 批准时 Stage 版本 / 归属 / 状态非法，
+    // 绝不覆盖）；400 非法 revision 与 note。消息不回显 note、原申请 reason、身份
+    // 或内部堆栈。批准路径的 Stage 版本冲突复用 stage_version_conflict（409）。
     if (error instanceof StageUpdateRequestNotFoundError) {
       return reply.status(404).send({ error: 'stage_update_request_not_found', message: error.message });
     }
@@ -379,6 +382,21 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     if (error instanceof StageUpdateRequestNoteInvalidError) {
       return reply.status(400).send({
         error: 'stage_update_request_note_invalid',
+        message: error.message,
+      });
+    }
+    // 批准更新申请特有冲突（409）：申请 proposedStatus 非法（禁止伪造状态落账）、
+    // 申请记录的 Stage 归属与真实 Stage 不一致（脏数据或 Stage 已被替换）。任何一条
+    // 不满足都整体拒绝，申请与 Stage 两侧都不写入；消息不回显申请内容或 Stage 值。
+    if (error instanceof StageUpdateRequestProposedStatusInvalidError) {
+      return reply.status(409).send({
+        error: 'stage_update_request_proposed_status_invalid',
+        message: error.message,
+      });
+    }
+    if (error instanceof StageUpdateRequestStageOwnershipConflictError) {
+      return reply.status(409).send({
+        error: 'stage_update_request_stage_ownership_conflict',
         message: error.message,
       });
     }

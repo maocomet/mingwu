@@ -153,7 +153,11 @@ describe('StageUpdateRequest contract schemas', () => {
       expect(PROJECT_STAGE_STATUSES).toHaveLength(7);
       expect(STAGE_UPDATE_REASON_MAX_LENGTH).toBeGreaterThan(0);
       expect(STAGE_UPDATE_NOTE_MAX_LENGTH).toBe(STAGE_UPDATE_REASON_MAX_LENGTH);
-      expect(STAGE_UPDATE_REQUEST_DECISION_TYPES).toEqual(['needs_changes', 'rejected']);
+      expect(STAGE_UPDATE_REQUEST_DECISION_TYPES).toEqual([
+        'needs_changes',
+        'rejected',
+        'approved',
+      ]);
     });
 
     it('stageUpdateRequestJsonSchema declares all four request statuses', () => {
@@ -177,7 +181,7 @@ describe('StageUpdateRequest contract schemas', () => {
       expect(validate(makeStageUpdateRequest())).toBe(true);
 
       // 已决定：type 只允许 STAGE_UPDATE_REQUEST_DECISION_TYPES 声明的类型
-      // （needs_changes / rejected）。
+      // （needs_changes / rejected / approved）。
       const decided = makeStageUpdateRequest({
         status: 'needs_changes',
         revision: 2,
@@ -190,8 +194,14 @@ describe('StageUpdateRequest contract schemas', () => {
         decision: { type: 'rejected', note: '不符合要求', decidedAt: '2026-08-11T08:00:00.000Z' },
       });
       expect(validate(rejected)).toBe(true);
+      const approved = makeStageUpdateRequest({
+        status: 'approved',
+        revision: 2,
+        decision: { type: 'approved', note: '同意，进入下一阶段', decidedAt: '2026-08-11T08:00:00.000Z' },
+      });
+      expect(validate(approved)).toBe(true);
       expect(
-        validate({ ...decided, decision: { type: 'approved', note: 'x', decidedAt: 't' } }),
+        validate({ ...decided, decision: { type: 'archived', note: 'x', decidedAt: 't' } }),
       ).toBe(false);
       // decision 对象必须完整，缺 decidedAt / 带额外键均拒绝。
       expect(

@@ -50,6 +50,7 @@ async function seedStage(services: Services): Promise<{ projectId: string; stage
 function makeService(services: Services) {
   return new StageUpdateRequestService(
     services.stageUpdateRequestRepository,
+    services.stageUpdateRequestApprovalRepository,
     services.stageRepository,
     () => FIXED_NOW,
   );

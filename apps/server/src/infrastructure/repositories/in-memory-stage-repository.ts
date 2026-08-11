@@ -4,14 +4,25 @@ import type {
   StageRepository,
 } from '../../domain/stage/repository.js';
 import { StagePositionConflictError } from '../../domain/stage/errors.js';
+import {
+  createInMemoryStore,
+  type InMemoryStore,
+} from '../stores/in-memory-store.js';
 
 /**
  * 第三关接口开发用的内存仓储。并发原子性与 position 唯一性由 Map 的同步读写保证
  * （方法体内在插入前没有 await，检查与写入在同一同步块内完成）。
+ * 默认自建独立 store 便于仓储单元测试；真实装配（makeServices / index.ts）必须
+ * 传入与其他聚合共享的同一 InMemoryStore，保证 Stage 普通写入与“批准更新申请”
+ * 的原子路径共享同一底层状态，不产生双写数据源。
  * 第六关替换为 PostgreSQL 实现时依赖 id 唯一约束 + `UNIQUE (project_id, position)`。
  */
 export class InMemoryStageRepository implements StageRepository {
-  private readonly stages = new Map<string, ProjectStage>();
+  private readonly stages: Map<string, ProjectStage>;
+
+  constructor(private readonly store: InMemoryStore = createInMemoryStore()) {
+    this.stages = this.store.stages;
+  }
 
   async findById(id: string): Promise<ProjectStage | null> {
     const stage = this.stages.get(id);

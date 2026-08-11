@@ -1,5 +1,15 @@
 import type { StageUpdateRequest, StageUpdateRequestDecisionType } from '@mingwu/contracts';
 
+/**
+ * request-changes / reject 路径可用的决定类型：排除 approved（批准走独立原子
+ * 批准仓储操作，不在 decideIfPending 白名单内，避免批准与普通决定共用入口造成
+ * “只有决定没有 Stage 更新”或反之的半完成状态）。
+ */
+export type StageUpdateRequestRejectLikeDecisionType = Exclude<
+  StageUpdateRequestDecisionType,
+  'approved'
+>;
+
 export interface InsertIfAbsentResult {
   request: StageUpdateRequest;
   /** 本次是否真正插入；false 表示幂等命中已有申请。 */
@@ -14,11 +24,14 @@ export interface InsertIfAbsentResult {
  * expectedStageVersion / proposedStatus / reason / createdAt）一律由仓储从已保存
  * 的 current 派生；目标 status 由仓储按决定类型穷尽映射固定派生（needs_changes →
  * needs_changes，rejected → rejected），revision 固定 current.revision + 1。
- * 仓储对决定类型做运行时白名单：任何未在穷尽分支声明的类型都不得落账。
+ * 仓储对决定类型做运行时白名单：任何未在穷尽分支声明的类型都不得落账。type 已
+ * 排除 approved——批准更新申请必须走独立的原子批准仓储操作（同时更新申请与正式
+ * Stage，两处写入在同一临界区 / 同一事务内提交），不得经 decideIfPending 只更新
+ * 申请一侧。
  */
 export interface StageUpdateRequestDecisionWrite {
-  /** 本次决定的类型；仓储按它派生目标 status（穷尽白名单，非法类型拒绝落账）。 */
-  type: StageUpdateRequestDecisionType;
+  /** 本次决定的类型（needs_changes | rejected）；仓储按它派生目标 status。 */
+  type: StageUpdateRequestRejectLikeDecisionType;
   /** 去除首尾空白后的决定说明（服务层已校验非空且按 code point 计数 ≤ 上限）。 */
   note: string;
   /** 服务端采样的决定时间。 */

@@ -40,6 +40,7 @@ async function seedStage(services: Services): Promise<{ projectId: string; stage
 function makeService(services: Services) {
   return new StageUpdateRequestService(
     services.stageUpdateRequestRepository,
+    services.stageUpdateRequestApprovalRepository,
     services.stageRepository,
     () => FIXED_NOW,
   );
@@ -87,6 +88,7 @@ describe('StageUpdateRequestService.requestChanges', () => {
     const { projectId, stage } = await seedStage(services);
     const service = new StageUpdateRequestService(
       services.stageUpdateRequestRepository,
+      services.stageUpdateRequestApprovalRepository,
       services.stageRepository,
       makeAdvancingClock(FIXED_NOW),
     );
@@ -334,6 +336,7 @@ describe('StageUpdateRequestService.reject', () => {
     const { projectId, stage } = await seedStage(services);
     const service = new StageUpdateRequestService(
       services.stageUpdateRequestRepository,
+      services.stageUpdateRequestApprovalRepository,
       services.stageRepository,
       makeAdvancingClock(FIXED_NOW),
     );

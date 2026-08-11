@@ -115,3 +115,15 @@ export class StageUpdateRequestDecisionConflictError extends Error {
     this.name = 'StageUpdateRequestDecisionConflictError';
   }
 }
+
+/**
+ * 批准时的关卡归属冲突（409）：申请记录的 stageId / projectId 与真实 Stage 不一致
+ * （脏数据或申请所依据的 Stage 已被替换）。批准必须同时更新申请与正式 Stage，归属
+ * 不一致时整体拒绝，两侧都不写入；消息不回显申请内容或 Stage 值。
+ */
+export class StageUpdateRequestStageOwnershipConflictError extends Error {
+  constructor(readonly requestId: string) {
+    super(`Stage update request ${requestId} stage ownership conflict`);
+    this.name = 'StageUpdateRequestStageOwnershipConflictError';
+  }
+}

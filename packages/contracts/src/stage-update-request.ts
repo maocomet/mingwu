@@ -3,9 +3,10 @@
  *
  * 本批实现“AI 只能申请、不能直接修改正式主进度”的第一段闭环：AI 通过 MCP 以
  * 服务端认证身份提交申请，系统只新增一条待处理申请，绝不直接修改 ProjectStage。
- * 已实现的用户决定入口为“要求 AI 补充说明”与“拒绝更新申请”：用户只把 pending
- * 申请标记为 needs_changes / rejected 并保存决定说明，不得批准申请、不得修改正式
- * Stage。批准与批准后更新正式 Stage 留给后续用户接口批次。
+ * 已实现的用户决定入口为“要求 AI 补充说明”、“拒绝更新申请”与“批准更新申请”：
+ * 用户只把 pending 申请标记为 needs_changes / rejected / approved 并保存决定说明；
+ * 只有 approved 才按申请语义（proposedStatus + expectedStageVersion）原子更新正式
+ * Stage，needs_changes / rejected 不触碰 Stage。
  *
  * 字段信任边界：
  * - projectId / stageId：由服务端读取真实 Stage 后确定，不信任客户端提交的 projectId；
@@ -16,14 +17,14 @@
  * - status / revision / decision / createdAt / updatedAt：由服务端写入，客户端
  *   不得提交或伪造；
  * - decision：创建时 null；决定成功后写入固定 { type, note, decidedAt }，
- *   type ∈ needs_changes | rejected，note 为 trim 后的决定说明，decidedAt 由
- *   服务端采样；决定者 Actor 由未来用户认证批次提供，本批不接收。
+ *   type ∈ needs_changes | rejected | approved，note 为 trim 后的决定说明，
+ *   decidedAt 由服务端采样；决定者 Actor 由未来用户认证批次提供，本批不接收。
  */
 
 import { UUID_PATTERN } from './project.js';
 import { PROJECT_STAGE_STATUSES, type ProjectStageStatus } from './stage.js';
 
-/** 申请处理状态：本批创建只产生 pending；用户“要求补充”写入 needs_changes，“拒绝”写入 rejected。 */
+/** 申请处理状态：本批创建只产生 pending；用户决定写入 needs_changes / rejected / approved。 */
 export const STAGE_UPDATE_REQUEST_STATUSES = [
   'pending',
   'approved',
@@ -44,13 +45,14 @@ export const STAGE_UPDATE_REASON_MAX_LENGTH = 2000;
  */
 export const STAGE_UPDATE_NOTE_MAX_LENGTH = 2000;
 
-/** 已实现的用户决定类型：要求补充（needs_changes）与拒绝（rejected）。 */
-export const STAGE_UPDATE_REQUEST_DECISION_TYPES = ['needs_changes', 'rejected'] as const;
+/** 已实现的用户决定类型：要求补充（needs_changes）、拒绝（rejected）与批准（approved）。 */
+export const STAGE_UPDATE_REQUEST_DECISION_TYPES = ['needs_changes', 'rejected', 'approved'] as const;
 export type StageUpdateRequestDecisionType = (typeof STAGE_UPDATE_REQUEST_DECISION_TYPES)[number];
 
 /**
- * 用户决定记录。needs_changes / rejected：type 固定、note 为 trim 后的决定说明、
- * decidedAt 由服务端单次采样写入。决定者 Actor 由未来用户认证批次提供，本批不接收。
+ * 用户决定记录。needs_changes / rejected / approved：type 固定、note 为 trim 后的
+ * 决定说明、decidedAt 由服务端单次采样写入。决定者 Actor 由未来用户认证批次提供，
+ * 本批不接收。
  */
 export interface StageUpdateRequestDecision {
   type: StageUpdateRequestDecisionType;
@@ -75,13 +77,13 @@ export interface StageUpdateRequest {
   proposedStatus: ProjectStageStatus;
   /** 去除首尾空白后的申请理由，必须非空且不超过 STAGE_UPDATE_REASON_MAX_LENGTH。 */
   reason: string;
-  /** 创建时固定 pending；本批“要求补充”写入 needs_changes、“拒绝”写入 rejected。禁止伪造决定结果。 */
+  /** 创建时固定 pending；用户决定写入 needs_changes / rejected / approved。禁止伪造决定结果。 */
   status: StageUpdateRequestStatus;
   /** 创建时 1；每次成功用户决定 +1。客户端不能提交。 */
   revision: number;
   /** 创建时等于 createdAt；每次成功决定由服务端刷新。客户端不能提交。 */
   updatedAt: string;
-  /** 创建时 null；本批“要求补充 / 拒绝”成功后包含 needs_changes / rejected 决定。客户端不能提交。 */
+  /** 创建时 null；用户决定成功后包含 needs_changes / rejected / approved 决定。客户端不能提交。 */
   decision: StageUpdateRequestDecision | null;
   /** 服务端写入的申请时间；客户端不能提交。 */
   createdAt: string;
@@ -101,10 +103,10 @@ export interface SubmitStageUpdateRequestInput {
 }
 
 /**
- * 用户决定入口（要求补充 / 拒绝）的输入。本批 App API 代表单用户用户操作（正式
- * 用户认证留后续安全批次），因此不接收决定者 Actor / decidedAt / status /
+ * 用户决定入口（要求补充 / 拒绝 / 批准）的输入。本批 App API 代表单用户用户操作
+ * （正式用户认证留后续安全批次），因此不接收决定者 Actor / decidedAt / status /
  * revision / decision type 等受保护字段；实际执行的决定类型由路由对应的服务方法
- * 固定（requestChanges → needs_changes，reject → rejected）。
+ * 固定（requestChanges → needs_changes，reject → rejected，approve → approved）。
  */
 export interface RequestChangesInput {
   /** 乐观并发期望版本：决定前请求的当前 revision（本批 pending 恒为 1）。 */
@@ -124,7 +126,7 @@ export const stageUpdateRequestParamsSchema = {
 } as const;
 
 /**
- * 用户决定请求体严格白名单（要求补充 / 拒绝共用）：只允许 expectedRevision + note。
+ * 用户决定请求体严格白名单（要求补充 / 拒绝 / 批准共用）：只允许 expectedRevision + note。
  * additionalProperties:false 拒绝 status / decision / decidedAt / updatedAt /
  * actorId / requesterActorId / Stage 字段等；expectedRevision 必须是 JSON 整数
  * （coerceTypes:false，数字字符串不会悄悄转换），note 非空且按 code point 计

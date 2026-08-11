@@ -1,22 +1,28 @@
 import type {
   StageUpdateRequest,
-  StageUpdateRequestDecisionType,
   StageUpdateRequestStatus,
 } from '@mingwu/contracts';
 import { StageUpdateRequestIdempotencyConflictError } from '../../domain/stage-update-request/errors.js';
 import type {
   InsertIfAbsentResult,
   StageUpdateRequestDecisionWrite,
+  StageUpdateRequestRejectLikeDecisionType,
   StageUpdateRequestRepository,
 } from '../../domain/stage-update-request/repository.js';
 import { sameStageUpdateRequestSemantics } from '../../domain/stage-update-request/semantics.js';
+import {
+  createInMemoryStore,
+  type InMemoryStore,
+} from '../stores/in-memory-store.js';
 
 /**
  * 决定类型 → 申请状态的穷尽白名单。新增决定类型必须在仓储显式声明对应的目标状态，
  * 否则编译期（default 收窄为 never）或运行时（非法 type 走到 default 抛错）都会
  * 拒绝落账——调用方无法通过任意 type / status 覆盖已保存申请。
  */
-function statusForDecision(type: StageUpdateRequestDecisionType): StageUpdateRequestStatus {
+function statusForDecision(
+  type: StageUpdateRequestRejectLikeDecisionType,
+): StageUpdateRequestStatus {
   switch (type) {
     case 'needs_changes':
       return 'needs_changes';
@@ -48,7 +54,16 @@ function assertNever(value: never): never {
  * 覆盖，不留待数据库阶段才修复的并发缺口。
  */
 export class InMemoryStageUpdateRequestRepository implements StageUpdateRequestRepository {
-  private readonly byId = new Map<string, StageUpdateRequest>();
+  private readonly byId: Map<string, StageUpdateRequest>;
+
+  /**
+   * 默认自建独立 store 便于仓储单元测试；真实装配（makeServices / index.ts）必须
+   * 传入与 Stage 仓储及批准仓储共享的同一 InMemoryStore，保证 request-changes /
+   * reject / approve 与 Stage 普通写入共享同一底层状态，不产生双写数据源。
+   */
+  constructor(private readonly store: InMemoryStore = createInMemoryStore()) {
+    this.byId = this.store.stageUpdateRequests;
+  }
 
   async insertIfAbsent(request: StageUpdateRequest): Promise<InsertIfAbsentResult> {
     const existing = this.byId.get(request.id);

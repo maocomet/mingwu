@@ -27,17 +27,24 @@ import { InMemoryStudySummaryRepository } from '../src/infrastructure/repositori
 import { InMemoryStudyReportRepository } from '../src/infrastructure/repositories/in-memory-study-report-repository.js';
 import { InMemoryStudyParticipantRepository } from '../src/infrastructure/repositories/in-memory-study-participant-repository.js';
 import { InMemoryStageUpdateRequestRepository } from '../src/infrastructure/repositories/in-memory-stage-update-request-repository.js';
+import { InMemoryStageUpdateRequestApprovalRepository } from '../src/infrastructure/repositories/in-memory-stage-update-request-approval-repository.js';
+import { createInMemoryStore } from '../src/infrastructure/stores/in-memory-store.js';
 
 /** 共享同一组仓储，保证项目 / 关卡 / 任务 / 学习会话写入互相可见。 */
 export function makeServices() {
+  // Stage 普通写入与“批准更新申请”的原子路径共享同一底层状态，不产生双写数据源。
+  const store = createInMemoryStore();
   const projectRepository = new InMemoryProjectRepository();
-  const stageRepository = new InMemoryStageRepository();
+  const stageRepository = new InMemoryStageRepository(store);
   const taskRepository = new InMemoryProjectTaskRepository();
   const studySessionRepository = new InMemoryStudySessionRepository();
   const studySummaryRepository = new InMemoryStudySummaryRepository();
   const studyReportRepository = new InMemoryStudyReportRepository();
   const studyParticipantRepository = new InMemoryStudyParticipantRepository();
-  const stageUpdateRequestRepository = new InMemoryStageUpdateRequestRepository();
+  const stageUpdateRequestRepository = new InMemoryStageUpdateRequestRepository(store);
+  const stageUpdateRequestApprovalRepository = new InMemoryStageUpdateRequestApprovalRepository(
+    store,
+  );
   const projectService = new ProjectService(projectRepository);
   const stageService = new StageService(stageRepository, projectRepository);
   const taskService = new ProjectTaskService(taskRepository, stageRepository, projectRepository);
@@ -67,9 +74,11 @@ export function makeServices() {
   );
   const stageUpdateRequestService = new StageUpdateRequestService(
     stageUpdateRequestRepository,
+    stageUpdateRequestApprovalRepository,
     stageRepository,
   );
   return {
+    store,
     projectRepository,
     stageRepository,
     taskRepository,
@@ -78,6 +87,7 @@ export function makeServices() {
     studyReportRepository,
     studyParticipantRepository,
     stageUpdateRequestRepository,
+    stageUpdateRequestApprovalRepository,
     projectService,
     stageService,
     taskService,

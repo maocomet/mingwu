@@ -5516,3 +5516,270 @@ App API 严格输入、服务层 `pending -> needs_changes`、同语义重试、
 本批可以归档并提交推送。“批准更新申请”与批准时正式 Stage 的原子更新留给下一批单独设计和审核。
 
 ---
+
+## 小喵任务 #28 · 批准关卡更新申请并原子更新正式 Stage · 2026-08-11
+
+### 本批目标
+
+实现第三个用户决定入口“批准更新申请”。批准必须把 pending 申请写为 `approved`，并按申请中已经固定的 `proposedStatus + expectedStageVersion` 更新正式 ProjectStage；这两个结果必须处于同一个原子提交边界，任何冲突或失败都不得留下“申请已批准但 Stage 未更新”或“Stage 已更新但申请仍 pending”的半完成状态。
+
+候选完成的计划原文（DS 不打勾）：
+
+- `- [ ] 批准更新申请`
+
+### 必须先设计的原子边界
+
+1. 不允许在应用服务里依次 `update Stage` 再 `decide request`，也不允许反过来依次调用两个现有 CAS；两次独立写入之间存在竞争 / 失败窗口，不能用“内存阶段概率低”解释。
+2. 建立明确的 approval Unit of Work / 专用原子仓储操作：在同一个临界区内同时校验 request 与 Stage，先计算两个新对象，全部校验通过后再一次性提交。内存实现必须让 StageRepository 的普通写入、request-changes / reject 与 approve 共享同一底层状态和互斥边界，不能复制第二份 Map 或产生双写数据源。
+3. 第六关 PostgreSQL 迁移说明必须明确：锁定 / 条件更新 request 与 Stage，两条写入处于同一数据库事务，任何一条条件不满足则整体回滚；不得把跨表原子性留给调用方。
+4. 若需要抽取关卡状态派生 helper，应把既有 `StageService.setStageStatus` 的时间字段规则提取为单一纯函数并复用，避免批准路径复制后漂移：
+   - 首次进入 in_progress 时补 startedAt；
+   - 进入 completed 时确保 startedAt 非空并写 completedAt；
+   - 从 completed 离开时清空 completedAt、保留 startedAt；
+   - 状态实际改变才 version +1、刷新 updatedAt；目标状态等于当前状态时 Stage 原样返回、不推进 version。
+
+### 必须设计与实现
+
+1. 决定模型扩展受控 `approved` 类型；批准决定至少保存固定 `type: 'approved'`、trim 后 note、服务端 decidedAt。既有 needs_changes / rejected 数据和响应必须兼容。
+2. 新增 App API：`POST /api/v1/stage-update-requests/:id/approve`。请求体严格只允许 `expectedRevision + note`；不得由客户端提交 proposedStatus、expectedStageVersion、Stage id / status / version、decision type、时间、Actor 或原申请字段。批准目标必须完全来自已保存申请。
+3. 原子提交前同时校验：
+   - request 存在、status=pending、revision=expectedRevision；
+   - request 的 stageId / projectId 与真实 Stage 归属一致；
+   - 当前 Stage.version === request.expectedStageVersion；
+   - proposedStatus 是受控合法关卡状态。
+   任一不满足都返回受控错误，request 与 Stage 均保持字节级不变。
+4. 成功时：request status=approved、revision 恰好 +1、updatedAt / decision 由服务端写；Stage 按 proposedStatus 与既有时间字段规则派生。原申请核心字段和 Stage 非状态字段全部不可覆盖。
+5. 保持稳定幂等优先级：批准成功后，同 `approve + normalized note + 首次 expectedRevision` 重试直接返回原 approved 申请，不再次修改 Stage，也不依赖 Stage 后来是否继续升版；不同 note / revision 或其他决定类型稳定 409。
+6. Stage 在批准前已升版 / 被普通 Stage API 修改时，批准必须稳定 409 且 request 仍 pending；用户可以看到冲突后另行处理，禁止静默基于旧申请覆盖新 Stage。
+7. request-changes / reject / approve 三种决定互斥。并发竞争只能有一个最终决定；如果 needs_changes 或 rejected 胜出，Stage 不变；只有 approved 胜出时 Stage 才与 approved 申请同时落账。
+8. 错误响应 / 日志不得回显 note、原 reason、身份、密钥、内部对象或堆栈；非法输入 400、申请不存在 404、request 决定冲突与 Stage 版本 / 归属冲突使用清晰稳定的 409 错误码。
+9. 不新增 MCP 决定工具、用户认证、数据库、AuditLog、列表 UI、前端或项目历史；本批只做批准 App API 与原子领域闭环。
+
+### 必须测试
+
+- 正常批准各代表状态：not_started→in_progress、进入 completed、从 completed 离开；逐项验证 Stage status / version / startedAt / completedAt / updatedAt 与 request approved / revision / decision，同时原申请核心字段不变。
+- 目标状态与当前状态相同：仍可批准 request，但 Stage version / updatedAt 不推进；整个结果保持一致。
+- 相同批准重试幂等：Stage 后续再被普通 API 升版后重试也只返回原 approved 申请，不再次改 Stage。
+- Stage 预先升版、Stage 不存在 / 归属脏数据、错误 request revision、不同 note、跨类型决定：全部受控失败且 request + Stage 两侧均无写入。
+- 20 个 approve 并发；20 个 approve / reject / request-changes 混合并发；以及普通 Stage 状态写与 approve 并发。逐轮断言不变量：不存在半完成状态，Stage 最多推进一次，request revision 最多到 2，最终决定与 Stage 结果匹配。
+- 原子仓储故障 / 冲突路径测试：至少证明在“第二侧无法提交”的模拟条件下第一侧不会残留写入；不能只用最终 happy-path 推断原子性。
+- 仓储继续拒绝非法 decision type / 伪造核心字段；App API 严格覆盖非法 UUID、revision、note Unicode 边界和全部受保护字段。
+- request-changes、reject、project_submit_stage_update、Stage API、MCP 身份权限、Study API 与全量测试全部不回归。
+- 真实 HTTP 冒烟：建项目 / Stage → AI 提交申请 → App approve → service / Stage API 分别读回 approved 与目标状态 → 验证版本 / 时间 → 释放端口。
+
+### 边界与汇报
+
+- App API 仍是第三关单用户原型；正式公网部署写接口前必须接用户认证，本批不得计入“权限系统完成”。
+- 若当前分离仓储无法提供真正跨聚合原子性，应先做最小共享存储 / Unit of Work 重构并在汇报解释，不得退回顺序双写或用补偿写伪装原子事务。
+- 不修改计划复选框，不执行 Git / GitHub / VPS 操作，不触碰 `.claude/` 与 `ui素材mingwu/`。
+- 完成后把检查点追加到本文件末尾，列出原子边界、状态派生复用、幂等 / 冲突优先级、真实测试数字与风险，然后暂停等待小喵审核。
+
+---
+
+## 检查点 #28 · 批准关卡更新申请并原子更新正式 Stage · 2026-08-11
+
+### 本批目标
+
+实现第三个用户决定入口“批准更新申请”。批准把 pending 申请写为 `approved`，并按申请中已经固定的 `proposedStatus + expectedStageVersion` 在同一原子提交边界内更新正式 ProjectStage；任何冲突或失败都不得留下“申请已批准但 Stage 未更新”或“Stage 已更新但申请仍 pending”的半完成状态。App API 仍是第三关单用户原型，正式公网部署写接口前必须接用户认证，本批不计入“权限系统完成”。
+
+候选完成的计划原文（DS 不打勾）：
+
+- `- [ ] 批准更新申请`
+
+### 实际完成内容
+
+1. **原子边界重构（最小共享存储 / Unit of Work）**：新增 `infrastructure/stores/in-memory-store.ts`（`InMemoryStore` 含 `stages` 与 `stageUpdateRequests` 两张 Map + `createInMemoryStore`）。`InMemoryStageRepository` 与 `InMemoryStageUpdateRequestRepository` 改为可注入共享 store（默认自建独立 store，供仓储单元测试复用原有模式；`makeServices` / `index.ts` 装配共享同一 store）。新增专用原子仓储操作 `in-memory-stage-update-request-approval-repository.ts` 的 `approveIfPending`（Unit of Work）：在 JS 单线程同一同步临界区内同时校验 request 与 Stage、计算两个新对象、全部通过后一次性提交两侧；`stage-update-request-repository` 的 request-changes / reject、`stage-repository` 的普通写入与批准路径共享同一底层状态和互斥边界，不存在第二份 Map 或双写数据源。PostgreSQL 迁移说明明确：锁定 / 条件更新 request 与 Stage 两条写入处于同一数据库事务，任一条件不满足整体回滚。
+2. **纯函数抽取并复用**：新增 `domain/stage/status-transition.ts` 的 `deriveStageStatusTransition`，把既有 `StageService.setStageStatus` 的时间字段规则提取为单一纯函数（首次进入 in_progress 补 startedAt；进入 completed 确保 startedAt 非空并写 completedAt；离开 completed 清空 completedAt、保留 startedAt；状态实际改变才 version +1、刷新 updatedAt；目标状态等于当前则原样返回、不推进版本）。`setStageStatus` 与批准路径共同调用它，避免批准路径复制后漂移。
+3. **决定模型扩展受控 approved**：`STAGE_UPDATE_REQUEST_DECISION_TYPES` 扩展为 `['needs_changes', 'rejected', 'approved']`，schema 枚举与文件注释同步；`StageUpdateRequestDecision` 结构不变（type + note + decidedAt），既有 needs_changes / rejected 响应与数据完全兼容。`decideIfPending` 的决定命令类型收窄为 `StageUpdateRequestRejectLikeDecisionType = Exclude<StageUpdateRequestDecisionType, 'approved'>`，`approved` 无法经 request-only 路径落账；批准只在独立原子仓储操作内写字面量 `approved`（即使注入伪造 decision.type 也只落字面量 approved）。
+4. **应用层 approve**（`stage-update-request-service.ts`）：新增 `approve(id, input)`，与 `applyDecision` 共用抽取出的私有 `normalizeDecisionInput`（expectedRevision 正整数、note trim 后非空且按 code point ≤ 上限）。幂等 / 冲突优先级：申请不存在 → 404；已决定且是“相同批准重试”（`decision.type === 'approved'` + 同规范化 note + expectedRevision === revision - 1）→ 幂等返回原申请，不再次修改 Stage、不依赖 Stage 后来是否升版；其余（不同 note / revision / 已 approved 后 requestChanges / reject / 已 needs_changes / rejected 后 approve）→ 稳定 409，绝不覆盖第一次决定；pending 下 expectedRevision 必须等于当前 revision，随后走 `approvalRepository.approveIfPending`。批准目标完全来自已保存申请，请求体无法指定 proposedStatus / expectedStageVersion / Stage 字段。
+5. **App API**（`api/routes/stage-update-requests.ts`）：新增 `POST /api/v1/stage-update-requests/:id/approve`，params / body / response 复用 request-changes / reject 的严格白名单契约（只允许 expectedRevision + note）。全局错误处理器（`app.ts`）新增两个 409 分支：`stage_update_request_proposed_status_invalid`、`stage_update_request_stage_ownership_conflict`；批准路径的 Stage 版本冲突复用既有 `stage_version_conflict`，Stage 不存在复用 `stage_not_found`。
+6. **测试（3 个新文件 + 既有契约测试更新）**：
+   - 原子仓储（新增 16）：not_started→in_progress、进入 completed（含已有 startedAt）、从 completed 离开；目标状态相同 → 申请批准成功但 Stage version / updatedAt 不推进；申请不存在 404、非 pending / revision 陈旧 409、Stage 不存在 404、归属脏数据 409、Stage 已升版 409、非法 proposedStatus 409，全部两侧无写入；伪造 decision.type / 多余键只落字面量 approved 与白名单字段；**故障注入**（Stage 一侧 set 抛错）→ 第一侧申请回滚、无残留；20 approve 并发恰一胜出；20 approve / reject / request-changes 混合并发恰一最终决定且只有 approve 推进 Stage；深拷贝不污染存储。
+   - 应用服务（新增 15）：代表状态批准逐项断言（含 completed 进出）、目标相同不推进、相同批准重试幂等且 Stage 后续再升版后仍只返回原申请、Stage 预升版 409 且申请保持 pending、Stage 不存在 404、归属冲突 409、错误 revision / 不同 note 409、跨类型互斥 409（approved 后 requestChanges / reject、needs_changes / rejected 后 approve）、非法输入 400、错误消息不回显 note / reason / 身份、20 approve 并发、20 混合并发、普通 Stage 写与 approve 并发互斥（恰一侧成功写版本、无半完成）。
+   - App API（新增 13，含真实 HTTP 冒烟）：批准成功 200 且正式 Stage 同步迁移、幂等重试、404、pending revision 与不同 note 的 409、跨类型 409、Stage 预升版 409 `stage_version_conflict` 且申请保持 pending、Stage 不存在 404、归属冲突 409、受保护 / 额外字段 400、非 UUID 400、超长 note 400 不回显、未知异常脱敏 500；真实 socket approve 冒烟（建项目 / Stage → 服务提交申请 → App approve → service / 仓储读回 approved 与目标状态 → 验证版本 / 时间 → 释放端口）。
+   - 既有契约测试：`STAGE_UPDATE_REQUEST_DECISION_TYPES` 断言更新为三种，decision 类型测试补充 approved 通过用例，非法类型改用 `archived` 拒绝。
+
+### 新增、修改和删除的文件清单
+
+- 新增：
+  - `apps/server/src/domain/stage/status-transition.ts`（状态迁移纯函数）
+  - `apps/server/src/domain/stage-update-request/approval-repository.ts`（原子批准仓储接口）
+  - `apps/server/src/infrastructure/stores/in-memory-store.ts`（共享底层状态）
+  - `apps/server/src/infrastructure/repositories/in-memory-stage-update-request-approval-repository.ts`（原子批准实现）
+  - `apps/server/test/stage-update-request-approval-repository.test.ts`（16 用例）
+  - `apps/server/test/stage-update-request-approval-service.test.ts`（15 用例）
+  - `apps/server/test/stage-update-request-approval-api.test.ts`（13 用例，含真实 HTTP 冒烟）
+- 修改：
+  - `packages/contracts/src/stage-update-request.ts`（决定类型扩展为三种，schema 枚举与注释同步）
+  - `apps/server/src/domain/stage-update-request/errors.ts`（新增 `StageUpdateRequestStageOwnershipConflictError`）
+  - `apps/server/src/domain/stage-update-request/repository.ts`（`decideIfPending` 决定类型收窄为 needs_changes | rejected，PostgreSQL 迁移注释更新）
+  - `apps/server/src/application/stage-update-request/stage-update-request-service.ts`（`approve` + `normalizeDecisionInput` + 注入批准仓储）
+  - `apps/server/src/application/stage/stage-service.ts`（`setStageStatus` 改用纯函数）
+  - `apps/server/src/api/routes/stage-update-requests.ts`（新增 approve 路由）
+  - `apps/server/src/app.ts`（新增两个 409 错误分支）
+  - `apps/server/src/index.ts`（共享 store 装配 + 批准仓储接线）
+  - `apps/server/src/infrastructure/repositories/in-memory-stage-repository.ts`（可注入共享 store）
+  - `apps/server/src/infrastructure/repositories/in-memory-stage-update-request-repository.ts`（可注入共享 store + 收窄类型）
+  - `apps/server/test/helpers.ts`（共享 store + 批准仓储接线）
+  - `apps/server/test/stage-update-request-contract.test.ts`（decision 类型断言更新）
+  - `apps/server/test/stage-update-request-decision-service.test.ts`、`apps/server/test/stage-update-request-service.test.ts`（服务构造参数同步）
+- 删除：无。
+- 未触碰：`.claude/`、`ui素材mingwu/`、计划复选框、Git / GitHub / VPS、MCP 工具 / 授权策略、Study API、其余工作区改动。
+
+### 关键设计决定及其依据
+
+- **专用原子批准仓储操作，而非顺序两次 CAS**：申请与正式 Stage 属于两个聚合，内存原型无法在应用服务里把两次独立写入放进事务。解法是共享 InMemoryStore + 在单个同步临界区内“读取 → 校验 → 计算两个新对象 → 一次性提交两侧”的 `approveIfPending`；任何前置不满足抛受控错误且两侧都不写入。这满足小喵“不能复制第二份 Map、不能产生双写数据源、不得退回顺序双写或用补偿写伪装原子事务”的要求；第六关把同一临界区平移为同一数据库事务（条件 UPDATE / 行锁 + 整体回滚），跨表原子性始终由存储层承担，不留 TOCTOU 给调用方。
+- **纯函数单一来源**：批准路径直接复用 `deriveStageStatusTransition`（与 `setStageStatus` 同源），not_started→in_progress / 进出 completed / 离开 completed 清空 completedAt / 目标相同不推进版本等规则只实现一次，批准路径不会复制后漂移；`now` 在服务层单次采样，批准决定与 Stage 时间字段派生共用同一时刻。
+- **决定路径互斥，approved 不进入 request-only 白名单**：`decideIfPending` 的类型收窄为 `Exclude<..., 'approved'>`，穷尽运行时白名单（needs_changes / rejected）在编译期即排除 approved；批准是独立原子操作，同时写申请与 Stage，从结构上杜绝“只决定不更新 Stage”的半状态。三种决定互斥由服务层幂等判断（`decision.type` 匹配）统一保证。
+- **稳定幂等优先级**：批准成功后“同 approve + 规范化 note + 首次 expectedRevision”重试直接返回原 approved 申请，不再次修改 Stage，也不依赖 Stage 后来是否继续升版；不同 note / revision / 其他决定类型稳定 409。Stage 在批准前已升版 / 被普通 Stage API 修改 → 409 且申请保持 pending，禁止静默基于旧申请覆盖新 Stage。
+- **最小写入边界保持**：批准命令只含 `{ type, note, decidedAt, updatedAt }`，仓储固定写字面量 `approved`、revision 恰好 +1、只写 decision / updatedAt；申请核心字段与 createdAt、Stage 非状态字段全部来自 current，调用方即使注入伪造字段也无法改写。
+- **错误 / 日志脱敏**：404 / 409 / 400 / 500 响应与未知异常日志（只记 `errType`）均不回显 note、原 reason、身份、密钥、内部对象或堆栈，与 #25–#27 一致。
+
+### 执行过的测试或检查、命令与真实结果
+
+- `npm run typecheck`（apps/contracts + apps/server）：通过。
+- 本批专项：3 个新测试文件共 **44 个测试全部通过**（approval-repository 16 / approval-service 15 / approval-api 13，其中 approval-api 含真实 HTTP approve 冒烟）。
+- 全量测试：`npm run test` → **46 个文件、789/789 通过**（此前 745，本批 +44，无回归；request-changes、reject、project_submit_stage_update、Stage API、MCP 身份权限、Study API 均通过）。
+- 真实 HTTP 冒烟（approval-api 内含 approve 真实 socket 用例）：通过，结束后端口正常释放。
+- `git diff --check`：通过（仅 Windows LF→CRLF 换行提示，无空白错误）。
+- NUL / BOM 扫描（本批涉及全部 21 个文件用 node 逐文件二进制检查）：**NUL=0、BOM=0**。
+
+### 未完成内容、已知问题和风险
+
+- MCP 决定工具、用户认证、数据库 / PostgreSQL 落地、AuditLog、列表 UI 与前端均不在本批范围（本批只做批准 App API 与原子领域闭环）。
+- App API 仍是第三关单用户原型：正式公网部署写接口前必须接用户认证，本批不得计入“权限系统完成”。
+- 内存原型并发原子性依赖 JS 单线程临界区；第六关 PostgreSQL 迁移要求“锁 / 条件更新 request 与 Stage + 同一事务整体回滚”已在批准仓储接口注释声明，跨表原子性由存储层承担。
+- 批准决定者 Actor 仍未写入（未来用户认证批次提供），与 #25–#27 决定模型保持一致。
+
+### 是否涉及数据库、身份权限、密钥、外部服务或破坏性变化
+
+- 数据库 / Migration：否（仍为内存仓储；仅在接口注释声明 PostgreSQL 迁移要求）。
+- 身份认证 / 权限：是——本批属于用户决定入口（原子批准 + 决定模型扩展）与 CLAUDE.md 强制检查点对象；未改动 MCP 认证中间件、`canSubmitStageUpdate` 授权策略或已验收的 `study_append_report`。
+- 密钥 / 凭据：否；测试仅用假 token 与虚构连接串。
+- 外部服务 / VPS / GitHub：否。
+- 破坏性变化：否；无删除文件、无架构改道。`StageUpdateRequestService` 构造函数新增批准仓储参数与 `StageUpdateRequestDecisionWrite` 收窄为内部接口变化，唯一调用方（服务层 / 装配 / 既有测试）已同步更新；契约响应 schema 结构不变，needs_changes / rejected 数据完全兼容。
+
+等待小喵审核。
+
+---
+
+## 小喵审核结果 #28 · 需要返修故障后的双侧回滚 · 2026-08-11
+
+### 审核结论
+
+共享 InMemoryStore、approved 独立原子入口、状态迁移纯函数、幂等优先级、跨类型互斥、严格 App API、Stage 版本冲突保护与正常并发路径均符合本批设计；小喵独立执行根目录 typecheck 和全量测试，结果为 **46 个文件、789/789 通过**，`git diff --check` 也通过。
+
+但当前故障回滚只覆盖“第二侧在真正写入之前抛错”，还不能满足“任何失败都不留下半完成状态”，暂不能验收或打勾：
+
+- `approveIfPending` 在 `try` 外先写 request，`try` 内再写 Stage；catch 只恢复 request，从不恢复 Stage。
+- 现有测试把 `stages.set` 替换成“直接抛错、不先修改 Map”，因此 Stage 自然保持旧值，没有覆盖“写入已经生效、随后抛错 / 返回失败”的不确定提交结果。
+- 小喵已独立复现：让 Stage Map 的 `set` 先调用真实 `Map.set` 写入 `in_progress / v2`，再抛出 `after-write failure`。最终申请被 catch 恢复为 pending / revision 1，但 Stage 保留 in_progress / version 2，恰好形成任务明确禁止的“Stage 已更新但申请仍 pending”半完成状态。
+- 同理，第一侧 `stageUpdateRequests.set` 当前位于 try 外；若它在写入 approved 后抛错，catch 根本不会执行，会形成“申请已批准但 Stage 未更新”。
+
+### 必须返修（不扩大批次）
+
+1. 在任何写入前保存 request 与 Stage 两侧的完整旧快照；把两次提交写入都纳入同一个 try / rollback 边界，不能让第一侧写入位于 try 外。
+2. 任一侧写入抛错时，必须恢复 **request 和 Stage 两侧** 的旧快照，再重新抛出原始错误；不要只恢复“假定已经成功的第一侧”。由于故障注入可能覆盖实例 `.set`，回滚实现应使用可信的底层恢复路径，避免再次调用同一个持续失败 / 已污染的注入方法而无法回滚。
+3. 补至少两条严格故障测试：
+   - request Map 的 set 先真实落账 approved，再抛错 → 最终 request 恢复 pending / revision 1 / decision null，Stage 字节级不变；
+   - Stage Map 的 set 先真实落账新状态 / 新版本，再抛错 → 最终 request 与 Stage 两侧都恢复为批准前快照。
+   现有“写入前直接抛错”测试可保留，但不能代替这两条。
+4. 测试必须逐字段或整对象断言两侧快照相等，并确认异常仍向上传播；不得吞错或把故障伪装成批准成功。
+5. 保持共享 store、无 await 同步临界区、approved 不可走 request-only 决定入口、纯函数状态派生、普通 Stage / 三种决定混合并发和全部现有错误语义不回归。
+6. 返修后重新执行原子仓储专项、批准服务 / API 专项、根目录 typecheck、全量测试、真实 HTTP 冒烟、NUL 扫描与 `git diff --check`，把真实数字追加到本文件末尾后暂停。
+
+### 边界
+
+- 不修改计划复选框，不提交或推送，不开始下一批。
+- 只修内存 Unit of Work 的双侧快照回滚及其故障注入测试；不扩展到认证、数据库、MCP、AuditLog、前端或项目历史。
+
+等待 DS 返修后由小喵复验。
+
+---
+
+## 检查点 #29 · 返修 #28：批准双侧快照原子回滚 · 2026-08-11
+
+### 本批目标
+
+按「小喵审核结果 #28」对任务 #28「批准关卡更新申请并原子更新正式 Stage」执行必须返修项：把 `approveIfPending` 的两次写入收进同一个 try / rollback 边界，任一侧写入抛错都恢复 request 与 Stage 两侧完整旧快照、再重新抛出原始错误；补两条“先真实落账、随后抛错”的严格故障测试。不勾选计划、不提交、不开始下一批。
+
+候选完成的计划原文（DS 不打勾，保持 #28 原样）：
+
+- `- [ ] 批准更新申请`
+
+### 实际完成内容
+
+1. **双侧快照 + 同边界提交 / 回滚**：`approveIfPending` 在提交前以本方法顶部读取的 `current` / `stage` 保存 request 与 Stage 两侧完整旧快照；两次写入（request Map 与 Stage Map）纳入同一个 try / rollback 边界，第一侧写入不再位于 try 外。任一侧写入抛错——包括“先真实落账、随后抛错”的不确定提交——都恢复两侧旧快照后 `throw err` 重抛原始错误，不吞错、不伪装批准成功，也不留下“申请已批准但 Stage 未更新”或“Stage 已更新但申请仍 pending”的半完成状态。
+2. **可信恢复路径**：故障注入可能覆盖实例 `.set`（先写后抛），因此 catch 用 `Map.prototype.set.call(this.stageUpdateRequests, ...)` 与 `Map.prototype.set.call(this.stages, ...)` 走可信底层原型路径恢复两侧，避免再次调用同一个持续失败 / 已污染的注入方法而无法回滚。
+3. **两条严格故障测试**（approval-repository 专项，随文件新增 `installWriteThenThrow` 助手：先绑定可信 `Map.prototype.set`，再把实例 `.set` 替换为“真实写入后再抛错”，断言后恢复实例方法）：
+   - request Map 的 set 先真实落账 approved / v2 再抛错 → 最终 request 整体 `toEqual` 恢复为批准前快照（pending / revision 1 / decision null，其余字段逐项一致），Stage 字节级不变；
+   - Stage Map 的 set 先真实落账 in_progress / v2 再抛错 → request 与 Stage 两侧都整体 `toEqual` 恢复为批准前快照。
+   两条均 `rejects.toThrow('after-write failure')` 确认异常向上传播；原有“写入前直接抛错”测试保留（作为补充，不代替这两条）。
+
+### 新增、修改和删除的文件清单
+
+- 修改：`apps/server/src/infrastructure/repositories/in-memory-stage-update-request-approval-repository.ts`——提交 / 回滚边界重写（两次写入入 try、catch 双侧恢复 + 重抛），类注释更新为双侧快照回滚与可信路径说明。
+- 修改：`apps/server/test/stage-update-request-approval-repository.test.ts`——新增 `installWriteThenThrow` 助手与 2 条严格故障测试（16 → 18 用例）。
+- 新增：无。删除：无。
+
+### 关键设计决定及其依据
+
+- 两次写入同一 try：小喵复现的“Stage 已更新到 in_progress / v2 后抛错、申请却被回滚成 pending”正是第一侧写入在 try 外 / 只恢复单侧导致的半完成态；双侧写入同边界保证任一失败都整体回滚。
+- 回滚基准用 `current` / `stage`：本方法内无 await，读取后到提交前不存在并发改动，是最可信的“批准前快照”；满足审核要求“在任何写入前保存 request 与 Stage 两侧的完整旧快照”。
+- 回滚走 `Map.prototype.set.call`：绕过被故障注入污染的实例 `.set`，确保“先写后抛”场景下回滚自身不会再次失败。
+- 保持共享 store、无 await 同步临界区、approved 不可走 request-only 决定入口、纯函数状态派生、普通 Stage / 三种决定混合并发与全部现有错误语义不回归；未扩展到认证、数据库、MCP、AuditLog、前端或项目历史。
+
+### 执行过的测试或检查、命令与真实结果
+
+- 原子仓储专项：`npx vitest run apps/server/test/stage-update-request-approval-repository.test.ts` → **18/18 通过**（原 16 + 新增 2 条严格故障）。
+- 批准服务 / API 专项：`npx vitest run apps/server/test/stage-update-request-approval-service.test.ts apps/server/test/stage-update-request-approval-api.test.ts` → **15/15 + 13/13 = 28/28 通过**（approval-api 内含真实 HTTP approve 冒烟）。
+- 根目录 typecheck：`npm run typecheck`（apps/contracts + apps/server）→ 通过。
+- 全量测试：`npx vitest run` → **46 个文件、791/791 通过**（此前 789，本批 +2 条严格故障测试，无回归）。
+- 真实 HTTP 冒烟：approval-api 内含 approve 真实 socket 用例 → 通过。
+- NUL / BOM 扫描（node 逐文件二进制扫描 124 个源码 / 文档文件）：**NUL=0、BOM=0**。
+- `git diff --check`：通过（仅 Windows LF→CRLF 换行提示，无空白错误）。
+
+### 未完成内容、已知问题和风险
+
+- 返修只覆盖内存 Unit of Work 的双侧快照回滚及其故障注入测试；PostgreSQL 跨表事务仍未接入（第六关），接口注释已声明“锁 / 条件更新 request 与 Stage + 同一事务整体回滚”的迁移要求。
+- 批准决定者 Actor 仍未写入（未来用户认证批次提供），与 #25–#27 决定模型保持一致。
+- MCP 决定工具、用户认证、数据库落地、AuditLog、列表 UI 与前端均不在本批范围。
+
+### 是否涉及数据库、身份权限、密钥、外部服务或破坏性变化
+
+- 数据库 / Migration：否（仍为内存仓储；仅接口注释声明 PostgreSQL 迁移要求）。
+- 身份认证 / 权限：否；未改动 MCP 认证中间件或授权策略。
+- 密钥 / 凭据：否。
+- 外部服务 / VPS / GitHub：否。
+- 破坏性变化：否；无删除文件、无架构改道。
+
+### 建议下一批任务
+
+- 等待小喵复验本批返修（双侧快照回滚与两条严格故障测试）；验收通过后由小喵决定是否勾选 #28 并推进下一计划候选项，再按审核意见开始下一批。
+
+等待小喵审核。
+
+---
+
+## 小喵复验结果 #28 / #29 · 通过 · 2026-08-11
+
+### 验收结论
+
+- `批准更新申请` 已通过复验：申请由 `pending` 原子转为 `approved` 的同时，正式 Stage 按申请内容完成状态、版本和时间字段更新；不存在仅批准申请而不更新正式 Stage 的入口。
+- #28 首轮发现的故障回滚缺口已经修复。两次写入现处于同一提交 / 回滚边界，任一侧失败都会恢复申请与 Stage 两侧完整旧快照，并重新抛出原始异常。
+- 小喵独立注入并复现了两种“先真实写入、随后抛错”的不确定提交故障：request 侧故障与 Stage 侧故障均确认 `requestRestored=true`、`stageRestored=true`，最终申请保持 `pending`、Stage 保持 `not_started`。
+- 共享内存 store、同步临界区、纯函数状态派生、approved 与 request-only 决定入口隔离，以及并发与既有错误语义均保留。
+
+### 独立复验结果
+
+- 根目录 typecheck：contracts 与 server 均通过。
+- 全量测试：**46 个测试文件、791/791 通过**。
+- 双侧写后抛错故障注入：request 侧与 Stage 侧均完整回滚，异常继续向上传播。
+- 源码、测试、契约与文档扫描：**NUL=0、BOM=0**。
+- `git diff --check`：通过，仅有 Windows LF→CRLF 提示，无空白错误。
+
+### 计划更新
+
+- 已将 `docs/project-plan-v0.1.md` 中 `- [ ] 批准更新申请` 更新为 `- [x] 批准更新申请`。
+
+本批验收通过，可以提交并推送到 `develop`；下一批任务仍由小喵单独下发。

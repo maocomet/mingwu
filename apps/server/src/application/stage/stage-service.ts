@@ -13,6 +13,7 @@ import {
   StageVersionConflictError,
 } from '../../domain/stage/errors.js';
 import type { StageRepository } from '../../domain/stage/repository.js';
+import { deriveStageStatusTransition } from '../../domain/stage/status-transition.js';
 
 export interface CreateStageResult {
   stage: ProjectStage;
@@ -132,12 +133,12 @@ export class StageService {
   }
 
   /**
-   * 设置关卡状态：允许在七种合法状态间自由设置，不发明不可逆转换规则，但保持字段不变量：
-   * - 首次进入 in_progress：startedAt 为空则写入当前 UTC 时间；
-   * - 进入 completed：确保 startedAt 非空并写入 completedAt；
-   * - 从 completed 离开：清空 completedAt，startedAt 保留（旧状态由未来 AuditLog/项目历史保存）；
-   * - 状态实际改变时 version + 1、刷新 updatedAt；设为当前状态时不推进版本；
-   * - 同一 expectedVersion 的并发写入只有一个成功，陈旧请求返回 409，不静默覆盖较新状态。
+   * 设置关卡状态：允许在七种合法状态间自由设置，不发明不可逆转换规则，但保持字段不变量。
+   * 时间字段派生（首次进入 in_progress 写 startedAt、进入 completed 写 completedAt、
+   * 离开 completed 清空 completedAt、状态实际改变才 version + 1 / 刷新 updatedAt）统一
+   * 复用领域纯函数 `deriveStageStatusTransition`，与“批准更新申请”的原子路径保持单一
+   * 来源，避免两份派生逻辑漂移。状态未改变时经 CAS 校验版本一致后原样返回、不推进
+   * 版本；同一 expectedVersion 的并发写入只有一个成功，陈旧请求返回 409。
    */
   async setStageStatus(id: string, input: SetStageStatusInput): Promise<ProjectStage> {
     const existing = await this.repository.findById(id);
@@ -145,43 +146,8 @@ export class StageService {
       throw new StageNotFoundError(id);
     }
 
-    if (existing.status === input.status) {
-      // 状态未改变：校验版本一致后原样返回，不推进 version / updatedAt。
-      const result = await this.repository.updateIfVersion(
-        { ...existing },
-        input.expectedVersion,
-      );
-      if (!result) {
-        throw new StageVersionConflictError(id, input.expectedVersion);
-      }
-      return result;
-    }
-
     const now = new Date().toISOString();
-    let startedAt = existing.startedAt;
-    let completedAt = existing.completedAt;
-
-    if (input.status === 'in_progress' && startedAt === null) {
-      startedAt = now;
-    }
-    if (input.status === 'completed') {
-      if (startedAt === null) {
-        startedAt = now;
-      }
-      completedAt = now;
-    }
-    if (existing.status === 'completed') {
-      completedAt = null;
-    }
-
-    const updated: ProjectStage = {
-      ...existing,
-      status: input.status,
-      startedAt,
-      completedAt,
-      version: existing.version + 1,
-      updatedAt: now,
-    };
+    const { stage: updated } = deriveStageStatusTransition(existing, input.status, now);
     const result = await this.repository.updateIfVersion(updated, input.expectedVersion);
     if (!result) {
       throw new StageVersionConflictError(id, input.expectedVersion);
