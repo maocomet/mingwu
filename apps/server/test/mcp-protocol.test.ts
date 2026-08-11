@@ -24,6 +24,7 @@ function buildTestServer() {
     serviceName: 'mingwu-server',
     serviceVersion: '0.1.0',
     logger: { error: () => undefined },
+    authContext: null,
   });
   return { server, services };
 }
@@ -358,6 +359,7 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
       serviceName: 'mingwu-server',
       serviceVersion: '0.1.0',
       logger,
+      authContext: null,
     });
     const client = await connectClient(server);
     try {
@@ -427,6 +429,7 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
       serviceName: 'mingwu-server',
       serviceVersion: '0.1.0',
       logger,
+      authContext: null,
     });
     const client = await connectClient(server);
     try {
@@ -640,6 +643,7 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
       serviceName: 'mingwu-server',
       serviceVersion: '0.1.0',
       logger,
+      authContext: null,
     });
     const client = await connectClient(server);
     try {
@@ -682,6 +686,7 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
       serviceName: 'mingwu-server',
       serviceVersion: '0.1.0',
       logger,
+      authContext: null,
     });
     const client = await connectClient(server);
     try {

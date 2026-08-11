@@ -7,6 +7,7 @@ import type { StudySessionDetailService } from '../application/study-session-det
 import { ProjectNotFoundError } from '../domain/project/errors.js';
 import { StageNotFoundError } from '../domain/stage/errors.js';
 import { StudySessionNotFoundError } from '../domain/study-session/errors.js';
+import type { McpAuthContext } from '../domain/mcp-auth/mcp-auth-context.js';
 
 /**
  * 服务日志最小接口。只记录脱敏信息，绝不输出完整请求头或客户端提交的秘密。
@@ -23,6 +24,13 @@ export interface McpServerDeps {
   serviceName: string;
   serviceVersion: string;
   logger: McpLogger;
+  /**
+   * 该 MCP Server 实例私有的只读绑定身份：initialize 时由服务端 Bearer 凭据解析、
+   * 经统一校验并复制 / 冻结后的 session 私有对象；本地开发 / 自动化测试的匿名只读
+   * 模式为 null。每次连接各持有自己的实例，绝不放进共享可变全局变量。现有五个
+   * 只读工具不得输出本身份，也不新增 whoami 工具；供后续写工具按服务端身份落账。
+   */
+  readonly authContext: McpAuthContext | null;
 }
 
 /** 严格 UUID 输入；禁止未知字段（zod .strict 在运行时拒绝多余键）。 */

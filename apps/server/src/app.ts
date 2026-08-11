@@ -17,6 +17,7 @@ import {
   type ReadinessCheck,
 } from './api/routes/health.js';
 import { mcpRoutes } from './api/routes/mcp.js';
+import type { McpAuthenticator } from './domain/mcp-auth/mcp-authenticator.js';
 import { McpSessionRegistry } from './mcp/mcp-sessions.js';
 import { projectRoutes } from './api/routes/projects.js';
 import { stageRoutes } from './api/routes/stages.js';
@@ -74,6 +75,12 @@ export interface AppDeps {
   studySessionDetailService: StudySessionDetailService;
   studySessionCurrentService: StudySessionCurrentService;
   studySummaryService: StudySummaryService;
+  /**
+   * 可选 MCP Bearer 认证器。未注入时 production 对 /mcp 一律 503
+   * mcp_auth_not_configured（fail-closed），development / test 保留仅限本地
+   * 的匿名只读模式；注入后无论环境都执行认证。真实生产凭据在第六关接入。
+   */
+  mcpAuthenticator?: McpAuthenticator;
   readinessChecks?: ReadinessCheck[];
   /** readyz 单项检查超时毫秒数，默认 2000，测试可注入小值。 */
   readyzTimeoutMs?: number;
@@ -144,6 +151,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   app.register(mcpRoutes, {
     config: deps.config,
     sessions: mcpSessions,
+    authenticator: deps.mcpAuthenticator,
   });
 
   app.setErrorHandler((error: FastifyError, request, reply) => {

@@ -3879,3 +3879,408 @@ PUT 使用严格白名单请求体：
 - 单活动 Session 写入约束、真实 Actor 认证、OAuth、PostgreSQL、前端与部署仍未实现。
 
 **检查点 #15 已完成，可以进入下一批。**
+
+---
+
+## 小喵下发任务 #16 · MCP 连接身份绑定基础 · 2026-08-10
+
+### 本批定位
+
+本批为后续 `study_append_report` 建立“凭据解析出的 Actor 身份绑定到独立 MCP 连接”的安全基础，不新增任何写工具，**本批没有可勾选的计划项**。完成后仍不得勾选 `study_append_report`、“AI 追加自己的报告”、“给写操作增加权限验证”或 OpenAI / Claude 接入项。
+
+本批不是完整 OAuth 2.1 授权服务器，也不创建真实生产凭据。第六关再落 PostgreSQL 凭据表、正式 OAuth、轮换与撤销；本批只实现可替换的认证接口、内存测试实现和 MCP session 绑定规则。
+
+### 身份边界（必须与第二关一致）
+
+- AI Actor 是长期身份；MCPConnection 是稳定连接登记；MCP Session ID 只是一次临时协议会话。
+- 同一 Actor 可以拥有多条不同 MCPConnection；不同平台不得共用同一个明文 Token。
+- 客户端提交的 actorId / actorCode / actorType 不可信；Actor 只能由服务端验证 Bearer 凭据后解析。
+- 认证上下文至少包含只读的 `actorId`、`actorCode`、`actorType`、`connectionId`、`permissionProfile`；UUID 与枚举 / 长度都要防守性验证。
+- 日志、响应、registry 调试信息均不得保存或回显 Bearer Token、Authorization 头、token hash 或秘密异常文字。
+
+### 实现范围
+
+1. 建立可替换认证边界，例如 `McpAuthenticator`：
+   - 输入 Bearer Token，返回受信任的只读 MCP AuthContext 或认证失败；
+   - 领域 / MCP 层依赖接口，不绑定未来 OAuth 库；
+   - 内存测试实现只能保存 token 的 SHA-256 等不可逆摘要与非敏感指纹，不保存明文 Token；使用常量时间摘要比较，避免直接字符串秘密比较；
+   - 不从仓库代码、默认配置或日志中放入任何真实凭据。
+2. `/mcp` 请求认证与 session 绑定：
+   - Host / Origin 防护继续先执行；OPTIONS 不创建 session；
+   - 当注入 authenticator 时，initialize 以及后续 POST / GET / DELETE 都必须提供严格 `Authorization: Bearer <token>`；缺失 / 格式错误 / 无效 / revoked / expired 统一返回受控 401，不泄露具体原因；
+   - initialize 成功后，把解析出的 AuthContext 只读绑定到该 registry session；
+   - 后续每个请求必须重新验证凭据，以便未来撤销立即生效，并确认 `actorId + connectionId` 与 session 绑定一致；换成另一条连接（即使属于同一 Actor）也不得接管旧 session，返回受控 403；
+   - MCP Session ID 绝不能参与推导 Actor 身份。
+3. 未配置行为保持 fail-closed：
+   - production 未注入 authenticator 时继续返回 `503 mcp_auth_not_configured`，registry 保持 0；
+   - development / test 未注入时可以保留当前“仅本地白名单的匿名只读模式”，确保既有只读测试不被伪装成已认证；代码注释必须明确它只用于本地开发 / 自动测试；
+   - 注入 authenticator 后，无论环境都必须执行认证，不能因 development / test 绕过。
+4. 每个独立 MCP Server / transport 使用该 session 已绑定的只读 AuthContext；先完成安全传递与隔离，不增加 whoami Tool，不修改现有五个只读工具的业务输出。
+5. 认证失败、身份不匹配、transport 异常都不得创建或遗留 registry session；DELETE 成功或 app.close 后仍须清理。
+
+### 必须测试
+
+- 认证器：合法凭据解析正确 Actor / Connection；错误、撤销、过期凭据失败；内存对象和可观察输出不存在明文 Token；
+- initialize：缺失、错误 scheme、空 Bearer、多 Authorization、无效 token 全部受控 401，registry=0，响应 / 日志不含秘密；
+- 有效凭据 initialize 成功，registry 中只绑定预期 actorId / connectionId，不保存 Token；
+- 后续 POST / GET / DELETE 每次重新认证；撤销后旧 session 立即不可用且不泄露原因；
+- 同一 Actor 的另一 connection token、另一 Actor token 均不能接管旧 session；原连接仍可继续；
+- 两个客户端使用不同连接时得到独立 session 与正确上下文，关闭一个不影响另一个；
+- production 未配置仍 503；配置认证器后可通过有效凭据使用现有只读工具；
+- development / test 未配置仍只允许本地匿名只读，Host / Origin 防护无回归；
+- 真实 HTTP socket 覆盖带 Authorization 的初始化、工具发现、重连 / 隔离、DELETE 清理；
+- 类型检查、现有 **617** 个测试及 NUL / diff 检查无回归。
+
+### 边界要求
+
+- 不实现 OAuth discovery / authorize / token endpoint，不接真实 OpenAI / Claude，不生成真实秘密；
+- 不实现 `study_append_report` 或任何写 Tool，不做权限决策，只传递只读 AuthContext；
+- 不修改计划文档复选框；
+- 不执行 Git / GitHub / VPS 操作；
+- 不读取或修改 `.claude/`、`ui素材mingwu/` 等无关目录；
+- 完成后在本文件末尾追加“检查点 #16”，列出身份模型、session 绑定规则、文件清单、真实测试与明确未完成边界，然后暂停等待小喵审核。
+
+---
+
+## 检查点 #16 · MCP 连接身份绑定基础 · 2026-08-10
+
+### 本批次目标
+
+为后续 `study_append_report` 建立“凭据解析出的 Actor 身份绑定到独立 MCP 连接”的安全基础：可替换的 Bearer 认证边界、内存测试实现、/mcp 请求认证与 session 身份绑定校验。不新增任何写工具，不做权限决策，只传递只读 AuthContext。
+
+### 候选完成的计划项（原文，未打勾）
+
+本批为安全基础，小喵明确“本批没有可勾选的计划项”；未修改任何计划复选框。
+
+### 实际完成内容
+
+- 领域契约（`apps/server/src/domain/mcp-auth/`）：
+  - `McpAuthContext`：只读，extends `AuthenticatedAiActorContext` 增加 `connectionId`、`permissionProfile`；与第二关身份模型一致（AI Actor 长期身份 / MCPConnection 稳定登记 / MCP Session 临时协议会话）。
+  - `McpAuthenticator` 接口：输入不含 scheme 的 Bearer token → 受信只读 AuthContext 或抛 `McpAuthenticationError`；领域 / MCP 层只依赖接口，不绑定未来 OAuth 库。
+  - `assertValidMcpAuthContext`：UUID 与枚举 / 长度防御性验证（actorId、connectionId 严格 UUID；actorCode 非空且 ≤ AI_ACTOR_CODE_MAX_LENGTH；actorType ∈ 三种既定类型；permissionProfile 非空）。
+- 内存认证器（`apps/server/src/infrastructure/auth/in-memory-mcp-authenticator.ts`）：
+  - 构造时立即把明文 token 转成不可逆 SHA-256 摘要并丢弃，对象字段 / 序列化输出均无明文；
+  - 摘要比较使用常量时间 `timingSafeEqual`，命中与否走相同比较路径，不提前返回；
+  - 支持 `revoked` / `expiresAt` 状态模拟撤销与过期，与无效 token 统一抛 `McpAuthenticationError` 不泄露原因；
+  - 提供 `revoke(connectionId)` 与 `hashes()` 供测试模拟撤销与断言无明文。
+- `/mcp` 请求认证与 session 绑定（`apps/server/src/api/routes/mcp.ts`）：
+  - Host / Origin 防护先执行；OPTIONS 不创建 session（204）；
+  - 注入 authenticator 时，initialize 及后续 POST / GET / DELETE 都必须提供严格 `Authorization: Bearer <token>`；缺失 / 错误 scheme / 空 Bearer / 多 Authorization / 无效 / 撤销 / 过期统一受控 401，不泄露具体原因；
+  - initialize 成功后把解析出的只读 AuthContext 绑定到该 registry session；
+  - 后续每个请求重新验证凭据（撤销立即生效），并确认 `actorId + connectionId` 与 session 绑定一致；换成另一条连接（即使属于同一 Actor）或另一 Actor 均返回受控 403；
+  - MCP Session ID 绝不参与推导 Actor 身份；
+  - 认证失败 / 身份不匹配 / transport 异常不得创建或遗留 registry session（新连接按预生成 id 清理，已知 session 异常也清理）；DELETE 成功或 app.close 后清理不变。
+- 未配置行为 fail-closed：production 未注入 authenticator 继续 `503 mcp_auth_not_configured`、registry 保持 0；development / test 未注入保留“仅本地白名单的匿名只读模式”（代码注释明确只用于本地开发 / 自动测试）；注入后无论环境都执行认证，不能因 development / test 绕过。
+- 装配：`AppDeps` / `McpRouteOptions` 增加可选 `mcpAuthenticator`，传入 `McpSessionRegistry` 与 `/mcp` 路由；生产入口 `index.ts` 不注入（第六关接入真实凭据前保持 production fail-closed）。
+- `McpSessionRegistry`：`McpSession` 增加 `sessionId` 与只读 `authContext`；`prepare(authContext)` 预生成 session id 便于异常清理；初始化注册时绑定只读 AuthContext。
+
+### 新增、修改、删除的文件清单
+
+新增：
+- apps/server/src/domain/mcp-auth/mcp-auth-context.ts
+- apps/server/src/domain/mcp-auth/mcp-authenticator.ts
+- apps/server/src/domain/mcp-auth/errors.ts
+- apps/server/src/infrastructure/auth/in-memory-mcp-authenticator.ts
+- apps/server/test/mcp-auth-fixtures.ts
+- apps/server/test/mcp-authenticator.test.ts（6 个测试）
+- apps/server/test/mcp-http-auth.test.ts（7 个测试）
+- apps/server/test/mcp-http-smoke-auth.test.ts（1 个真实 HTTP socket 测试）
+
+修改：
+- apps/server/src/mcp/mcp-sessions.ts
+- apps/server/src/api/routes/mcp.ts
+- apps/server/src/app.ts
+
+删除：无。
+
+### 关键设计决定及其依据
+
+1. **接口不绑定 OAuth 库**：领域 / MCP 层只依赖 `McpAuthenticator` 接口，真实 OAuth / 凭据表留待第六关，替换实现不影响边界。
+2. **摘要存储与常量时间比较**：内存实现只保存 SHA-256 摘要与不敏感指纹，不保存明文 Token；比较用 `timingSafeEqual`，避免直接字符串秘密比较与时序侧信道。
+3. **每个请求重新认证 + 绑定校验**：便于未来撤销立即生效，并确保 actorId + connectionId 与该 session 在 initialize 时绑定的身份一致；另一条连接（即使同一 Actor）不得接管旧 session（403）。
+4. **统一 401 不泄露原因**：缺失 / 格式错误 / 无效 / 撤销 / 过期全部返回同一受控 401，响应与日志不含 Token、Authorization 头、摘要或秘密异常文字。
+5. **fail-closed 未配置行为**：production 未注入认证器仍 503 且 registry 为 0；development / test 未注入保留匿名只读（明确仅本地）；注入后无论环境必须认证。
+6. **异常不留 session**：认证失败在创建 session 前返回；transport 异常按预生成 id 清理可能已注册的新连接，已知 session 异常也清理，DELETE 成功 / app.close 后全部清理。
+7. **现有只读工具不变**：本批只做安全传递与隔离，不增加 whoami Tool，不修改五个只读工具的业务输出，工具不接收身份字段。
+
+### 执行过的测试或检查、命令与真实结果
+
+- `npm run typecheck -w apps/server`：通过（`tsc --noEmit` 无错误）。
+- `npx vitest run test/mcp-authenticator.test.ts test/mcp-http-auth.test.ts test/mcp-http-smoke-auth.test.ts`：3 个文件 14/14 通过。
+- `npx vitest run test/mcp-http.test.ts test/mcp-protocol.test.ts test/mcp-http-smoke.test.ts`（既有匿名只读 / Host / Origin / production 503）：3 个文件 40/40 通过，无回归。
+- `npm test -w apps/server`（全量）：33 个文件 631/631 通过（617 + 新增 14）。
+- NUL 字节扫描：0 bad files。
+- `git diff --check`：tracked 变更干净（exit 0）；未跟踪的 `ui素材mingwu/` 素材目录（无关）由中文文件名导致 no-index 检查报错，未触碰。
+- 真实 HTTP socket 冒烟（带 Authorization 的 initialize、工具发现、双连接隔离、跨连接接管 403、DELETE 清理）经官方 MCP 客户端通过。
+
+### 未完成内容、已知问题和风险
+
+- 本批未实现 OAuth discovery / authorize / token endpoint，未接真实 OpenAI / Claude，未生成任何真实秘密；生产入口仍未注入认证器（第六关接真实凭据表、正式 OAuth、轮换与撤销）。
+- 未实现 `study_append_report` 或任何写 Tool，未做任何权限决策，只传递只读 AuthContext。
+- 内存认证器仅用于本地开发 / 自动化测试，token 摘要与 revocation 均为进程内模拟。
+- 未修改计划复选框，未执行 Git / GitHub / VPS 操作；未读取或修改 `.claude/`、`ui素材mingwu/` 等无关目录。
+
+### 是否涉及数据库、身份权限、密钥、外部服务或破坏性变化
+
+是（预期内）：本批是身份认证边界逻辑（Bearer 凭据 → Actor 身份解析与 session 绑定），属 CLAUDE.md 强制检查点范畴。未涉及数据库 / Migration，未涉及真实密钥 / Token 写入仓库，未操作外部服务，无破坏性删除或重构。
+
+### 建议下一批任务
+
+等待小喵审核本批。通过后建议下一批实现 `study_append_report` 只读写工具：写操作基于 AuthContext.actorId 落报告归属，保持幂等（重复调用不重复建报告），并把“连接凭据→Actor 身份→写权限”的授权决策明确收口。
+
+等待小喵审核。
+
+---
+
+## 小喵审核结果 #16 · 需要安全返修 · 2026-08-10
+
+### 审核结论
+
+本批方向正确：Bearer 凭据摘要保存、常量时间摘要比较、Actor / Connection session 绑定、每请求重新认证、跨连接接管拒绝、production 未配置 fail-closed 与匿名本地只读兼容均已建立；没有新增写 Tool，也没有越界接入 OAuth、数据库、OpenAI、Claude 或 VPS。
+
+小喵独立复验结果：
+
+- `npm run typecheck`：通过；
+- `npm test`：33 个测试文件，**631/631 通过**；
+- 带 Authorization 的真实 MCP HTTP 冒烟通过；
+- server / contracts 全部 `.ts` 文件真实 NUL 字节计数为 0；
+- `git diff --check`：除 Windows LF→CRLF 提示外无空白错误。
+
+但身份安全基础仍有以下必须修复项。返修前不提交、不推送，也不开始 `study_append_report`。
+
+### 必须修复 1：绑定身份没有传入该连接自己的 MCP Server
+
+`McpSessionRegistry.prepare(authContext)` 虽把 AuthContext 存进 registry 的 `McpSession`，但仍调用 `buildMcpServer(this.deps)`；`McpServerDeps` 也没有 AuthContext。因此该连接的 Tool handler 实际拿不到已绑定身份，下一批写工具无法从服务端 session 身份安全地取得 actorId，只能再次走全局状态或错误地相信客户端。
+
+返修要求：
+
+- 每次 `prepare` 必须把本次绑定的 AuthContext 注入该次新建的 `McpServer` 依赖；匿名本地只读模式明确为 null；
+- `McpServerDeps` 中的身份必须是该 server 实例私有、只读的，不得放进共享可变全局变量；
+- 现有五个只读工具不得输出身份，也不新增 whoami；
+- 测试使用两个不同 connection 建立两个 server，证明每个 server 持有各自绑定上下文且互不串线。
+
+### 必须修复 2：认证配置存在 fail-open 与歧义覆盖
+
+`expiresAt` 直接 `Date.parse` 后保存；非法字符串得到 NaN，而 `Date.now() >= NaN` 永远为 false，结果是配置了非法过期时间的凭据反而永不过期。另一个问题是重复 Token 的 hash 作为 Map key 被后一个登记静默覆盖，可以把同一凭据悄悄改绑到另一 Actor / Connection。
+
+返修要求：
+
+- `expiresAt` 存在时必须在构造阶段验证为有限、可解析的时间；非法值抛受控 `McpAuthConfigurationError`，不得登记；
+- 检测重复 token hash 并拒绝配置，禁止静默覆盖；错误不得包含 token / hash；
+- `permissionProfile` 增加非空之外的受控长度上限，过长配置同样拒绝；
+- 增加非法 expiresAt、重复 token（包括绑定不同 Actor / Connection）、过长 permissionProfile 测试。
+
+### 必须修复 3：未来认证器异常可能把秘密写进日志
+
+`resolveAuthContext` 只捕获 `McpAuthenticationError`，其他异常直接交给 App 全局错误处理；全局处理使用 `{ err: error }` 记录完整异常。未来 OAuth / 数据库认证器若抛出含连接串、Token 或密码的异常，秘密会进入日志。
+
+返修要求：
+
+- 在 MCP 认证边界内捕获未知认证器异常；日志只记录稳定 `errType` / 受控错误码，不记录原始 message、stack、请求头或 token；
+- 响应只返回通用受控 500，例如 `mcp_auth_internal_error`，不经过会记录完整异常的通用路径；registry 必须保持原状，不创建新 session；
+- 注入抛出 `password=...` / 连接串的假认证器，断言响应和捕获日志均不含秘密。
+
+### 必须修复 4：认证上下文与 Bearer 解析需在边界收紧
+
+- 路由不能只相信任意 `McpAuthenticator` 实现会自行验证上下文；认证成功后要统一调用防守性校验，并复制 / 冻结成 session 私有只读对象再绑定，避免外部实现随后修改同一对象；
+- `permissionProfile` 的长度规则也纳入统一上下文校验；
+- Bearer token 的正则目前只排除普通空格，仍接受 tab 等空白；改为拒绝 token 内任意 whitespace，并增加测试；
+- 认证上下文非法时返回受控、脱敏的内部认证错误，不能建立 session。
+
+### 返修与边界要求
+
+1. 只修以上四组安全问题，不实现任何写 Tool、OAuth endpoint、数据库或外部接入。
+2. 保持“不同连接尝试接管旧 session 返回 403，但原连接仍可继续”的防 DoS 语义；不要因攻击者使用错误 token 就删除合法原 session。
+3. 撤销 / 过期凭据必须继续立即无法使用；响应不区分失败原因。
+4. 重新运行认证器测试、HTTP 认证测试、真实 auth smoke、类型检查和全量测试。
+5. 不修改计划复选框，不执行 Git / GitHub / VPS 操作。
+6. 完成后在本文件末尾追加“检查点 #16 安全返修”，列出 server 私有身份传递、fail-closed 配置、日志脱敏与真实测试结果，然后暂停等待小喵复验。
+
+## 检查点 #16 安全返修 · 绑定身份传递 / fail-closed 配置 / 日志脱敏 / Bearer 收紧 · 2026-08-10
+
+### 本批次目标
+
+按小喵审核结果 #16 的四个必须修复项做安全返修，不实现任何写 Tool、OAuth endpoint、数据库或外部接入；不改计划复选框，不执行 Git / GitHub / VPS 操作。返修目标是建立不可回退的安全边界：绑定身份注入到连接自己的 MCP Server、认证配置 fail-closed、未来认证器异常脱敏、AuthContext 与 Bearer 在边界统一收紧。
+
+### 候选完成的计划项（原文，未打勾）
+
+本批为 #16 的安全返修，未新增可勾选的计划项；未修改任何计划复选框。
+
+### 实际完成内容
+
+返修 1（绑定身份传入该连接自己的 MCP Server）：
+- `McpServerDeps` 增加 `readonly authContext: McpAuthContext | null`：该 MCP Server 实例私有的只读绑定身份，注释明确“每次连接各持有自己的实例，绝不放进共享可变全局变量；现有五个只读工具不得输出本身份，也不新增 whoami；供后续写工具按服务端身份落账”。
+- `McpSessionRegistry` 构造函数改为 `Omit<McpServerDeps, 'authContext'>`（共享服务依赖不含身份）；`prepare(authContext)` 用 `buildMcpServer({ ...this.deps, authContext })` 把本次绑定的 AuthContext 注入该次新建的 server 依赖（匿名只读模式为 null），同时预绑定到该 session。
+- 新增 `test/mcp-session-registry.test.ts`：用两个不同 connection 各 `prepare` 一次，断言得到两个独立 server 实例（`a.server !== b.server`）、各自持有注入的只读上下文（`a.authContext === ctx1`、`b.authContext === ctx2`、互不串线），匿名模式为 null。
+
+返修 2（认证配置 fail-closed 与歧义覆盖）：
+- `InMemoryMcpAuthenticator` 构造阶段：`expiresAt` 存在时先用 `Date.parse` 验证为有限、可解析时间，`Number.isNaN(parsed)` 即抛 `McpAuthConfigurationError`（绝不把 NaN 保存成“永不过期”）；
+- 检测重复 token hash：`credentials.has(tokenHash)` 即抛 `McpAuthConfigurationError`，禁止同一凭据被后一个登记静默覆盖改绑到另一 Actor / Connection；错误类只携带固定分类，不含 token / hash；
+- `assertValidMcpAuthContext` 在非空之外增加 `permissionProfile` 受控长度上限 `MCP_AUTH_PERMISSION_PROFILE_MAX_LENGTH = 64`，过长配置同样拒绝；认证器构造登记也走同一校验。
+- 新增测试：非法 expiresAt（`not-a-date` / 越界月份 / `garbage` / 空串）、重复 token（完全重复 / 同 Actor 不同 Connection / 另一 Actor 的 Connection）、过长 permissionProfile（65 字符拒绝、恰好 64 字符合法）、构造错误序列化不含明文 token。
+
+返修 3（未来认证器异常不得把秘密写进日志）：
+- `resolveAuthContext` 在 MCP 认证边界内捕获 `McpAuthenticationError` 之外的未知认证器异常：日志只记录稳定 `errType`（`err instanceof Error ? err.name : typeof err`），不记录原始 message / stack / 请求头 / token；响应返回受控 500 `mcp_auth_internal_error`，不经过 App 全局 `{ err: error }` 记录完整异常的路径；registry 保持原状，不创建新 session。
+- 新增测试：注入抛出 `postgres://app:password=TEST_SECRET@db.internal:5432/mingwu?...` 的假认证器，断言响应与捕获日志均不含秘密，且 registry 为 0。
+
+返修 4（认证上下文与 Bearer 解析在边界收紧）：
+- 认证成功后统一调用 `assertValidMcpAuthContext` 做防守性校验（含 permissionProfile 长度），并把上下文复制 / `Object.freeze({ ...context })` 成 session 私有只读对象再绑定，外部认证器实现无法随后修改同一对象；上下文非法返回受控脱敏 500 `mcp_auth_internal_error`、不建立 session、不回显具体非法值。
+- `parseBearerToken` 改为 `/^Bearer ([^\s]+)$/i`：token 内出现任意空白字符（含 tab、换行等）一律 401，不再接受。
+- 新增测试：token 内 tab 空白 → 401；绑定上下文 `Object.isFrozen` 为 true；两连接各持独立冻结上下文；非法上下文（伪造非 UUID actorId）→ 受控 500 且日志 / 响应不回显该值。
+
+未改语义（防 DoS 与撤销/过期）保持：不同连接尝试接管旧 session 返回 403 且原连接仍可继续；撤销 / 过期凭据立即不可用，响应不区分失败原因。
+
+### 新增、修改、删除的文件清单
+
+新增：
+- apps/server/test/mcp-session-registry.test.ts（1 个测试：两个 connection 建立两个 server 各持绑定上下文）
+
+修改：
+- apps/server/src/mcp/mcp-server.ts（`McpServerDeps.authContext`）
+- apps/server/src/mcp/mcp-sessions.ts（构造 `Omit<McpServerDeps,'authContext'>`、prepare 注入）
+- apps/server/src/api/routes/mcp.ts（`resolveAuthContext` 捕获 / 脱敏 / 统一校验 / 冻结、Bearer 正则）
+- apps/server/src/domain/mcp-auth/mcp-authenticator.ts（`MCP_AUTH_PERMISSION_PROFILE_MAX_LENGTH` 与统一校验）
+- apps/server/src/infrastructure/auth/in-memory-mcp-authenticator.ts（expiresAt 校验、重复 token 拒绝）
+- apps/server/test/mcp-authenticator.test.ts（6 → 9 个测试）
+- apps/server/test/mcp-http-auth.test.ts（7 → 9 个测试）
+- apps/server/test/mcp-protocol.test.ts（5 个 `buildMcpServer` 调用点补 `authContext: null`）
+
+删除：无。
+
+### 关键设计决定及其依据
+
+1. **身份注入 server 实例私有，而非共享全局**：写工具要按服务端身份落账，必须从“该连接自己的 server 依赖”取身份。session 私有 + 只读 + 每连接独立实例，避免全局可变身份被跨连接污染；这正是小喵返修 1 的边界。当前五个只读工具仍不输出身份、不新增 whoami，只为下一批写工具铺路。
+2. **认证配置构造期即 fail-closed**：非法 expiresAt 若保存为 NaN，`Date.now() >= NaN` 永远 false 会变成永不过期，因此必须在登记前拒绝；重复 token hash 的 Map key 会被静默覆盖，因此重复即拒绝。错误统一走不携带任何值 / 摘要的 `McpAuthConfigurationError`。
+3. **认证器异常在边界内脱敏**：`resolveAuthContext` 是认证边界，未来 OAuth / 数据库认证器抛出的连接串 / 密码绝不能进入记录完整异常的通用路径；只记录稳定 errType，响应回受控 500，registry 不建 session。
+4. **认证成功仍统一防守校验 + 冻结**：不能假设任意 `McpAuthenticator` 实现会自行验证上下文；路由统一调用 `assertValidMcpAuthContext` 并复制 / `Object.freeze`，外部实现无法在认证后修改同一对象再污染绑定。permissionProfile 长度并入统一校验，避免出现只查非空的绕过路径。
+5. **Bearer 拒绝任意空白**：`[^\s]` 是空白字符补集，token 内出现空格 / tab / 换行都不匹配，杜绝利用解析歧义绕过或吞并后续字段。
+
+### 执行过的测试或检查、命令与真实结果
+
+- `npx tsc --noEmit`（apps/server）：通过，无错误。
+- `npm run typecheck`（根，contracts + server）：通过。
+- `npx vitest run test/mcp-authenticator.test.ts test/mcp-session-registry.test.ts test/mcp-http-auth.test.ts test/mcp-protocol.test.ts test/mcp-http-smoke-auth.test.ts test/mcp-http.test.ts test/mcp-http-smoke.test.ts`：7 个文件 60/60 通过（authenticator 9、registry 1、http-auth 9、protocol 21、smoke-auth 1、http 18、smoke 1）。
+- `npm test`（全量）：34 个文件 **637/637 通过**（631 + 新增 6）。
+- 真实 auth 冒烟（`mcp-http-smoke-auth.test.ts`，真实 socket 127.0.0.1 临时端口 + 官方 SDK 客户端 + Bearer）：通过。
+- `.ts` 全量 NUL 字节扫描：0 bad files。
+- `git diff --check`：exit 0，仅 Windows LF→CRLF 提示（无害）。
+
+### 未完成内容、已知问题和风险
+
+- 仅返修四组安全问题；未实现写 Tool / OAuth / 数据库 / 外部接入，未开始 `study_append_report`。
+- 未修改任何计划复选框；未执行 Git / GitHub / VPS 操作；未改动 `docs/project-plan-v0.1.md`、`第一关卡完成报告.txt`、`第二关卡报告.txt`。
+- 身份已注入 server 依赖但当前工具不使用；真实生产凭据 / OAuth 仍留待后续批次。
+- 测试运行中 production 未注入场景的既有 info 日志会打印到 stdout（沿用 #16 既有测试行为，非本批引入），不影响结果。
+
+### 是否涉及数据库、身份权限、密钥、外部服务或破坏性变化
+
+是：本批即身份认证 / 权限 / 密钥处理逻辑的安全返修（fail-closed 配置、异常脱敏、Bearer 与上下文边界收紧），是 CLAUDE.md 强制检查点的直接对象。不涉及数据库 / Migration、外部服务，无破坏性变化。
+
+### 建议下一批任务
+
+等待小喵复验本返修。复验通过后，小喵再决定 #16 是否归档 / 提交推送；后续写工具 `study_append_report` 的批次由小喵在计划 / 汇报中指定。
+
+等待小喵复验。
+
+---
+
+## 小喵复验结果 #16 · 仍需最后一处安全返修 · 2026-08-10
+
+### 复验结论
+
+本轮四组主要返修均已正确落地：身份确实注入每个独立 `McpServer`，非法过期时间与重复 token hash 已 fail-closed，未知认证器异常已在认证边界内脱敏，Bearer 解析与权限配置长度也已收紧。专项测试 **60/60**、全量测试 **637/637**、根目录 typecheck、真实 HTTP auth 冒烟、`git diff --check` 与 NUL 扫描均通过。
+
+但身份边界还剩一处真实的秘密夹带风险，因此本检查点暂不验收、不提交：
+
+- `resolveAuthContext()` 当前使用 `Object.freeze({ ...context })`。`McpAuthenticator` 是可替换接口，运行时返回值可能带有 TypeScript 类型之外的可枚举字段；对象展开会把例如 `token`、`tokenHash`、`authorization`、`secret` 一并复制进 session 与 `McpServer`。冻结只能防修改，不能防秘密字段被保存，这与“registry / debug 信息永不保存 token 或 token hash”的边界冲突。
+
+### 必须修复（只修这一处，不扩大批次）
+
+1. 认证成功后不要展开任意认证器返回对象；显式构造并冻结只含以下五个白名单字段的新对象：`actorId`、`actorCode`、`actorType`、`connectionId`、`permissionProfile`。
+2. 补一条边界测试：让假的认证器在合法五字段之外，运行时额外返回 `token`、`tokenHash`、`authorization`、`secret`（可以用测试内类型断言模拟）。请求仍应正常建立 session，但 registry / server 绑定的 `authContext` 必须只有五个白名单键；序列化结果不得包含任一夹带值。
+3. 保持当前所有认证、会话隔离、错误脱敏和既有 MCP 测试不回归。返修后重新执行专项测试、根目录 typecheck、全量测试、NUL 扫描和 `git diff --check`，把真实结果追加到本文件末尾后暂停。
+
+### 边界
+
+- 本轮没有可勾选的计划项；不要修改 `docs/project-plan-v0.1.md`。
+- 不开始 `study_append_report` 或下一批，不执行 Git / GitHub / VPS 操作。
+- 只做上述白名单复制与对应测试，不改协议响应、不新增工具。
+
+等待 DS 完成最后一处安全返修后再由小喵复验。
+
+---
+
+## 检查点 #17 · MCP 认证白名单复制返修（响应小喵复验 #16）· 2026-08-10
+
+### 本批次目标
+
+响应小喵复验 #16 的最后一处安全返修：认证成功后不得展开任意认证器返回对象，改为显式构造并冻结只含五个身份白名单字段的新对象；补一条边界测试，验证 token / tokenHash / authorization / secret 等夹带字段不会进入 session。
+
+### 候选完成的计划项目原文
+
+无。复验要求明确本轮没有可勾选的计划项；未修改 `docs/project-plan-v0.1.md` 任何复选框。
+
+### 实际完成内容
+
+1. `resolveAuthContext()` 不再使用 `Object.freeze({ ...context })` 展开复制，改为显式构造并冻结只含 `actorId`、`actorCode`、`actorType`、`connectionId`、`permissionProfile` 五个白名单字段的新对象。展开复制会把可替换认证器运行时返回的、TypeScript 类型之外的可枚举字段（token / tokenHash / authorization / secret）一并复制进 session 与 server 依赖；冻结只能防修改、不能防秘密字段被保存。
+2. 在 `mcp-http-auth.test.ts` 新增边界测试 `whitelists only the five identity fields on the bound authContext, dropping smuggled secrets`：假认证器在合法五字段之外运行时额外返回 token / tokenHash / authorization / secret（测试内类型断言模拟第三方实现）。initialize 仍正常建立 session，但绑定上下文的 `Object.keys` 恰为五个白名单键，且序列化结果不含任一夹带值。
+
+### 新增、修改、删除的文件清单
+
+- 修改 `apps/server/src/api/routes/mcp.ts`（仅 `resolveAuthContext` 认证成功后的返回处）。
+- 修改 `apps/server/test/mcp-http-auth.test.ts`（新增 1 条边界测试）。
+- 无新增、无删除文件。
+
+### 关键设计决定及其依据
+
+1. **白名单复制而非过滤 / 解构剔除**：过滤方式会在接口新增字段时静默漏放行；显式枚举五个白名单字段是 fail-closed 方向，未来扩展接口字段也必须显式决定是否放行。
+2. **在认证边界内一次完成**：统一校验（`assertValidMcpAuthContext`）在前、白名单复制 + 冻结在后，绑定到 registry session 与 server 依赖的始终是同一份五键只读对象；二者共享引用，一处断言覆盖两端。
+3. **测试用类型断言模拟“越界”实现**：`McpAuthenticator` 是可替换接口，TS 类型约束不了第三方实现运行时形状；测试对象字面量附带四个夹带字段 + `as McpAuthContext` 精确复现该风险。
+
+### 执行过的测试或检查、命令与真实结果
+
+- `npx vitest run test/mcp-authenticator.test.ts test/mcp-session-registry.test.ts test/mcp-http-auth.test.ts test/mcp-protocol.test.ts test/mcp-http-smoke-auth.test.ts test/mcp-http.test.ts test/mcp-http-smoke.test.ts`：7 个文件 **61/61 通过**（原 60 + 新增 1；http-auth 9→10）。
+- `npx tsc --noEmit`（apps/server）：通过，exit 0。
+- `npm run typecheck`（根，contracts + server）：通过。
+- `npm test`（全量）：34 个文件 **638/638 通过**（原 637 + 新增 1）。
+- `.ts` 全量 NUL 字节扫描：**0 bad files**。注：Git Bash 的 `grep -l $'\x00'` 在 Windows 下误报 93 个文件（含本次未改动的 `health.ts`），经 Python `b'\x00'` 精确复核全部为假阳性，结论与 #16 采用同一可靠方法时一致。
+- `git diff --check`：exit 0，仅 Windows LF→CRLF 提示（无害）。
+
+### 未完成内容、已知问题和风险
+
+- 仅完成小喵复验 #16 指定的最后一处返修；未实现写 Tool / OAuth / 数据库 / 外部接入，未开始 `study_append_report`。
+- 未修改任何计划复选框；未执行 Git / GitHub / VPS 操作；未改动 `docs/project-plan-v0.1.md`、`第一关卡完成报告.txt`、`第二关卡报告.txt`。
+- 测试运行中 production 未注入场景的既有 info 日志会打印到 stdout（沿用 #16 既有测试行为，非本批引入），不影响结果。
+
+### 是否涉及数据库、身份权限、密钥、外部服务或破坏性变化
+
+是：本批即身份认证 / 密钥处理逻辑的安全返修（认证结果白名单复制，杜绝秘密字段夹带），是 CLAUDE.md 强制检查点的直接对象。不涉及数据库 / Migration、外部服务，无破坏性变化，无新增依赖。
+
+### 建议下一批任务
+
+等待小喵复验本返修。复验通过后，由小喵决定 #16 / #17 是否归档、提交推送；后续写工具 `study_append_report` 的批次由小喵在计划 / 汇报中指定。
+
+等待小喵审核。
+
+---
+
+## 小喵复验结果 #16 / #17 · 通过 · 2026-08-10
+
+### 验收结论
+
+通过。本轮最后一处身份安全边界已经正确收口：认证器返回值不再通过对象展开进入 session，而是在统一校验后显式构造只含 `actorId`、`actorCode`、`actorType`、`connectionId`、`permissionProfile` 的冻结对象。运行时额外夹带的 `token`、`tokenHash`、`authorization`、`secret` 均会被丢弃，不进入 registry 或该连接私有的 `McpServer` 依赖。
+
+### 小喵独立复验结果
+
+- 根目录 `npm run typecheck`：通过。
+- MCP 专项：7 个文件，**61/61 通过**。
+- 全量测试：34 个文件，**638/638 通过**。
+- `git diff --check`：通过，仅 Windows LF→CRLF 提示。
+- NUL 扫描：0。
+- 代码与汇报一致；没有修改计划复选框，也没有开始 `study_append_report`。
+
+### 验收说明
+
+- 检查点 #16 的 MCP 连接身份绑定基础与检查点 #17 的白名单复制返修一起验收。
+- 本批本来就没有对应计划复选框，因此不修改 `docs/project-plan-v0.1.md`。
+- 可以归档并提交推送；下一批由小喵另行追加任务说明。
