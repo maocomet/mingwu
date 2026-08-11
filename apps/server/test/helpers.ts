@@ -3,6 +3,7 @@ import type {
   Project,
   ProjectStage,
   ProjectTask,
+  ProjectWorkReport,
   StageUpdateRequest,
   StudyParticipant,
   StudyReport,
@@ -19,6 +20,7 @@ import { StudySessionDetailService } from '../src/application/study-session-deta
 import { StudySummaryService } from '../src/application/study-summary/study-summary-service.js';
 import { StudyReportService } from '../src/application/study-report/study-report-service.js';
 import { StageUpdateRequestService } from '../src/application/stage-update-request/stage-update-request-service.js';
+import { ProjectWorkReportService } from '../src/application/project-work-report/project-work-report-service.js';
 import { InMemoryProjectRepository } from '../src/infrastructure/repositories/in-memory-project-repository.js';
 import { InMemoryStageRepository } from '../src/infrastructure/repositories/in-memory-stage-repository.js';
 import { InMemoryProjectTaskRepository } from '../src/infrastructure/repositories/in-memory-project-task-repository.js';
@@ -28,6 +30,7 @@ import { InMemoryStudyReportRepository } from '../src/infrastructure/repositorie
 import { InMemoryStudyParticipantRepository } from '../src/infrastructure/repositories/in-memory-study-participant-repository.js';
 import { InMemoryStageUpdateRequestRepository } from '../src/infrastructure/repositories/in-memory-stage-update-request-repository.js';
 import { InMemoryStageUpdateRequestApprovalRepository } from '../src/infrastructure/repositories/in-memory-stage-update-request-approval-repository.js';
+import { InMemoryProjectWorkReportRepository } from '../src/infrastructure/repositories/in-memory-project-work-report-repository.js';
 import { createInMemoryStore } from '../src/infrastructure/stores/in-memory-store.js';
 
 /** 共享同一组仓储，保证项目 / 关卡 / 任务 / 学习会话写入互相可见。 */
@@ -45,6 +48,7 @@ export function makeServices() {
   const stageUpdateRequestApprovalRepository = new InMemoryStageUpdateRequestApprovalRepository(
     store,
   );
+  const projectWorkReportRepository = new InMemoryProjectWorkReportRepository(store);
   const projectService = new ProjectService(projectRepository);
   const stageService = new StageService(stageRepository, projectRepository);
   const taskService = new ProjectTaskService(taskRepository, stageRepository, projectRepository);
@@ -77,6 +81,10 @@ export function makeServices() {
     stageUpdateRequestApprovalRepository,
     stageRepository,
   );
+  const projectWorkReportService = new ProjectWorkReportService(
+    projectWorkReportRepository,
+    stageRepository,
+  );
   return {
     store,
     projectRepository,
@@ -88,6 +96,7 @@ export function makeServices() {
     studyParticipantRepository,
     stageUpdateRequestRepository,
     stageUpdateRequestApprovalRepository,
+    projectWorkReportRepository,
     projectService,
     stageService,
     taskService,
@@ -98,6 +107,7 @@ export function makeServices() {
     studySummaryService,
     studyReportService,
     stageUpdateRequestService,
+    projectWorkReportService,
   };
 }
 
@@ -249,5 +259,30 @@ export function makeStageUpdateRequest(
     updatedAt: overrides.updatedAt ?? now,
     decision: overrides.decision ?? null,
     createdAt: overrides.createdAt ?? now,
+  };
+}
+
+export function makeProjectWorkReport(
+  overrides: Partial<ProjectWorkReport> = {},
+): ProjectWorkReport {
+  const now = new Date().toISOString();
+  return {
+    id: overrides.id ?? uuid(),
+    projectId: overrides.projectId ?? uuid(),
+    stageId: overrides.stageId ?? uuid(),
+    submittedActorId: overrides.submittedActorId ?? uuid(),
+    submittedAt: overrides.submittedAt ?? now,
+    roundGoal: overrides.roundGoal ?? '完成第一关',
+    completedContent: overrides.completedContent ?? '完成设计稿与接口文档',
+    changeSummary: overrides.changeSummary ?? '新增 Project Work Report 契约',
+    changedFiles: overrides.changedFiles ?? ['packages/contracts/src/project-work-report.ts'],
+    testResults: overrides.testResults ?? '专项测试全部通过',
+    currentProgress: overrides.currentProgress ?? '80%',
+    remainingIssues: overrides.remainingIssues ?? '等待用户验收',
+    nextSteps: overrides.nextSteps ?? '进入下一关',
+    relatedAssetIds: overrides.relatedAssetIds ?? [],
+    relatedTaskId: overrides.relatedTaskId ?? null,
+    relatedAiTaskId: overrides.relatedAiTaskId ?? null,
+    relatedReviewId: overrides.relatedReviewId ?? null,
   };
 }

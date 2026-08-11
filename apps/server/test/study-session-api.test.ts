@@ -24,6 +24,7 @@ function setup(now?: () => string) {
     studySummaryService: services.studySummaryService,
     studyReportService: services.studyReportService,
     stageUpdateRequestService: services.stageUpdateRequestService,
+    projectWorkReportService: services.projectWorkReportService,
   });
   return { app, services };
 }

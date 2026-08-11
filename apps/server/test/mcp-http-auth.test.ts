@@ -37,6 +37,7 @@ function setupAuth(
     studySummaryService: services.studySummaryService,
     studyReportService: services.studyReportService,
     stageUpdateRequestService: services.stageUpdateRequestService,
+    projectWorkReportService: services.projectWorkReportService,
     mcpAuthenticator: authenticator,
     logger,
   });

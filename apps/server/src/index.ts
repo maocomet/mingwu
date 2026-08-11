@@ -10,6 +10,7 @@ import { StudySessionDetailService } from './application/study-session-detail/st
 import { StudySummaryService } from './application/study-summary/study-summary-service.js';
 import { StudyReportService } from './application/study-report/study-report-service.js';
 import { StageUpdateRequestService } from './application/stage-update-request/stage-update-request-service.js';
+import { ProjectWorkReportService } from './application/project-work-report/project-work-report-service.js';
 import { InMemoryProjectRepository } from './infrastructure/repositories/in-memory-project-repository.js';
 import { InMemoryStageRepository } from './infrastructure/repositories/in-memory-stage-repository.js';
 import { InMemoryProjectTaskRepository } from './infrastructure/repositories/in-memory-project-task-repository.js';
@@ -19,6 +20,7 @@ import { InMemoryStudyReportRepository } from './infrastructure/repositories/in-
 import { InMemoryStudyParticipantRepository } from './infrastructure/repositories/in-memory-study-participant-repository.js';
 import { InMemoryStageUpdateRequestRepository } from './infrastructure/repositories/in-memory-stage-update-request-repository.js';
 import { InMemoryStageUpdateRequestApprovalRepository } from './infrastructure/repositories/in-memory-stage-update-request-approval-repository.js';
+import { InMemoryProjectWorkReportRepository } from './infrastructure/repositories/in-memory-project-work-report-repository.js';
 import { createInMemoryStore } from './infrastructure/stores/in-memory-store.js';
 
 async function main(): Promise<void> {
@@ -36,6 +38,7 @@ async function main(): Promise<void> {
   const stageUpdateRequestApprovalRepository = new InMemoryStageUpdateRequestApprovalRepository(
     store,
   );
+  const projectWorkReportRepository = new InMemoryProjectWorkReportRepository(store);
   const projectService = new ProjectService(projectRepository);
   const stageService = new StageService(stageRepository, projectRepository);
   const taskService = new ProjectTaskService(taskRepository, stageRepository, projectRepository);
@@ -68,6 +71,10 @@ async function main(): Promise<void> {
     stageUpdateRequestApprovalRepository,
     stageRepository,
   );
+  const projectWorkReportService = new ProjectWorkReportService(
+    projectWorkReportRepository,
+    stageRepository,
+  );
   const app = buildApp({
     config,
     projectService,
@@ -80,6 +87,7 @@ async function main(): Promise<void> {
     studySummaryService,
     studyReportService,
     stageUpdateRequestService,
+    projectWorkReportService,
   });
 
   const shutdown = async (signal: string): Promise<void> => {

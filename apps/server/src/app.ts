@@ -14,6 +14,7 @@ import type { StudySessionDetailService } from './application/study-session-deta
 import type { StudySummaryService } from './application/study-summary/study-summary-service.js';
 import type { StudyReportService } from './application/study-report/study-report-service.js';
 import type { StageUpdateRequestService } from './application/stage-update-request/stage-update-request-service.js';
+import type { ProjectWorkReportService } from './application/project-work-report/project-work-report-service.js';
 import {
   healthRoutes,
   type ReadinessCheck,
@@ -26,6 +27,7 @@ import { stageRoutes } from './api/routes/stages.js';
 import { studySessionRoutes } from './api/routes/study-sessions.js';
 import { taskRoutes } from './api/routes/tasks.js';
 import { stageUpdateRequestRoutes } from './api/routes/stage-update-requests.js';
+import { projectWorkReportRoutes } from './api/routes/project-work-reports.js';
 import {
   ProjectConflictError,
   ProjectIdempotencyConflictError,
@@ -53,6 +55,7 @@ import {
   StageUpdateRequestRevisionInvalidError,
   StageUpdateRequestStageOwnershipConflictError,
 } from './domain/stage-update-request/errors.js';
+import { ProjectWorkReportScopeCorruptError } from './domain/project-work-report/errors.js';
 import {
   StudySessionHistoryCursorInvalidError,
   StudySessionHistoryDataCorruptError,
@@ -88,6 +91,7 @@ export interface AppDeps {
   studySummaryService: StudySummaryService;
   studyReportService: StudyReportService;
   stageUpdateRequestService: StageUpdateRequestService;
+  projectWorkReportService: ProjectWorkReportService;
   /**
    * 可选 MCP Bearer 认证器。未注入时 production 对 /mcp 一律 503
    * mcp_auth_not_configured（fail-closed），development / test 保留仅限本地
@@ -151,6 +155,10 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   app.register(stageUpdateRequestRoutes, {
     prefix: '/api/v1',
     stageUpdateRequestService: deps.stageUpdateRequestService,
+  });
+  app.register(projectWorkReportRoutes, {
+    prefix: '/api/v1',
+    projectWorkReportService: deps.projectWorkReportService,
   });
 
   // MCP Streamable HTTP 挂在根路径 /mcp（不在 /api/v1 下），本地测试专用。
@@ -398,6 +406,25 @@ export function buildApp(deps: AppDeps): FastifyInstance {
       return reply.status(409).send({
         error: 'stage_update_request_stage_ownership_conflict',
         message: error.message,
+      });
+    }
+    // 关卡工作报告范围 / 归属不一致（报告 stageId 不匹配请求关卡，或 projectId 与
+    // 正式 Stage 不一致）属于服务端数据问题（存储脏数据 / 跨项目串档），返回 500 与
+    // 受控错误码。报告 / 关卡 / 项目 / Actor 的内部 ID 只进服务端日志，绝不进入响应。
+    if (error instanceof ProjectWorkReportScopeCorruptError) {
+      request.log.error(
+        {
+          reportId: error.reportId,
+          expectedStageId: error.expectedStageId,
+          expectedProjectId: error.expectedProjectId,
+          actualStageId: error.actualStageId,
+          actualProjectId: error.actualProjectId,
+        },
+        'project work report scope corruption detected',
+      );
+      return reply.status(500).send({
+        error: 'project_work_report_scope_corrupt',
+        message: 'project work report scope is inconsistent',
       });
     }
     if (error.validation) {

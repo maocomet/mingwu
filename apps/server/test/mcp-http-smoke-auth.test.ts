@@ -35,6 +35,7 @@ describe('MCP Streamable HTTP real-HTTP auth smoke (127.0.0.1, ephemeral port)',
       studySummaryService: services.studySummaryService,
       studyReportService: services.studyReportService,
       stageUpdateRequestService: services.stageUpdateRequestService,
+      projectWorkReportService: services.projectWorkReportService,
       mcpAuthenticator: makeAuthenticator(),
     });
     await app.listen({ host: '127.0.0.1', port: 0 });

@@ -16,6 +16,7 @@ function setup() {
     studySummaryService,
     studyReportService,
     stageUpdateRequestService,
+    projectWorkReportService,
   } = makeServices();
   const app = buildApp({
     config,
@@ -29,6 +30,7 @@ function setup() {
     studySummaryService,
     studyReportService,
     stageUpdateRequestService,
+    projectWorkReportService,
   });
   return { app, config };
 }
@@ -77,6 +79,7 @@ describe('health endpoints', () => {
     studySummaryService,
     studyReportService,
     stageUpdateRequestService,
+    projectWorkReportService,
   } = makeServices();
     const app = buildApp({
       config,
@@ -90,6 +93,7 @@ describe('health endpoints', () => {
       studySummaryService,
       studyReportService,
       stageUpdateRequestService,
+    projectWorkReportService,
       readinessChecks: [
         { name: 'database', check: async () => ({ ok: true }) },
         { name: 'migrations', check: async () => ({ ok: true }) },
@@ -115,6 +119,7 @@ describe('health endpoints', () => {
     studySummaryService,
     studyReportService,
     stageUpdateRequestService,
+    projectWorkReportService,
   } = makeServices();
     const app = buildApp({
       config,
@@ -128,6 +133,7 @@ describe('health endpoints', () => {
       studySummaryService,
       studyReportService,
       stageUpdateRequestService,
+    projectWorkReportService,
       readinessChecks: [
         { name: 'database', check: async () => ({ ok: true }) },
         {
@@ -158,6 +164,7 @@ describe('health endpoints', () => {
     studySummaryService,
     studyReportService,
     stageUpdateRequestService,
+    projectWorkReportService,
   } = makeServices();
     const app = buildApp({
       config,
@@ -171,6 +178,7 @@ describe('health endpoints', () => {
       studySummaryService,
       studyReportService,
       stageUpdateRequestService,
+    projectWorkReportService,
       readinessChecks: [
         { name: 'database', check: async () => ({ ok: true }) },
         {
@@ -204,6 +212,7 @@ describe('health endpoints', () => {
     studySummaryService,
     studyReportService,
     stageUpdateRequestService,
+    projectWorkReportService,
   } = makeServices();
     const app = buildApp({
       config,
@@ -217,6 +226,7 @@ describe('health endpoints', () => {
       studySummaryService,
       studyReportService,
       stageUpdateRequestService,
+    projectWorkReportService,
       readinessChecks: [
         { name: 'database', check: async () => ({ ok: true }) },
         {
@@ -247,6 +257,7 @@ describe('health endpoints', () => {
     studySummaryService,
     studyReportService,
     stageUpdateRequestService,
+    projectWorkReportService,
   } = makeServices();
     const app = buildApp({
       config,
@@ -260,6 +271,7 @@ describe('health endpoints', () => {
       studySummaryService,
       studyReportService,
       stageUpdateRequestService,
+    projectWorkReportService,
       readyzTimeoutMs: 50,
       readinessChecks: [
         { name: 'database', check: async () => ({ ok: true }) },

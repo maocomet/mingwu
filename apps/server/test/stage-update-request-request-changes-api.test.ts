@@ -28,6 +28,7 @@ function setup(
     studyReportService: services.studyReportService,
     stageUpdateRequestService:
       overrides.stageUpdateRequestService ?? services.stageUpdateRequestService,
+    projectWorkReportService: services.projectWorkReportService,
     ...(overrides.logger ? { logger: overrides.logger } : {}),
   });
   return { app, services };
@@ -626,6 +627,7 @@ describe('POST request-changes real-HTTP smoke (127.0.0.1, ephemeral port)', () 
       studySummaryService: services.studySummaryService,
       studyReportService: services.studyReportService,
       stageUpdateRequestService: services.stageUpdateRequestService,
+      projectWorkReportService: services.projectWorkReportService,
     });
     await app.listen({ host: '127.0.0.1', port: 0 });
     const address = app.server.address();

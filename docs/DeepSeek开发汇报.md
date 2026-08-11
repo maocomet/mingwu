@@ -5783,3 +5783,141 @@ App API 严格输入、服务层 `pending -> needs_changes`、同语义重试、
 - 已将 `docs/project-plan-v0.1.md` 中 `- [ ] 批准更新申请` 更新为 `- [x] 批准更新申请`。
 
 本批验收通过，可以提交并推送到 `develop`；下一批任务仍由小喵单独下发。
+
+---
+
+## 小喵任务 #30 · 获取关卡报告（Project Work Report 只读基础）· 2026-08-11
+
+### 本批唯一候选计划项
+
+- `- [ ] 获取关卡报告`
+
+本批只完成 Stage API 的关卡工作报告读取能力；不要顺带勾选或实现 `project_list_reports`、报告提交、AI Task、AuditLog、数据库、认证、前端或其他计划项。
+
+### 必须完成
+
+1. 建立独立的 **Project Work Report** 契约与领域模型，不能复用自习室 `StudyReport`。模型至少能表达：报告 ID、项目 ID、可选关卡关联、提交 Actor ID、提交时间、本轮目标、完成内容、修改摘要、修改文件、测试结果、当前进度、遗留问题、下一步计划及相关素材 ID；为未来关联 ProjectTask、AI Task、审核记录预留可选 ID，但不要在本批实现这些模块。
+2. 建立只读所需的 repository 能力与内存实现，至少支持按 `stageId` 列出报告；返回值必须深拷贝，不能让调用者修改仓储内部状态。由于本批没有报告提交 API，测试可以通过明确的测试装配 / seed 路径注入不可变报告，但不得暴露生产 HTTP 写入口。
+3. 实现 `GET /api/v1/stages/:stageId/reports`：
+   - 未知关卡返回受控 `404 stage_not_found`；
+   - 已有关卡但无报告返回 `200` 和空列表；
+   - 只返回直接关联该关卡的 Project Work Report，不混入其他关卡、其他项目或 Study Report；
+   - 明确固定排序为 `submittedAt` 新到旧，同一时间按 `id` 升序兜底，并写入代码注释与测试；
+   - 响应使用严格 JSON Schema，字段与数组项不允许未声明内容。
+4. 增加数据完整性防线：若按关卡读取到的报告 `stageId` 不匹配，或报告 `projectId` 与正式 Stage 的 `projectId` 不匹配，必须返回受控 `500 project_work_report_scope_corrupt`；响应不得泄露报告、关卡、项目或 Actor 的内部 ID，详细信息只进服务端日志。
+5. 契约、服务、仓储、API 四层测试至少覆盖：空列表、多报告稳定排序、同时间 ID 兜底、跨关卡隔离、跨项目隔离、两类脏数据、深拷贝、未知关卡、严格 response schema，以及真实 HTTP 冒烟。
+6. 保持当前 Fastify + TypeScript + ESM 分层和 `coerceTypes: false`；不要接受客户端伪造 Actor，不要修改既有 Study Report 语义。
+
+### PostgreSQL 迁移说明
+
+- 本批仍使用内存仓储，但在接口旁写清第六关落库要求：`project_work_reports` 需要按 `stage_id, submitted_at DESC, id ASC` 建索引，并以外键 / 事务保证 project、stage 关联一致；本批不创建 migration。
+
+### 验收与汇报
+
+- 完成后运行专项测试、根目录 typecheck、全量测试、真实 HTTP 冒烟、NUL / BOM 扫描与 `git diff --check`。
+- 在本文件末尾追加一个新检查点，列出真实文件、设计决定、测试数字、未完成内容和风险，然后暂停等待小喵审核。
+- 不修改任何计划复选框，不执行 Git / GitHub / VPS 操作，不开始下一批；不要读取或修改 `.claude/` 与 `ui素材mingwu/`。
+
+等待 DS 完成检查点后由小喵审核。
+
+---
+
+## 检查点 #30 · 获取关卡报告（Project Work Report 只读基础）· 2026-08-11
+
+### 本批次目标
+
+按小喵任务 #30 完成“获取关卡报告”的只读基础：独立 Project Work Report 契约与领域模型、只读仓储与内存实现、`GET /api/v1/stages/:stageId/reports` 接口、数据完整性防线，以及契约 / 服务 / 仓储 / API 四层测试与真实 HTTP 冒烟。只做读取，不实现报告提交与任何其他计划项。
+
+### 候选完成的计划项目原文
+
+- `- [ ] 获取关卡报告`
+
+### 实际完成内容
+
+- 建立独立 `ProjectWorkReport` 契约与严格 JSON Schema（未复用自习室 `StudyReport`），模型表达报告 ID、项目 ID、可选关卡关联、提交 Actor ID、提交时间、本轮目标、完成内容、修改摘要、修改文件、测试结果、当前进度、遗留问题、下一步计划及相关素材 ID；为未来关联 `relatedTaskId` / `relatedAiTaskId` / `relatedReviewId` 预留可选字段（本批恒为 `null`），未实现相关模块。
+- 只读仓储接口仅含 `listByStageId`；内存实现支持按 `stageId` 过滤、固定排序 `submittedAt DESC` 再 `id ASC` 兜底，并返回深拷贝。`InMemoryProjectWorkReportRepository.seed()` 仅作为测试装配路径，不在仓储接口上，也未暴露任何生产 HTTP 写入口。
+- 实现 `GET /api/v1/stages/:stageId/reports`：未知关卡返回受控 `404 stage_not_found`；已有关卡无报告返回 `200` 与空列表；只返回直接关联该关卡的报告，不混入其他关卡、其他项目或 StudyReport；固定排序写入仓储代码注释与测试；响应使用严格 JSON Schema（`additionalProperties: false`，数组项也禁止未声明内容）。
+- 数据完整性防线：服务层对读取到的每条报告校验 `stageId` 与 `projectId` 是否与正式 Stage 一致，不一致抛 `ProjectWorkReportScopeCorruptError`，由 `app.ts` 转为受控 `500 project_work_report_scope_corrupt`；响应体为固定错误码与固定消息，报告 / 关卡 / 项目 / Actor 内部 ID 一律不进响应，明细只进服务端日志（`request.log.error`）。
+- 未新增数据库 migration；在仓储接口旁以注释写明第六关落库要求：`project_work_reports` 需按 `(stage_id, submitted_at DESC, id ASC)` 建索引，并以 FK / 事务保证 project、stage 关联一致。
+
+### 新增文件
+
+- `packages/contracts/src/project-work-report.ts`
+- `apps/server/src/domain/project-work-report/errors.ts`
+- `apps/server/src/domain/project-work-report/repository.ts`
+- `apps/server/src/infrastructure/repositories/in-memory-project-work-report-repository.ts`
+- `apps/server/src/application/project-work-report/project-work-report-service.ts`
+- `apps/server/src/api/routes/project-work-reports.ts`
+- `apps/server/test/project-work-report-contract.test.ts`
+- `apps/server/test/project-work-report-repository.test.ts`
+- `apps/server/test/project-work-report-service.test.ts`
+- `apps/server/test/project-work-report-api.test.ts`
+
+### 修改文件
+
+- `packages/contracts/src/index.ts`（导出 `project-work-report`）
+- `apps/server/src/infrastructure/stores/in-memory-store.ts`（`InMemoryStore` 增加 `projectWorkReports: Map`）
+- `apps/server/src/app.ts`（`AppDeps` 新增 `projectWorkReportService`、注册路由、增加 `project_work_report_scope_corrupt` 500 错误分支）
+- `apps/server/src/index.ts`（装配 `InMemoryProjectWorkReportRepository` 与 `ProjectWorkReportService` 并注入 `buildApp`）
+- `apps/server/test/helpers.ts`（`makeServices` 新增 `projectWorkReportRepository` / `projectWorkReportService`；新增 `makeProjectWorkReport()` 工厂；`seedStage` 改为返回完整 `ProjectStage` 对象）
+- 16 个既有测试文件同步补齐 `AppDeps` 新依赖：`health`、`project-api`、`project-status-api`、`project-task-api`、`stage-api`、`mcp-http`、`mcp-http-auth`、`mcp-http-smoke`、`mcp-http-smoke-auth`、`mcp-http-smoke-stage-update`、`study-session-api`、`study-session-detail-api`、`study-summary-api`、`stage-update-request-approval-api`、`stage-update-request-request-changes-api`
+- `docs/DeepSeek开发汇报.md`（本检查点，仅文件末尾追加）
+
+### 关键设计决定及其依据
+
+- 报告模型独立：与自习室 `StudyReport` 语义不同（工作汇报 vs 自习报告），各自字段、边界与排序互不影响；契约以 JSON Schema 强制字段白名单，杜绝未声明内容外泄。
+- 只读边界由接口保证：仓储接口仅暴露 `listByStageId`，写能力仅存在于内存实现类上的 `seed()` 测试装配方法，生产 HTTP 无任何写入口。
+- 排序确定化：`submittedAt DESC` + `id ASC` 兜底，保证同一时间戳下输出顺序稳定、可复验，与第六关 PostgreSQL 索引设计对齐。
+- 范围一致性防线放在服务层而非仓储层：服务同时持有正式 Stage，能校验报告归属与项目一致性；仓储只负责按 key 取数，职责单一。
+- 脏数据不泄露 ID：错误对象携带报告 / 关卡 / 项目 ID 仅用于服务端日志，`app.ts` 响应固定为 `{ error: 'project_work_report_scope_corrupt', message: 'project work report scope is inconsistent' }`。
+- 未知关卡与空列表区分：未知关卡是数据一致性问题（`404 stage_not_found`），空列表是合法结果（`200 { reports: [] }`），两者语义不同。
+
+### 执行过的测试或检查、命令与真实结果
+
+- 专项四层测试：`npx vitest run apps/server/test/project-work-report-contract.test.ts apps/server/test/project-work-report-repository.test.ts apps/server/test/project-work-report-service.test.ts apps/server/test/project-work-report-api.test.ts`
+  - 结果：**4 个文件全部通过，29/29 通过**（契约 9 + 仓储 6 + 服务 6 + API 8，含真实 HTTP 冒烟）。
+- 根目录 typecheck：`npm run typecheck` → **contracts 与 server 均通过**（`tsc --noEmit`，无错误）。
+- 全量测试：`npx vitest run` → **50 个测试文件、820/820 通过**。
+- NUL / BOM 扫描：新增与修改文件 **NUL=0、BOM=0**。
+- `git diff --check`：通过，仅有 Windows LF→CRLF 提示，无空白错误。
+
+### 未完成内容、已知问题和风险
+
+- 本批只完成读取；报告提交 / 写入 API、相关素材与 ProjectTask / AI Task / 审核记录的关联落地留待后续批次。
+- `relatedAssetIds` 仅校验为字符串数组，本批不校验素材是否存在（素材模块未落地）。
+- 范围腐败在内存仓储 + 测试装配路径下无法自然触发（seed 与正式 Stage 由同一测试代码控制），为防御性防线，已用假仓储 / 假服务在服务层与 API 层覆盖。
+- `AppDeps` 新增依赖使 16 个既有测试文件同步注入 `projectWorkReportService`，与既有批次模式一致，回归全量测试验证通过，风险低。
+
+### 是否涉及数据库、身份权限、密钥、外部服务或破坏性变化
+
+- 不涉及数据库 migration（第六关落库要求仅以注释写明）；不涉及身份认证、权限或密钥；不涉及 VPS / Cloudflare / GitHub 等外部服务；无删除文件等破坏性变更。
+
+### 建议下一批任务
+
+- 报告提交 / 写入 API（写路径需补齐幂等与 Actor 身份服务端解析），或按小喵安排继续推进后续计划项；本批不作为任何复选框打勾依据。
+
+等待小喵审核。
+
+---
+
+## 小喵审核结果 #30 · 通过 · 2026-08-11
+
+### 验收结论
+
+- `获取关卡报告` 已通过审核：Project Work Report 与自习室 Study Report 保持独立，Stage API 只读入口、严格响应契约、稳定排序和深拷贝边界均已落地。
+- 未知关卡与合法空列表语义清晰；其他关卡、项目级报告不会混入。报告与正式 Stage 的关卡或项目归属不一致时，会返回受控 `500 project_work_report_scope_corrupt`，内部 ID 不进入响应。
+- 本批没有暴露报告写入 HTTP 接口，没有越界实现 `project_list_reports`、AI Task、数据库、认证或前端。
+
+### 小喵独立复验
+
+- 根目录 typecheck：contracts 与 server 均通过。
+- 全量测试：**50 个测试文件、820/820 通过**。
+- 真实 HTTP 冒烟、同时间 ID 排序兜底、跨关卡隔离、跨项目脏数据防线、深拷贝与严格契约测试均通过。
+- 源码、测试、契约与文档扫描：**NUL=0、BOM=0**。
+- `git diff --check`：通过，仅有 Windows LF→CRLF 提示，无空白错误。
+
+### 计划更新
+
+- 已将 `docs/project-plan-v0.1.md` 中 `- [ ] 获取关卡报告` 更新为 `- [x] 获取关卡报告`。
+
+本批验收通过，可以提交并推送到 `develop`；下一批任务由小喵在推送后单独追加。
