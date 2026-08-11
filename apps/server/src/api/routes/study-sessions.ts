@@ -16,6 +16,8 @@ import {
   setCountdownBodySchema,
   setTaskBodySchema,
   startStudySessionBodySchema,
+  studySessionDetailJsonSchema,
+  studySessionDetailQuerySchema,
   studySessionHistoryPageJsonSchema,
   studySessionHistoryQuerySchema,
   studySessionJsonSchema,
@@ -26,6 +28,7 @@ import {
 import type { FastifyPluginAsync } from 'fastify';
 import { StudySessionHistoryLimitInvalidError } from '../../domain/study-session/errors.js';
 import type { StudySessionService } from '../../application/study-session/study-session-service.js';
+import type { StudySessionDetailService } from '../../application/study-session-detail/study-session-detail-service.js';
 import type { StudySummaryService } from '../../application/study-summary/study-summary-service.js';
 
 const HISTORY_PAGE_DEFAULT_LIMIT = 20;
@@ -49,9 +52,10 @@ function parseHistoryLimit(raw: string | undefined): number {
 
 export const studySessionRoutes: FastifyPluginAsync<{
   studySessionService: StudySessionService;
+  studySessionDetailService: StudySessionDetailService;
   studySummaryService: StudySummaryService;
 }> = async (app, opts) => {
-  const { studySessionService, studySummaryService } = opts;
+  const { studySessionService, studySessionDetailService, studySummaryService } = opts;
 
   // 幂等创建：id 由客户端生成并充当幂等键。重试相同 id + 相同内容返回已有 Session（200），
   // 相同 id + 不同内容返回稳定 409，不会因重试产生重复 Session。
@@ -139,6 +143,60 @@ export const studySessionRoutes: FastifyPluginAsync<{
     async (request) => {
       const { id } = request.params as { id: string };
       return studySessionService.getById(id);
+    },
+  );
+
+  // 单次 Study Session 完整详情（只读）：为 Windows 客户端提供已实现的四部分聚合
+  // （session / summary 可为 null / participants / reports）。直接复用既有
+  // StudySessionDetailService.getDetail 与 studySessionDetailJsonSchema，不在路由中
+  // 重新拼装或排序；真实排序语义由 service 层（joinedAt ASC, actorId ASC 等）保证。
+  // params 严格 UUID；querystring 严格空对象，不接受 body / 身份字段 / 额外 query，
+  // 非法 UUID / 未知 query 返回受控 400；Session 不存在复用既有 study_session_not_found。
+  // 请求体边界：本接口是纯只读 GET，不接受任何请求体。Fastify 对 GET 不填充
+  // request.body、也不允许 GET 定义 body schema（FST_ERR_ROUTE_BODY_VALIDATION_
+  // SCHEMA_NOT_SUPPORTED），因此在路由自己的 onRequest 用 HTTP framing 在读取正文
+  // 前 fail-fast：存在 Transfer-Encoding（含 chunked）→ 400；Content-Length 非法 /
+  // 多值 / 非零 → 400；仅 Content-Length: 0 或无正文 framing → 放行正常无 body GET。
+  // 只读 header、绝不读取 request.raw，避免无上限消费慢速或超大 body、绕过常规
+  // bodyLimit；不记录或回显 header / body 值。拒绝发生在调用 service 之前。
+  app.get(
+    '/study-sessions/:id/detail',
+    {
+      schema: {
+        params: studySessionParamsSchema,
+        querystring: studySessionDetailQuerySchema,
+        response: {
+          200: studySessionDetailJsonSchema,
+          // 请求体拒绝响应：与全局 errorHandler 的 validation_failed 形状一致。
+          400: {
+            type: 'object',
+            required: ['error', 'message'],
+            properties: { error: { type: 'string' }, message: { type: 'string' } },
+          },
+        },
+      },
+      onRequest: async (request, reply) => {
+        const headers = request.headers;
+        if (headers['transfer-encoding'] !== undefined) {
+          return reply
+            .status(400)
+            .send({ error: 'validation_failed', message: 'request body is not allowed' });
+        }
+        const contentLength = headers['content-length'];
+        if (contentLength !== undefined) {
+          // 非零、非法、多值合并的 Content-Length 都 fail-closed 拒绝；仅 "0" 放行。
+          const value = Array.isArray(contentLength) ? contentLength.join(',') : contentLength;
+          if (!/^0+$/.test(value.trim())) {
+            return reply
+              .status(400)
+              .send({ error: 'validation_failed', message: 'request body is not allowed' });
+          }
+        }
+      },
+    },
+    async (request) => {
+      const { id } = request.params as { id: string };
+      return studySessionDetailService.getDetail(id);
     },
   );
 

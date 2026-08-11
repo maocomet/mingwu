@@ -25,6 +25,16 @@ export interface StudySessionDetail {
   reports: StudyReport[];
 }
 
+/**
+ * 详情接口不接受任何 query 参数：严格空对象，未知 query（含身份字段）直接 400。
+ * 与历史列表的 studySessionHistoryQuerySchema 语义一致，仅本接口完全无参数。
+ */
+export const studySessionDetailQuerySchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {},
+} as const;
+
 /** StudySessionDetail 响应契约：组合各子模型 schema，summary 允许为 null。 */
 export const studySessionDetailJsonSchema = {
   type: 'object',

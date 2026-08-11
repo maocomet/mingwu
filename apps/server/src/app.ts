@@ -134,6 +134,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   app.register(studySessionRoutes, {
     prefix: '/api/v1',
     studySessionService: deps.studySessionService,
+    studySessionDetailService: deps.studySessionDetailService,
     studySummaryService: deps.studySummaryService,
   });
 

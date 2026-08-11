@@ -4531,3 +4531,316 @@ PUT 使用严格白名单请求体：
 - `[x] study_append_report`
 
 本批可以归档并提交推送。全局“给写操作增加权限验证”和“确保工具重复调用不会产生重复数据”仍不打勾；本轮只证明了 `study_append_report` 自己的权限与幂等边界。
+
+---
+
+## 小喵任务 #20 · Study Session 完整详情 App API · 2026-08-10
+
+### 本批目标
+
+为 Windows 客户端提供单次 Study Session 的完整详情读取入口，复用已经被 `study_get_session` 验证过的 `StudySessionDetailService` 与 `StudySessionDetail` 契约，不复制聚合算法，也不改变现有核心 Session 读取接口。
+
+候选完成的计划原文（DS 不打勾）：
+
+- `- [ ] 查询单次 Session 完整详情`
+
+### 必须实现
+
+1. 新增只读 App API：`GET /api/v1/study-sessions/:id/detail`。
+2. 直接调用现有 `StudySessionDetailService.getDetail(id)`，返回既有 `StudySessionDetail` 四部分：`session`、`summary`（可为 null）、`participants`、`reports`。响应 schema 复用 `studySessionDetailJsonSchema`，不得在路由中重新拼装或排序。
+3. 保留现有 `GET /api/v1/study-sessions/:id` 的核心 Session 响应与兼容性，不改成另一种 shape；两个接口职责明确，避免破坏已存在的调用方。
+4. params 必须严格校验 UUID；本只读接口不接受 body、身份字段或额外 query 参数。非法 UUID / 未知 query 返回受控 400，Session 不存在复用既有受控 404 `study_session_not_found`。
+5. 详情必须反映同一份真实数据：
+   - 无总结时 `summary: null`；
+   - 无参与者 / 报告时空数组；
+   - 提交总结和多个 AI 报告后，返回既有稳定排序与互不覆盖的数据；
+   - 不新增尚未实现的音乐历史、AI 显示名或虚构报告状态字段。
+
+### 必须测试
+
+- 空 Session 返回完整四部分 shape，null / 空数组准确。
+- 有用户总结、两个 AI 参与者及多份追加报告时，详情与 `StudySessionDetailService` 一致，报告和参与者排序稳定。
+- 未知 Session 404、非法 UUID 400、额外 query 400。
+- 现有 `GET /study-sessions/:id` 仍返回核心 Session shape，没有被详情接口改变。
+- 响应 schema 严格；现有 MCP `study_get_session`、`study_append_report`、Study API、身份认证与真实 HTTP 冒烟不回归。
+
+### 边界与汇报
+
+- 本批只新增 App API 详情入口；不新增写操作、认证方案、数据库、音乐历史、前端或其他 MCP Tool。
+- 不修改计划复选框，不执行 Git / GitHub / VPS 操作，不触碰 `.claude/` 与 `ui素材mingwu/`。
+- 完成后把检查点追加到本文件末尾，列出接口、契约复用、测试真实数字与风险，然后暂停等待小喵审核，不自行开始下一批。
+
+---
+
+## 检查点 #20 · Study Session 完整详情 App API · 2026-08-10
+
+### 本批次目标
+
+响应小喵任务 #20：为 Windows 客户端提供单次 Study Session 的完整详情只读入口 `GET /api/v1/study-sessions/:id/detail`，复用已被 `study_get_session` 验证过的 `StudySessionDetailService` 与 `StudySessionDetail` 契约，不复制聚合算法、不改变现有核心 Session 读取接口。
+
+### 候选完成的计划项目原文（DS 不打勾）
+
+- `- [ ] 查询单次 Session 完整详情`
+
+以上仅为候选完成项；未修改 `docs/project-plan-v0.1.md` 任何复选框，是否打勾由小喵验收后决定。
+
+### 实际完成内容
+
+1. **新增只读 App API** `GET /api/v1/study-sessions/:id/detail`：直接调用 `StudySessionDetailService.getDetail(id)`，返回既有四部分聚合 `session` / `summary`（可为 null）/ `participants` / `reports`；响应 schema 复用 `studySessionDetailJsonSchema`，路由内不重新拼装或排序。
+2. **参数严格校验**：`params` 复用 `studySessionParamsSchema`（严格 UUID）；`querystring` 使用 contracts 新增的 `studySessionDetailQuerySchema`（严格空对象，`additionalProperties: false`），本只读接口不接受 body / 身份字段 / 额外 query。非法 UUID / 未知 query（含 `actorId`）返回受控 400 `validation_failed`；Session 不存在复用既有受控 404 `study_session_not_found`。
+3. **保留既有核心接口**：`GET /study-sessions/:id` 的 core Session 响应与 shape 不变，不被详情接口改变；两个接口职责分离。
+4. **如实反映真实数据**：无总结时 `summary: null`；无参与者 / 报告时空数组；有总结与多份 AI 报告时返回既有稳定排序（participants 按 joinedAt ASC, actorId ASC；reports 按 submittedAt ASC, actorId ASC, sequenceNumber ASC）；不新增音乐历史、AI 显示名或虚构报告状态字段。
+
+### 新增、修改、删除的文件清单
+
+- 修改 `packages/contracts/src/study-session-detail.ts`（新增 `studySessionDetailQuerySchema` 严格空 query schema，经 index `export *` 自动导出）。
+- 修改 `apps/server/src/api/routes/study-sessions.ts`（插件 options 增加 `studySessionDetailService`；在 `GET /:id` 之后新增 `/study-sessions/:id/detail` 端点）。
+- 修改 `apps/server/src/app.ts`（`studySessionRoutes` 注册传入 `studySessionDetailService`）。
+- 新增 `apps/server/test/study-session-detail-api.test.ts`（6 条测试）。
+- 删除：无。
+
+### 关键设计决定及其依据
+
+1. **聚合只由 service 一处完成**：路由直接透传 `StudySessionDetailService.getDetail` 结果，响应复用既有 `studySessionDetailJsonSchema`，杜绝路由层二次拼装 / 排序产生与 MCP `study_get_session` 不一致。
+2. **query 严格空对象**：只读详情接口不接受任何参数，额外 query（尤其身份字段）直接 400，与历史列表 `studySessionHistoryQuerySchema` 的 `additionalProperties: false` 语义一致，fail-closed。
+3. **复用 `studySessionParamsSchema` 严格 UUID**：非法 UUID 在入口即 400，Session 不存在才走既有 404 错误映射，两种客户端错误稳定可区分。
+4. **核心接口零改动**：`GET /study-sessions/:id` 仍是 Session 本体 shape，避免破坏既有调用方；详情作为独立端点提供四部分聚合。
+5. **契约层新增 query schema 而非路由内联**：JSON Schema 与 `studySessionDetailJsonSchema` 同置 contracts，客户端生成与契约校验共用同一份定义。
+
+### 执行过的测试或检查、命令与真实结果
+
+- `npx vitest run test/study-session-detail-api.test.ts`（apps/server）：**6/6 通过**。
+- 相关专项（4 个文件）：`npx vitest run test/study-session-api.test.ts test/study-session-detail-api.test.ts test/mcp-http-smoke.test.ts test/mcp-http-smoke-auth.test.ts` — **99/99 通过**。
+- 根目录 `npm run typecheck`（contracts + server）：通过，exit 0。
+- `npm test`（全量）：**36 个文件 654/654 通过**（原 648 + 新增 6）。
+- `.ts` 全量 NUL 字节扫描（Python `b'\x00'` 精确检测）：**0 bad files**。
+- `git diff --check`：exit 0，仅 Windows LF→CRLF 提示（无害）。
+
+### 未完成内容、已知问题和风险
+
+- 本批只新增只读详情入口；未新增写操作、认证方案、数据库、音乐历史、前端或其他 MCP Tool。
+- 测试使用 `makeServices()` 内存仓储，非真实数据库持久化。
+- 生产未注入场景的既有 info 日志会打印到 stdout（沿用既有测试行为，非本批引入），不影响结果。
+- 未修改任何计划复选框；未执行 Git / GitHub / VPS 操作；未改动 `docs/project-plan-v0.1.md`、`第一关卡完成报告.txt`、`第二关卡报告.txt`；未触碰 `.claude/` 与 `ui素材mingwu/`。
+
+### 是否涉及数据库、身份权限、密钥、外部服务或破坏性变化
+
+否。本批为纯只读 App API 新增，复用既有 service 与契约，不涉及数据库 / Migration、身份权限、密钥、外部服务；无破坏性变化；无新增依赖。
+
+### 建议下一批任务
+
+等待小喵审核本批次。通过后建议方向：由小喵指定后续写路由 / OAuth / 数据库权限表扩展或前端接入（如 Windows 客户端消费该详情接口）。
+
+等待小喵审核。
+
+---
+
+## 小喵审核结果 #20 · 需要一处严格入口返修 · 2026-08-10
+
+### 审核结论
+
+详情聚合、契约复用、旧接口兼容、UUID / query 校验、空数据与多 AI 报告排序均符合要求；相关专项 **99/99**、全量 **654/654**、根目录 typecheck、MCP 真实 HTTP 冒烟、`git diff --check` 与 NUL 扫描均通过。
+
+但任务要求的“本只读接口不接受 body / 身份字段”尚未真正实现，因此暂不验收、不打勾：
+
+- 路由只声明了 params、querystring 和 response schema，没有 body 拒绝规则。小喵实际通过 Fastify inject 发送 `GET /api/v1/study-sessions/:id/detail`，请求体为 `{"actorId":"forged"}`，服务返回 **200** 和正常详情；说明 body 被静默忽略，而不是受控拒绝。当前测试只覆盖了 query 中的 actorId，未覆盖 body。
+
+### 必须返修（只修这一处）
+
+1. 给该详情路由增加明确的无请求体边界：只要 `request.body !== undefined`（无论空对象、身份字段、字符串或其他 JSON 值）就返回受控 400 `validation_failed`；正常无 body 的 GET 继续成功。实现可使用与项目错误处理兼容的 schema / hook，但不得影响其他路由。
+2. 新增 API 测试，至少覆盖：
+   - JSON body 含 `actorId` → 400 `validation_failed`；
+   - 空对象 body `{}` → 400；
+   - 无 body → 原有 200；
+   - 拒绝 body 时不调用详情 service（可通过未知 Session + body 或 spy 验证入口先拒绝），不回显 body 内容。
+3. 保持现有 UUID、空 query、404、四部分响应、核心 GET 兼容和所有 MCP / Study API 测试不回归。完成后重新执行专项、根目录 typecheck、全量测试、NUL 扫描与 `git diff --check`，把真实结果追加到本文件末尾后暂停。
+
+### 边界
+
+- 不修改计划复选框，不提交或推送，不开始下一批。
+- 只补该 GET 详情端点的 body 拒绝与测试；不新增认证、写操作、数据库、前端或其他接口。
+
+等待 DS 返修后由小喵复验。
+
+---
+
+## 检查点 #21 · 详情 GET 无请求体严格边界（响应小喵审核 #20）· 2026-08-10
+
+### 本批次目标
+
+响应小喵审核 #20 的唯一返修：`GET /api/v1/study-sessions/:id/detail` 必须拒绝任何请求体。小喵实测携带 `{"actorId":"forged"}` body 时当前返回 200，说明 body 被静默忽略；本批把"不接受 body / 身份字段"真正落地为受控 400，只修这一处，不扩大批次。
+
+### 候选完成的计划项目原文（DS 不打勾）
+
+- `- [ ] 查询单次 Session 完整详情`
+
+以上仅为候选完成项（承接审核 #20 同项）；未修改 `docs/project-plan-v0.1.md` 任何复选框。
+
+### 实际完成内容
+
+1. **详情路由增加无请求体边界**：在 `preValidation` hook 中消费 `request.raw` 原始流累计字节数；只要有字节（无论空对象 `{}`、身份字段或任意 JSON 值）即返回受控 400 `validation_failed`，正常无 body 的 GET 继续 200。拒绝发生在调用 `StudySessionDetailService` 之前，错误消息固定、不回显 body 内容。
+2. **技术依据**：Fastify 5 对 GET 不填充 `request.body`（实测始终 `undefined`），且明确禁止 GET 路由定义 body schema（`FST_ERR_ROUTE_BODY_VALIDATION_SCHEMA_NOT_SUPPORTED`，`kSupportedHTTPMethods.bodyless` 含 GET）。因此不能靠 `request.body !== undefined` 或 body schema 实现，改为在 preValidation 直接读流检测请求体存在；已用真实 inject 探针验证：GET + actorId / GET + `{}` 均 400，GET 无 body 200。
+3. **schema response 声明 400**：响应契约增加 `400`（`error` / `message` 字符串，与全局 errorHandler 的 `validation_failed` 形状一致），满足 Fastify 类型推导对 `reply.status(400)` 的要求，运行时错误响应不经 response 序列化校验。
+4. **新增 2 条 API 测试**：body 含 `actorId` → 400 且不回显 `forged`；空对象 `{}` → 400；无 body → 200 且完整四部分；未知 Session + body → 400（而非 `study_session_not_found` 404），证明入口先于 service 拒绝。
+
+### 新增、修改、删除的文件清单
+
+- 修改 `apps/server/src/api/routes/study-sessions.ts`（详情路由新增 `preValidation` 流检测 + schema response 增加 400）。
+- 修改 `apps/server/test/study-session-detail-api.test.ts`（新增 2 条 body 拒绝测试）。
+- 无新增、无删除文件。
+
+### 关键设计决定及其依据
+
+1. **读流而非 `request.body`**：GET 下 Fastify 不解析 body、`request.body` 恒为 undefined，且 GET 禁止 body schema；消费 `request.raw` 是唯一可靠的"请求体是否存在"检测方式，对 chunked 编码同样有效。
+2. **preValidation 拒绝、服务零调用**：拒绝早于 handler，未知 Session + body 返回 400 而非 404，直接证明 `StudySessionDetailService` 未被调用；错误响应固定文案，不回显任何 body 字节。
+3. **400 响应契约进 schema**：与全局 `validation_failed` 形状一致，供类型推导与契约文档使用；不影响其他路由（hook 只挂在详情路由上）。
+
+### 执行过的测试或检查、命令与真实结果
+
+- `npx vitest run test/study-session-detail-api.test.ts`（apps/server）：**8/8 通过**（原 6 + 新增 2）。
+- 相关专项（5 个文件）：`npx vitest run test/study-session-api.test.ts test/study-session-detail-api.test.ts test/mcp-http-smoke.test.ts test/mcp-http-smoke-auth.test.ts test/health.test.ts` — **109/109 通过**。
+- 根目录 `npm run typecheck`（contracts + server）：通过，exit 0。
+- `npm test`（全量）：**36 个文件 656/656 通过**（原 654 + 新增 2）。
+- `.ts` 全量 NUL 字节扫描（Python `b'\x00'` 精确检测）：**0 bad files**。
+- `git diff --check`：exit 0，仅 Windows LF→CRLF 提示（无害）。
+- 实现过程中用临时 `probe-body.ts` 探针（已删除）确认：GET + `{"actorId":"forged"}` 与 GET + `{}` 经流检测均返回 400，GET 无 body 返回 200。
+
+### 未完成内容、已知问题和风险
+
+- 本批只补该 GET 详情端点的 body 拒绝；未新增认证、写操作、数据库、前端或其他接口。
+- 无 body 的 GET 正常；带 body 的请求被拒绝时不回显内容，符合只读接口安全边界。
+- 测试使用 `makeServices()` 内存仓储，非真实数据库持久化。
+- 未修改任何计划复选框；未执行 Git / GitHub / VPS 操作；未改动 `docs/project-plan-v0.1.md`、`第一关卡完成报告.txt`、`第二关卡报告.txt`；未触碰 `.claude/` 与 `ui素材mingwu/`。
+
+### 是否涉及数据库、身份权限、密钥、外部服务或破坏性变化
+
+否。本批为详情接口的请求体拒绝边界补强，不改变身份 / 权限 / 密钥逻辑，不涉及数据库 / Migration、密钥、外部服务；无破坏性变化；无新增依赖。
+
+### 建议下一批任务
+
+等待小喵复验本返修。通过后按 #20 建议方向推进：由小喵指定后续写路由 / OAuth / 数据库权限表扩展或前端接入（如 Windows 客户端消费该详情接口）。
+
+等待小喵审核。
+
+---
+
+## 小喵复验结果 #20 / #21 · 仍需修正无界读取 · 2026-08-10
+
+### 复验结论
+
+普通 JSON body 与空对象 body 现在确实会在 service 前返回受控 400；专项 **109/109**、全量 **656/656**、根目录 typecheck、MCP 真实 HTTP 冒烟、`git diff --check` 与 NUL 扫描均通过。
+
+但当前拒绝方式引入了新的请求资源边界问题，因此暂不验收、不打勾：
+
+- `preValidation` 使用 `for await (const chunk of request.raw)`，必须等客户端把完整原始请求体传完才响应，并且这条自读流路径绕过 Fastify 常规 body parser 的 `bodyLimit`。超大或故意慢速的 chunked GET 可以让请求长期停留在 hook 中；接口本来“不接受 body”，不应先无上限地消费整个 body 再拒绝。
+
+### 必须返修（只替换检测方式）
+
+1. 删除对 `request.raw` 的完整流遍历。使用 HTTP 消息 framing 在读取正文前 fail-fast：
+   - `Content-Length` 为有效整数且大于 0 → 400；
+   - `Content-Length` 非法 / 多值 / 无法安全解析 → fail-closed 400（若 Node 已先拒绝则保持受控结果）；
+   - 存在 `Transfer-Encoding`（包括 chunked）→ 400；
+   - 无上述正文 framing，或仅 `Content-Length: 0` → 允许正常无 body GET。
+   检测应放在该路由自己的 `onRequest`（或等价的、不会先读取 body 的早期 hook）中，不影响其他路由，不记录或回显 header / body 值。
+2. 真实 HTTP 测试必须证明 fail-fast，而不只是 inject：至少覆盖普通非空 body、`Content-Length: 0` 无 body、以及 chunked 请求。chunked 用例应在未发送完整正文 / 未结束请求流之前即可收到 400，随后安全关闭连接，证明服务端不等待全量 body。
+3. 保留现有 inject 用例：身份字段 body、`{}` 均 400，无 body 200，service 零调用；所有 UUID、query、404、四部分详情和旧接口兼容测试不回归。
+4. 返修后重新执行详情专项、根目录 typecheck、全量测试、真实 HTTP 测试、NUL 扫描和 `git diff --check`，将真实结果追加到文件末尾后暂停。
+
+### 边界
+
+- 不修改计划复选框，不提交或推送，不开始下一批。
+- 只替换该详情端点的 body 存在性检测与对应测试，不新增认证、写操作、数据库、前端或其他接口。
+
+等待 DS 返修后由小喵复验。
+
+---
+
+## 检查点 #22 · 详情 GET 改为 header framing fail-fast 拒绝请求体（响应小喵复验 #20/#21）· 2026-08-10
+
+### 本批次目标
+
+响应小喵复验 #20/#21 的唯一返修：当前 `GET /api/v1/study-sessions/:id/detail` 用 `for await (const chunk of request.raw)` 完整遍历请求体后返回 400，会无上限消费超大 / 慢速 chunked body 并绕过 Fastify 常规 `bodyLimit`。本批把 body 存在性检测改为**只读 HTTP header framing、在读取正文前 fail-fast**，并补真实 HTTP 测试证明不等待完整 body。只替换该详情端点的检测方式与对应测试，不扩大批次。
+
+### 候选完成的计划项目原文（DS 不打勾）
+
+- `- [ ] 查询单次 Session 完整详情`
+
+以上仅为候选完成项（承接审核 #20 / 复验 #20/#21 同项）；未修改 `docs/project-plan-v0.1.md` 任何复选框。
+
+### 实际完成内容
+
+1. **删除对 `request.raw` 的完整流遍历**：详情路由的 `preValidation`（`for await` 读流）整体移除，改为路由自己的 `onRequest` hook（Fastify 最早 hook，在 body 解析之前触发），只读取请求头、绝不触碰 `request.raw`。
+2. **header framing fail-fast 规则**（位于 `apps/server/src/api/routes/study-sessions.ts` 详情路由 `onRequest`）：
+   - 存在 `Transfer-Encoding`（含 chunked）→ 400 `validation_failed` / `request body is not allowed`；
+   - 存在 `Content-Length` 且非全零（非零 / 非法 / 多值合并后 `!== /^0+$/`）→ fail-closed 400；
+   - 仅 `Content-Length: 0` 或无任何正文 framing → 放行，正常无 body GET 200。
+   - 拒绝响应固定文案，不记录 / 不回显任何 header 或 body 值；拒绝发生在调用 `StudySessionDetailService` 之前。
+3. **schema response 声明 400** 保持不变（与全局 errorHandler 的 `validation_failed` 形状一致），满足 Fastify 类型推导对 `reply.status(400)` 的要求；注释更新为说明 header-only 语义与"绝不读取 request.raw"的原因。
+4. **新增真实 HTTP 测试**（`apps/server/test/study-session-detail-api.test.ts` 末尾新 describe 块，共 3 条）：
+   - 裸 TCP socket 发送普通非空 body（`Content-Length: 20` + `{"actorId":"forged"}`）→ 首行 `HTTP/1.1 400 Bad Request`，含 `validation_failed`，不含 `forged`；
+   - `Content-Length: 0` 无 body → 首行 `HTTP/1.1 200 OK`，body 含 `"summary":null`（先经真实 HTTP POST 创建 Session）；
+   - **chunked fail-fast**：只发送请求头 + 第一段 chunk `5\r\nhello\r\n`、**不发送终止 chunk** `0\r\n\r\n` → 立即收到 `HTTP/1.1 400 Bad Request`，连接随后关闭，证明服务端不等待完整正文 / 不消费未发送部分。
+   - 保留既有 inject 用例：身份字段 body、`{}` 均 400 且 service 零调用（未知 Session + body 返回 400 而非 404）、无 body 200、UUID / query / 404 / 四部分详情与旧接口兼容全部不回归。
+
+### 新增、修改、删除的文件清单
+
+- 修改 `apps/server/src/api/routes/study-sessions.ts`（详情路由：`preValidation` 读流 → `onRequest` header framing fail-fast；注释更新）。
+- 修改 `apps/server/test/study-session-detail-api.test.ts`（import 增加 `node:net`；新增真实 HTTP describe 块与 `startRealServer` / `sendRaw` helper，3 条测试）。
+- 无新增、无删除文件。
+
+### 关键设计决定及其依据
+
+1. **header framing 是唯一无界读取-free 的可靠检测**：Fastify 5 对 GET 不填充 `request.body`（恒 undefined）、禁止 GET body schema，因此 body 存在性只能靠消息 framing 判读。`onRequest` 在 body 解析前触发，此时读取 `request.headers` 不会拉取正文；`Transfer-Encoding` 或非零 `Content-Length` 一旦出现即可在**首字节正文到达前**拒绝。相比读 `request.raw`，不再需要等客户端传完（chunked 甚至永不完全）的 body，也就不再受慢速 / 超大 body 拖累、不绕过常规 `bodyLimit`。
+2. **fail-closed 多值 / 非法 Content-Length**：`content-length` 头可能是字符串数组（Node 对重复头的解析），统一 join 后仅允许全零；非零、非法、多值合并一律 400。若 Node 已先行拒绝（无法安全解析），全局处理仍保持受控结果。
+3. **只挂在详情路由，不影响其他路由**：hook 与 400 schema 均只针对 `/study-sessions/:id/detail`；拒绝在 service 调用前，未知 Session + body 返回 400 而非 404，直接证明 `StudySessionDetailService` 零调用。
+4. **真实 HTTP 而非仅 inject**：inject 自动设置 content-length、无法表达"请求未发完"的状态；裸 TCP socket 可精确控制发送到请求头 + 一段 chunk 即停，从而证明服务端不等待全量 body、立即 400 并安全关闭连接。
+
+### 执行过的测试或检查、命令与真实结果
+
+- `npx vitest run test/study-session-detail-api.test.ts`（apps/server）：**11/11 通过**（原 8 + 新增 3 真实 HTTP）。
+- 相关专项（5 个文件）：`npx vitest run test/study-session-api.test.ts test/study-session-detail-api.test.ts test/mcp-http-smoke.test.ts test/mcp-http-smoke-auth.test.ts test/health.test.ts` — **112/112 通过**。
+- 根目录 `npm run typecheck`（contracts + server）：通过，exit 0。
+- `npm test`（全量）：**36 个文件 659/659 通过**（原 656 + 新增 3 真实 HTTP）。
+- 真实 HTTP fail-fast：普通非空 body 400 / `Content-Length: 0` 200 / chunked（未发终止 chunk）立即 400 并关闭连接，均在上述 11/11 与 112/112 中覆盖。
+- `.ts` 修改文件 NUL 字节扫描（`grep -rPl "\x00"`）：无 NUL。
+- `git diff --check`：exit 0，仅 Windows LF→CRLF 提示（无害）。
+
+### 未完成内容、已知问题和风险
+
+- 本批只替换该详情端点的 body 存在性检测与对应测试；未新增认证、写操作、数据库、前端或其他接口。
+- 检测基于请求头 framing，不解析正文；拒绝时不回显 header / body 内容，符合只读接口安全边界。
+- 测试使用 `makeServices()` 内存仓储与真实 `app.listen` 临时端口（127.0.0.1），非真实数据库持久化。
+- 未修改任何计划复选框；未执行 Git / GitHub / VPS 操作；未改动 `docs/project-plan-v0.1.md`、`第一关卡完成报告.txt`、`第二关卡报告.txt`；未触碰 `.claude/` 与 `ui素材mingwu/`。
+
+### 是否涉及数据库、身份权限、密钥、外部服务或破坏性变化
+
+否。本批仅将详情接口的请求体拒绝从读流改为 header framing fail-fast，不改变身份 / 权限 / 密钥逻辑，不涉及数据库 / Migration、密钥、外部服务；无破坏性变化；无新增依赖。
+
+### 建议下一批任务
+
+等待小喵复验本返修。通过后按 #20 建议方向推进：由小喵指定后续写路由 / OAuth / 数据库权限表扩展或前端接入（如 Windows 客户端消费该详情接口）。
+
+等待小喵审核。
+
+---
+
+## 小喵复验结果 #20 / #21 / #22 · 通过 · 2026-08-10
+
+### 验收结论
+
+通过。`GET /api/v1/study-sessions/:id/detail` 直接复用既有详情聚合服务与严格响应契约，保留原核心 Session GET 的兼容 shape；UUID、空 query、404、空详情、多 AI 报告排序均正确。请求体边界最终使用路由私有 `onRequest` 按 `Content-Length` / `Transfer-Encoding` 在读取正文前 fail-fast，不再读取原始流或等待完整 chunked body。
+
+### 小喵独立复验结果
+
+- 根目录 `npm run typecheck`：通过。
+- 详情相关专项：5 个文件，**112/112 通过**。
+- 全量测试：36 个文件，**659/659 通过**。
+- 真实 HTTP：普通非空 body 400、`Content-Length: 0` 无 body 200、未结束的 chunked body 立即 400 并关闭连接。
+- `git diff --check`：通过，仅 Windows LF→CRLF 提示。
+- NUL 扫描：0。
+
+### 计划更新
+
+- `[x] 查询单次 Session 完整详情`
+
+本批可以归档并提交推送。
