@@ -235,6 +235,9 @@ export function makeStageUpdateRequest(
     proposedStatus: overrides.proposedStatus ?? 'in_progress',
     reason: overrides.reason ?? '进入下一阶段',
     status: overrides.status ?? 'pending',
+    revision: overrides.revision ?? 1,
+    updatedAt: overrides.updatedAt ?? now,
+    decision: overrides.decision ?? null,
     createdAt: overrides.createdAt ?? now,
   };
 }

@@ -7,6 +7,22 @@ export interface InsertIfAbsentResult {
 }
 
 /**
+ * 决定写入的最小字段。仓储只接收“本次允许写入的内容”——本批为服务层校验后的
+ * 规范化 note 与两个服务端采样的时间戳——绝不让调用方提交一整份申请对象。
+ * 原申请核心字段（id / projectId / stageId / requesterActorId /
+ * expectedStageVersion / proposedStatus / reason / createdAt）、目标 status 与
+ * 新 revision 一律由仓储从已保存的 current 派生，调用方无法改写。
+ */
+export interface StageUpdateRequestDecisionWrite {
+  /** 去除首尾空白后的决定说明（服务层已校验非空且按 code point 计数 ≤ 上限）。 */
+  note: string;
+  /** 服务端采样的决定时间。 */
+  decidedAt: string;
+  /** 服务端采样的更新（决定）时间。 */
+  updatedAt: string;
+}
+
+/**
  * 仓储接口。申请只可追加，接口不提供修改、覆盖、删除或批准决定的方法。
  * 并发正确性由仓储保证，业务层不在“先查再写”的窗口里做判断：
  * - `id` 原子唯一并作为幂等键：同 id、同 Stage、同 Actor、同 expectedVersion、
@@ -29,6 +45,26 @@ export interface StageUpdateRequestRepository {
    * 返回请求使用深拷贝，调用方修改不得污染仓储。
    */
   insertIfAbsent(request: StageUpdateRequest): Promise<InsertIfAbsentResult>;
+  /**
+   * 原子决定（CAS）：仅当 request 存在、当前 status 为 pending 且 revision 等于
+   * expectedRevision 时，从已保存的 current 派生新版本并保存；否则返回 null
+   * （不写入任何数据）。派生规则固定：status = 'needs_changes'、
+   * revision = current.revision + 1，只写 decision（type 固定 needs_changes）与
+   * updatedAt；id / projectId / stageId / requesterActorId / expectedStageVersion /
+   * proposedStatus / reason / createdAt 全部取自 current，调用方无法改写。
+   * 不提供普通任意 update，杜绝覆盖已决定申请。返回的新申请使用深拷贝。
+   *
+   * PostgreSQL 阶段（第六关）：`UPDATE stage_update_requests SET status =
+   * 'needs_changes', revision = revision + 1, updated_at = ?, decision = ? WHERE
+   * id = ? AND status = 'pending' AND revision = ?` 的行数判断（或 `SELECT ...
+   * FOR UPDATE` 后条件写入）保证 CAS 原子；条件 UPDATE 只 SET 决定所需列，绝不能
+   * 接受或覆盖原申请核心列。两个操作在同一事务内完成。
+   */
+  decideIfPending(
+    id: string,
+    expectedRevision: number,
+    decision: StageUpdateRequestDecisionWrite,
+  ): Promise<StageUpdateRequest | null>;
   /** 按 id 读取申请，返回深拷贝；不存在返回 null。 */
   findById(id: string): Promise<StageUpdateRequest | null>;
   /** 按目标关卡列出全部申请，返回深拷贝。顺序不保证；稳定排序由应用服务负责。 */

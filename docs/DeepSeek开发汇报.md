@@ -5129,3 +5129,248 @@ PUT 使用严格白名单请求体：
 - `[x] project_submit_stage_update`
 
 本批可以归档并提交推送。批准、拒绝、要求补充与批准后正式更新 Stage 仍留给后续用户决定接口批次。
+
+---
+
+## 小喵任务 #25 · 用户要求 AI 补充关卡更新申请 · 2026-08-11
+
+### 本批目标
+
+实现关卡更新申请的第一个用户决定入口：“要求 AI 补充说明”。用户操作只把 pending 申请标记为 `needs_changes` 并保存决定说明；不得批准申请、不得修改正式 Stage，也不得覆盖申请者最初提交的 Stage / Actor / proposedStatus / reason / createdAt。
+
+候选完成的计划原文（DS 不打勾）：
+
+- `- [ ] 要求 AI 补充说明`
+
+### 必须设计与实现
+
+1. 为 `StageUpdateRequest` 增加最小决定并发字段，建议：
+   - `revision`：创建时 1，每次成功决定 +1；
+   - `updatedAt`：创建时等于 createdAt，决定时由服务端刷新；
+   - `decision`：创建时 null；本批成功后包含固定 `type: 'needs_changes'`、trim 后的 `note`、服务端 `decidedAt`。不要接收客户端提交的决定者 Actor；本批 App API 代表单用户用户操作，正式用户认证仍留后续安全批次。
+   原申请核心字段必须保持不可变。
+2. 内存仓储新增原子 CAS 决定操作：仅当 request 存在、当前 status 为 `pending` 且 revision 等于 expectedRevision 时，原子写入 needs_changes 决定；不提供普通任意 update。
+3. 稳定重试语义：
+   - 第一次 `expectedRevision=1 + 同规范化 note` 成功，request revision 变 2；
+   - 完全相同请求重试仍返回同一结果，不再次推进 revision / updatedAt；
+   - 已决定后不同 note、错误 expectedRevision 或其他决定竞争返回受控冲突，绝不覆盖第一次决定。
+4. 新增 App API：`POST /api/v1/stage-update-requests/:id/request-changes`（若项目既有命名规范更适合 PATCH，可在汇报说明，但语义必须明确）。请求体严格只允许 `expectedRevision` 与 `note`；拒绝 status、decision type、decidedAt、updatedAt、actorId、requesterActorId、Stage 字段等。
+5. note trim 后非空并按 Unicode code point 设置受控上限；contracts、入口与服务层共用常量 / `countCodePoints(note.trim())`，覆盖 astral emoji 与首尾空白边界。
+6. request 不存在 404；revision / 状态 / 幂等语义冲突使用稳定 409；非法 note / revision 与额外字段 400。错误响应不回显 note、原申请 reason、身份或内部堆栈。
+7. 决定前后读取正式 Stage，必须完整不变；本服务和路由不得依赖或调用 Stage 更新能力。
+8. 提供读取已决定申请所需的 `getById` 结果即可；不新增批准、拒绝、列表 UI 或 MCP 决定工具。
+
+### 必须测试
+
+- pending → needs_changes 成功：revision 1→2，决定时间 / note 正确，原申请核心字段逐项不变，Stage 完全不变。
+- 同请求重试幂等；不同 note / revision 竞争不覆盖；20 个同 revision 并发只有一个决定胜出，其余得到稳定冲突或同语义幂等结果，最终 revision 只为 2。
+- 未知申请 404；已 needs_changes 再次不同决定冲突；非法 UUID、0 / 小数 revision、空白 / 超长 note、emoji 上限与上限+1、额外身份 / 状态字段均覆盖。
+- App API 响应严格，不回显不应出现的身份或密钥；未知异常日志脱敏。
+- 既有 `project_submit_stage_update` 稳定幂等、Stage 零修改、MCP 身份权限、Study API 与全量测试不回归。
+- 真实 HTTP 冒烟：创建申请 → App API 要求补充 → service 读回 needs_changes → Stage 不变；结束后释放端口。
+
+### 边界与汇报
+
+- 本批不实现批准、拒绝、Stage 自动更新、MCP 决定工具、数据库、AuditLog、用户认证或前端。
+- App API 当前沿用第三关单用户原型边界；在正式公网部署写接口前必须接用户认证，本批不得把该接口计入“权限系统完成”。
+- 不修改计划复选框，不执行 Git / GitHub / VPS 操作，不触碰 `.claude/` 与 `ui素材mingwu/`。
+- 完成后把检查点追加到本文件末尾，列出模型演进、CAS / 幂等规则、真实测试数字与风险，然后暂停等待小喵审核，不自行开始下一批。
+## 检查点 #25 · 用户要求 AI 补充关卡更新申请（request-changes 决定入口）· 2026-08-11
+
+### 本批目标
+
+响应 小喵 任务 #25：实现关卡更新申请的第一个用户决定入口“要求 AI 补充说明”。用户操作只把 pending 申请标记为 `needs_changes` 并保存决定说明（type 固定 needs_changes、trim 后 note、服务端 decidedAt），绝不批准申请、绝不修改正式 Stage，也绝不覆盖申请者最初提交的 Stage / Actor / proposedStatus / reason / createdAt。
+
+### 候选完成的计划原文（DS 不打勾）
+
+- `- [ ] 要求 AI 补充说明`
+
+### 实际完成内容
+
+1. **申请模型最小决定并发字段**（`packages/contracts/src/stage-update-request.ts`）：`StageUpdateRequest` 新增 `revision`（创建时 1，每次成功决定 +1）、`updatedAt`（创建时等于 createdAt，决定时服务端刷新）、`decision`（创建时 null；决定成功后为固定 `{ type: 'needs_changes', note, decidedAt }`）。新增 `STAGE_UPDATE_NOTE_MAX_LENGTH`（2000，与 reason 上限一致，契约 schema / 服务层共用）与 `STAGE_UPDATE_REQUEST_DECISION_TYPES = ['needs_changes']`。新增 `RequestChangesInput`、严格白名单 `requestChangesBodySchema`（只允许 expectedRevision + note，`additionalProperties:false` 拒绝 status / decision / decidedAt / updatedAt / actorId / requesterActorId / Stage 字段，expectedRevision 必须是 JSON 整数，note 非空且按 code point 不超上限）与 `stageUpdateRequestParamsSchema`（严格 UUID id）。`stageUpdateRequestJsonSchema` required 增加 revision / updatedAt / decision，decision 为可空对象且 type 只允许 needs_changes。原申请核心字段不可变。
+2. **内存仓储原子 CAS 决定**（`in-memory-stage-update-request-repository.ts`）：新增 `decideIfPending(id, updated, expectedRevision)`——仅当 request 存在、`status === 'pending'` 且 `revision === expectedRevision` 时原子写入并返回深拷贝，否则返回 null；不提供普通任意 update。接口（`domain/stage-update-request/repository.ts`）补充 PostgreSQL 迁移说明：数据库阶段以 `UPDATE ... WHERE id = ? AND status = 'pending' AND revision = ?` 行数判断或 `SELECT ... FOR UPDATE` 保证同一原子性。
+3. **服务层 `requestChanges`**（`stage-update-request-service.ts`）：先自守校验 expectedRevision 为 ≥1 整数、note trim 后非空且按 code point 计数 ≤ 上限；再 `findById`，不存在 → `StageUpdateRequestNotFoundError`（404）；已决定只有“完全相同”重试（同规范化 note 且 expectedRevision == revision - 1）幂等返回原申请，其余（不同 note / 错误 expectedRevision）→ `StageUpdateRequestDecisionConflictError`（409），绝不覆盖第一次决定；仍 pending 时 expectedRevision 必须等于当前 revision，否则 409，通过后构造新版本（status=needs_changes、revision+1、updatedAt / decidedAt 服务端单次采样）并走仓储 `decideIfPending` CAS，竞争落败 → 409。全程只读 / 修改申请自身，不读取、不调用任何 Stage 更新能力。
+4. **App API 路由**（`api/routes/stage-update-requests.ts` 新增）：`POST /api/v1/stage-update-requests/:id/request-changes`，params 与 body 走严格 schema，响应 200 完整申请。错误映射（`app.ts`）：404 `stage_update_request_not_found`、409 `stage_update_request_decision_conflict`、400 `stage_update_request_revision_invalid` / `stage_update_request_note_invalid`；未知异常日志由 `{ err: error }` 收紧为 `{ errType: error.name }`，绝不记录原始 message / 堆栈 / 请求体（对齐第二关“异常只记录稳定分类”规则）。
+5. **测试**：仓储 CAS / 服务层决定 / App API（含注入、真实 HTTP 冒烟与未知异常脱敏）与契约 schema 全覆盖，见“执行过的测试”。
+
+### 新增、修改和删除的文件清单
+
+- 新增：
+  - `apps/server/src/api/routes/stage-update-requests.ts`（request-changes 路由）
+  - `apps/server/test/stage-update-request-decision-service.test.ts`（服务层决定 9 个用例）
+  - `apps/server/test/stage-update-request-request-changes-api.test.ts`（App API 注入 + 真实 HTTP 冒烟 + 未知异常脱敏 9 个用例）
+- 修改：
+  - `packages/contracts/src/stage-update-request.ts`（revision / updatedAt / decision 模型 + note 常量 + 两个新 schema + JSON schema 更新）
+  - `apps/server/src/domain/stage-update-request/errors.ts`（NotFound / RevisionInvalid / NoteInvalid / DecisionConflict 四个新错误，消息不回显 note / reason / 身份）
+  - `apps/server/src/domain/stage-update-request/repository.ts`（`decideIfPending` 接口 + PostgreSQL 迁移说明）
+  - `apps/server/src/infrastructure/repositories/in-memory-stage-update-request-repository.ts`（CAS 实现）
+  - `apps/server/src/application/stage-update-request/stage-update-request-service.ts`（requestChanges + submit 写 revision / updatedAt / decision + 文档）
+  - `apps/server/src/app.ts`（路由装配 + 4 个错误映射 + 未知异常日志收紧为 errType）
+  - `apps/server/test/helpers.ts`（makeStageUpdateRequest 补 revision / updatedAt / decision 默认值）
+  - `apps/server/test/stage-update-request-repository.test.ts`（decideIfPending CAS 3 个用例）
+  - `apps/server/test/stage-update-request-contract.test.ts`（requestChangesBodySchema / params schema / decision 契约 5 个新用例）
+- 删除：无。
+- 未触碰：`.claude/`、`ui素材mingwu/`、计划复选框、Git / GitHub / VPS、上一批遗留的其余工作区改动。
+
+### 关键设计决定及其依据
+
+- **已决定后幂等重试如何识别**：本批一次决定即离开 pending 且不可再次决定，因此“完全相同”的重试由 `decision.note === 规范化 note && input.expectedRevision === revision - 1` 唯一识别（决定所依据的版本 = 当前 revision - 1）。这使相同请求重试稳定返回同一结果、不推进 revision / updatedAt，同时错误 expectedRevision / 不同 note 稳定 409，绝不覆盖第一次决定。
+- **CAS 而非普通 update**：决定是“pending → needs_changes”的不可逆迁移，仓储只提供 `decideIfPending`（存在 + pending + revision 匹配才写），从根源上排除任意覆盖路径；20 个同 revision 并发最多一个决定成功。
+- **原申请核心字段不可变**：决定对象通过展开 `...existing` 只替换 status / revision / updatedAt / decision，projectId / stageId / requesterActorId / expectedStageVersion / proposedStatus / reason / createdAt 逐项保持，测试逐字段断言。
+- **Stage 零修改**：服务与路由全程不注入、不调用 Stage 更新能力，成功前后读取正式 Stage 六字段快照逐项比对。
+- **单用户 App API 原型边界**：request-changes 不接收决定者 Actor / decidedAt / status / revision；正式用户认证留后续安全批次，本批不把该接口计入“权限系统完成”。
+- **未知异常日志脱敏**：全局错误处理器未知分支从 `{ err: error }`（含 message / stack，可能夹带攻击者构造的 token / 密码）收紧为 `{ errType: error.name }`，只保留稳定分类，响应恒为受控 500 `internal_error`。
+- **契约层前置拦截**：超长 / 空白 / 额外字段等非法输入先由 JSON Schema 400 `validation_failed` 拦截；服务层 `note_invalid` / `revision_invalid` 作为绕过 schema 直接调用时的自守兜底（与 submit 的 reason 处理一致）。
+
+### 执行过的测试或检查、命令与真实结果
+
+- `npm run typecheck`（apps/server + apps/contracts）：通过。
+- 本批专项：`npx vitest run` 覆盖 7 个文件 → 62 个测试全部通过（repository 10 / decision-service 9 / service 13 / mcp-submit 8 / contract 12 / request-changes-api 9 / mcp-http-smoke 1）。
+- 全量测试：`npx vitest run` → 43 个文件、721 个测试全部通过（此前 696，本批 +25，无回归）。
+- 真实 HTTP 冒烟（request-changes-api）：真实监听 127.0.0.1 临时端口 → 建项目 / 关卡 → 共享服务提交申请 → fetch POST request-changes → 读回 needs_changes → 正式 Stage 六字段快照完全未变 → 释放端口。通过。
+- 未知异常脱敏用例：注入抛含 `postgres://app:password=TEST_SECRET@...` 异常的假服务，断言响应 500 `internal_error` 且 body / 捕获日志均不含密码 / 连接串 / 原始 message，日志含稳定 `unhandled error`。通过。
+- `git diff --check`：通过（仅 LF→CRLF 换行提示，无空白错误）。
+- NUL / BOM 扫描（node 逐文件二进制检查）：本批新增与修改的 12 个文件均 0 个 NUL 字节、无 BOM。
+
+### 未完成内容、已知问题和风险
+
+- 批准 / 拒绝 / Stage 自动更新、MCP 决定工具、数据库 / PostgreSQL、AuditLog、用户认证、前端均不在本批范围（与 #25 边界一致）。
+- App API 仍是第三关单用户原型：正式公网部署写接口前必须接用户认证；本批不把 request-changes 计入“权限系统完成”。
+- 内存原型并发原子性依赖 JS 单线程临界区；数据库阶段 `decideIfPending` 须以条件 UPDATE 行数判断或事务 + 行锁实现，已在仓储接口注释声明。
+- 已决定后“完全相同”重试要求调用方仍携带首次的 `expectedRevision=1`；若客户端对已决定请求使用 revision 2 重试，会得到 409（受控冲突而非静默覆盖），属预期语义。
+
+### 是否涉及数据库、身份权限、密钥、外部服务或破坏性变化
+
+- 数据库 / Migration：否（仍为内存仓储；仅在仓储接口注释声明 PostgreSQL 迁移路径）。
+- 身份认证 / 权限：是——本批新增用户决定入口（App API 写接口）并收紧未知异常日志脱敏，属于 CLAUDE.md 强制检查点对象；未改动 MCP 认证中间件、`canSubmitStageUpdate` 授权策略或已验收的 `study_append_report`。
+- 密钥 / 凭据：否；测试仅用 `mcp-auth-fixtures.ts` 假 token 与虚构连接串断言脱敏。
+- 外部服务 / VPS / GitHub：否。
+- 破坏性变化：否；无删除文件、无架构改道；全局错误处理器未知分支仅收紧日志字段（不再记录原始 message / 堆栈），响应行为不变。
+
+### 建议下一批任务
+
+待 小喵 审核通过后，可进入用户决定入口的后续批次：实现 approved / rejected 决定（申请决定字段写入时不覆盖旧申请，revision / updatedAt 沿用本批并发模型），并在批准时按申请语义更新正式 Stage（携带 expectedStageVersion 乐观并发）；随后再考虑用户认证与批准 / 拒绝列表读取接口。
+
+### 等待小喵审核
+
+---
+
+## 小喵审核结果 #25 · 需要返修仓储不可变边界 · 2026-08-11
+
+### 审核结论
+
+App API 严格输入、服务层 `pending -> needs_changes`、同语义重试、受控冲突、Unicode、Stage 零修改和未知异常脱敏均符合本批要求；小喵独立执行根目录 typecheck 与全量测试，结果为 **43 个文件、721/721 通过**，`git diff --check` 也通过（仅 Windows LF→CRLF 提示）。
+
+但仓储的所谓“专用决定方法”仍接收一整份 `StageUpdateRequest` 并直接覆盖 Map 中的对象，因此实际能力等价于“满足 pending + revision 条件时任意覆盖整条申请”，没有在真正写入边界保证原申请核心字段不可变，暂不能验收或打勾：
+
+- `StageUpdateRequestRepository.decideIfPending(id, updated: StageUpdateRequest, expectedRevision)` 允许调用方传入任意 projectId / stageId / requesterActorId / expectedStageVersion / proposedStatus / reason / createdAt / status / revision。
+- `InMemoryStageUpdateRequestRepository` 在 CAS 条件满足后直接执行 `byId.set(id, structuredClone(updated))`，没有从仓储中的 `current` 派生新对象，也没有约束只改决定字段。
+- 小喵已真实调用该仓储复现：在正确 `id + expectedRevision=1` 下，把 projectId、reason、createdAt 改成伪造值并把 revision 直接设为 999，仓储成功落账且读回的就是被覆盖后的对象。现有仓储测试只传入由 `...pending` 构造的善意对象，因此未覆盖这个边界。
+
+### 必须返修（不扩大批次）
+
+1. 收窄仓储接口，使调用方不能提交完整 `StageUpdateRequest`。建议改为类似 `decideIfPending(id, expectedRevision, decisionInput)`，其中 decisionInput 只包含本次允许写入的最小字段（本批为规范化 note 与服务端采样的 decidedAt / updatedAt，或一个受控 `needs_changes` 决定对象）。
+2. 仓储必须从已保存的 `current` 自行构造结果：固定 `status = 'needs_changes'`、`revision = current.revision + 1`，只写 `updatedAt` 与 `decision`；id、projectId、stageId、requesterActorId、expectedStageVersion、proposedStatus、reason、createdAt 必须全部取自 `current`。不要让调用方指定新 revision 或整条 updated 对象。
+3. 保持 CAS 前提不变：仅存在 + pending + `current.revision === expectedRevision` 时写入；其他情况返回 null，第一次决定永不覆盖。服务层继续负责 note 校验、稳定幂等判断与 CAS 失败到受控 409 的映射。
+4. 补仓储边界测试，证明调用方没有任何参数能改写原申请核心字段、createdAt、status 目标或 revision 跳号；至少覆盖“决定后所有原字段逐项来自 current、revision 只能 +1”。20 并发与深拷贝测试继续保留。
+5. 同步修正 PostgreSQL 迁移注释：条件 UPDATE 只能 SET status / revision / updated_at / decision 所需列，不能接受或覆盖原申请核心列。
+6. 保持 App API、Unicode、错误脱敏、Stage 零修改和全部既有测试不回归。返修后重新执行专项、根目录 typecheck、全量测试、真实 HTTP 冒烟、NUL 扫描与 `git diff --check`，追加真实结果后暂停。
+
+### 边界
+
+- 不修改计划复选框，不提交或推送，不开始批准 / 拒绝下一批。
+- 只修 `decideIfPending` 的最小写入接口、仓储派生逻辑、对应测试与迁移说明。
+
+等待 DS 返修后由小喵复验。
+
+---
+## 检查点 #26 · 返修 #25：仓储决定方法收窄为最小写入接口并自 current 派生 · 2026-08-11
+
+### 本批目标
+
+响应 小喵 审核结果 #25：`decideIfPending` 原签名接收一整份 `StageUpdateRequest` 并在 CAS 通过后直接覆盖 Map 对象，调用方可在满足 `pending + revision` 条件时改写 projectId / stageId / requesterActorId / expectedStageVersion / proposedStatus / reason / createdAt / status / revision（小喵已真实复现 revision=999 覆盖）。本批只修该最小写入接口、仓储派生逻辑、对应测试与 PostgreSQL 迁移说明，不扩大批次、不动 App API / Unicode / 脱敏 / Stage 零修改。
+
+### 候选完成的计划原文（DS 不打勾）
+
+- `- [ ] 要求 AI 补充说明`
+
+### 实际完成内容
+
+1. **接口收窄**（`domain/stage-update-request/repository.ts`）：新增 `StageUpdateRequestDecisionWrite`，只含本次允许写入的最小字段——服务层校验后的规范化 `note`、服务端采样的 `decidedAt` 与 `updatedAt`。`decideIfPending(id, expectedRevision, decision: StageUpdateRequestDecisionWrite)` 不再接收完整申请对象，调用方从接口层面就无法提交 projectId / reason / createdAt / status / revision 等受保护字段。
+2. **仓储从 current 派生**（`in-memory-stage-update-request-repository.ts`）：CAS 前提不变（存在 + pending + `current.revision === expectedRevision`），通过后从已保存的 `current` 构造新版本——`status` 固定 `needs_changes`、`revision` 固定 `current.revision + 1`，只写 `decision`（type 固定 needs_changes + 传入 note + decidedAt）与 `updatedAt`；`id / projectId / stageId / requesterActorId / expectedStageVersion / proposedStatus / reason / createdAt` 全部取自 `current`，调用方传入任意 decision 字段也无法改写。深拷贝写回与返回保持不变。
+3. **服务层改传最小字段**（`stage-update-request-service.ts`）：`requestChanges` 不再构造 `updated: StageUpdateRequest`，改为把 `{ note, decidedAt: now, updatedAt: now }` 交给仓储；note 校验、稳定幂等判断、CAS 失败 → 受控 409 的映射仍由服务层负责。
+4. **PostgreSQL 迁移注释修正**：条件 UPDATE 只 `SET status / revision / updated_at / decision` 所需列（`revision = revision + 1`），绝不接受或覆盖原申请核心列；CAS 仍以 `WHERE id = ? AND status = 'pending' AND revision = ?` 行数判断或事务 + 行锁实现。
+5. **边界测试**（`stage-update-request-repository.test.ts`）：重写 `decideIfPending` 用例为最小字段输入，新增“派生自 current：每个原字段逐项来自 current、revision 只能恰好 +1、只写 decision / updatedAt”（用非默认核心字段构造申请逐项断言）与“深拷贝：篡改决定返回对象不污染仓储”两个边界用例；保留缺失 / 陈旧版本 / 非 pending 返回 null 与 20 并发恰一胜出、最终 revision=2、核心字段仍来自 current。
+
+### 新增、修改和删除的文件清单
+
+- 新增：无。
+- 修改：
+  - `apps/server/src/domain/stage-update-request/repository.ts`（新增 `StageUpdateRequestDecisionWrite` + 收窄 `decideIfPending` 签名 + 派生规则 / PostgreSQL 迁移注释更新）
+  - `apps/server/src/infrastructure/repositories/in-memory-stage-update-request-repository.ts`（从 current 派生，只写决定字段；不再接受整份 updated 对象）
+  - `apps/server/src/application/stage-update-request/stage-update-request-service.ts`（改传最小决定字段，删除整份对象构造）
+  - `apps/server/test/stage-update-request-repository.test.ts`（重写决定用例 + 新增 2 个边界用例）
+- 删除：无。
+- 未触碰：`.claude/`、`ui素材mingwu/`、计划复选框、Git / GitHub / VPS、App API / 契约 / 脱敏 / 其余工作区改动。
+
+### 关键设计决定及其依据
+
+- **接口即边界**：把“能写哪些字段”收窄进接口签名，而不是依赖仓储实现自觉。`decideIfPending` 只接收 `StageUpdateRequestDecisionWrite`，调用方在编译期就无法传 projectId / reason / createdAt / revision 等，从根源上消除覆盖面，小喵复现的“整份对象覆盖”路径被关闭。
+- **仓储固定派生规则**：status 目标与 revision 是仓储不可协商的规则（needs_changes、+1），调用方连“指定新 revision”的入口都没有；核心字段一律 `...current` 展开，天然不可变。
+- **服务层职责不变**：note 校验（trim + code point 上限）、稳定幂等判断（同规范化 note 且 expectedRevision == revision-1）、CAS 失败 → 409 仍全部留在服务层；仓储只做“条件成立则按规则派生写入”，单一职责清晰。
+- **PostgreSQL 迁移对齐接口**：条件 UPDATE 只 SET 决定所需列，与内存实现同构，避免数据库阶段重新引入覆盖核心列的能力。
+
+### 执行过的测试或检查、命令与真实结果
+
+- `npm run typecheck`（apps/server + apps/contracts）：通过。
+- 本批专项：`npx vitest run` 覆盖 7 个文件 → 64 个测试全部通过（repository 12 / decision-service 9 / service 13 / mcp-submit 8 / contract 12 / request-changes-api 9 / mcp-http-smoke 1；此前 62，本批仓储 +2 边界用例）。
+- 全量测试：`npx vitest run` → 43 个文件、723 个测试全部通过（此前 721，本批 +2，无回归）。
+- 真实 HTTP 冒烟（request-changes-api 与 mcp-http-smoke）：通过，结束后释放端口。
+- `git diff --check`：通过（仅 LF→CRLF 换行提示，无空白错误）。
+- NUL / BOM 扫描（node 逐文件二进制检查）：返修涉及的 4 个文件均 0 个 NUL 字节、无 BOM。
+
+### 未完成内容、已知问题和风险
+
+- 本批只修仓储最小写入边界；批准 / 拒绝 / Stage 自动更新、MCP 决定工具、数据库 / PostgreSQL、AuditLog、用户认证、前端仍不在范围（与 #25 边界一致）。
+- App API 仍是第三关单用户原型：正式公网部署写接口前必须接用户认证；request-changes 不计入“权限系统完成”。
+- 内存原型并发原子性依赖 JS 单线程临界区；数据库阶段 `decideIfPending` 以条件 UPDATE 行数判断或事务 + 行锁实现，已在仓储接口注释声明。
+
+### 是否涉及数据库、身份权限、密钥、外部服务或破坏性变化
+
+- 数据库 / Migration：否（仍为内存仓储；仅在注释更新 PostgreSQL 迁移要求）。
+- 身份认证 / 权限：是——本批属于 #25 的仓储写入边界安全返修，是 CLAUDE.md 强制检查点对象；未改动 MCP 认证中间件、`canSubmitStageUpdate` 授权策略或已验收的 `study_append_report`。
+- 密钥 / 凭据：否；测试仅用假 token 与虚构连接串。
+- 外部服务 / VPS / GitHub：否。
+- 破坏性变化：否；无删除文件、无架构改道；`decideIfPending` 签名收窄为内部接口变化，唯一调用方（服务层）已同步更新。
+
+### 建议下一批任务
+
+待 小喵 复验通过后，可进入用户决定入口的后续批次：实现 approved / rejected 决定（沿用本批“仓储从 current 派生、最小写入接口”的不可变边界与 revision / updatedAt 并发模型），并在批准时按申请语义更新正式 Stage（携带 expectedStageVersion 乐观并发）；随后再考虑用户认证与批准 / 拒绝列表读取接口。
+
+### 等待小喵审核
+
+---
+
+## 小喵复验结果 #25 / #26 · 通过 · 2026-08-11
+
+### 验收结论
+
+通过。`request-changes` 只允许 pending 申请进入 `needs_changes`，决定说明经过 trim 与 Unicode code point 上限校验；相同请求可稳定重试，不同 note / revision 或并发竞争不会覆盖第一次决定。App API 严格拒绝身份、状态、决定结果与 Stage 等受保护字段，错误响应和未知异常日志均不泄露申请内容、身份或密钥；决定前后正式 Stage 完全不变。
+
+#25 发现的仓储边界已在 #26 修复：`decideIfPending` 不再接收完整申请，只接收 note 与服务端时间；仓储从已保存的 current 固定派生 `status = needs_changes`、`revision = current.revision + 1`，原申请核心字段与 createdAt 没有可由调用方覆盖的入口。PostgreSQL 迁移说明也限制为只更新决定所需列。
+
+### 小喵独立复验结果
+
+- 根目录 `npm run typecheck`：通过。
+- 全量测试：43 个文件，**723/723 通过**。
+- 独立恶意字段复现：额外传入伪造 projectId / reason / createdAt / revision=999 / status=approved 后，读回仍保留原 projectId、reason、createdAt，并固定为 needs_changes、revision=2；覆盖路径已关闭。
+- 真实 HTTP 冒烟随全量测试通过，端口正常释放。
+- NUL 扫描：0；`git diff --check` 通过，仅 Windows LF→CRLF 提示。
+
+### 计划更新
+
+- `[x] 要求 AI 补充说明`
+
+本批可以归档并提交推送。批准、拒绝、批准后正式更新 Stage、用户认证、数据库与前端仍留给后续批次。
+
+---

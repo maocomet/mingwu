@@ -72,3 +72,46 @@ export class StageUpdateRequesterInvalidError extends Error {
     this.name = 'StageUpdateRequesterInvalidError';
   }
 }
+
+/** 决定入口的目标申请不存在（404）。消息只含申请 id，不回显决定说明或申请内容。 */
+export class StageUpdateRequestNotFoundError extends Error {
+  constructor(readonly requestId: string) {
+    super(`Stage update request not found: ${requestId}`);
+    this.name = 'StageUpdateRequestNotFoundError';
+  }
+}
+
+/**
+ * 决定入口的 expectedRevision 不合法：不是正整数（schema 已先行拦截，此处为服务层
+ * 自守输入不变量）。
+ */
+export class StageUpdateRequestRevisionInvalidError extends Error {
+  constructor() {
+    super('Stage update request decision revision is invalid');
+    this.name = 'StageUpdateRequestRevisionInvalidError';
+  }
+}
+
+/**
+ * 决定说明（note）不合法：去除首尾空白后为空，或按 Unicode code point 计数超过
+ * STAGE_UPDATE_NOTE_MAX_LENGTH（与 JSON Schema maxLength 语义一致）。消息不回显
+ * 原始 note，避免把客户端内容反弹给调用方。
+ */
+export class StageUpdateRequestNoteInvalidError extends Error {
+  constructor() {
+    super('Stage update request decision note is invalid');
+    this.name = 'StageUpdateRequestNoteInvalidError';
+  }
+}
+
+/**
+ * 决定冲突（409）：申请不存在于 pending 状态、expectedRevision 与当前 revision
+ * 不一致、或已决定后重试语义不同（note 不同 / expectedRevision 错误 / 并发决定
+ * 竞争落败）。绝不覆盖第一次决定；错误消息不回显 note、原申请 reason 或决定内容。
+ */
+export class StageUpdateRequestDecisionConflictError extends Error {
+  constructor(readonly requestId: string) {
+    super(`Stage update request ${requestId} decision conflict`);
+    this.name = 'StageUpdateRequestDecisionConflictError';
+  }
+}

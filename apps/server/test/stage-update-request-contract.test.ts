@@ -2,11 +2,15 @@ import { createRequire } from 'node:module';
 import { describe, expect, it } from 'vitest';
 import {
   PROJECT_STAGE_STATUSES,
+  STAGE_UPDATE_NOTE_MAX_LENGTH,
   STAGE_UPDATE_REASON_MAX_LENGTH,
+  STAGE_UPDATE_REQUEST_DECISION_TYPES,
   STAGE_UPDATE_REQUEST_STATUSES,
+  requestChangesBodySchema,
   stageUpdateRequestJsonSchema,
+  stageUpdateRequestParamsSchema,
 } from '@mingwu/contracts';
-import { makeStageUpdateRequest } from './helpers.js';
+import { makeStageUpdateRequest, uuid } from './helpers.js';
 
 // ajv 已声明为 @mingwu/server 的 devDependency，契约测试直接使用，不依赖传递解析。
 // NodeNext 对 CJS 默认导出的类型解析有歧义，这里用 createRequire 在运行时加载
@@ -88,6 +92,56 @@ describe('StageUpdateRequest contract schemas', () => {
     });
   });
 
+  describe('requestChangesBodySchema', () => {
+    it('accepts only expectedRevision + note and rejects protected/extra fields', () => {
+      const validate = compile({ ...requestChangesBodySchema });
+      expect(validate({ expectedRevision: 1, note: '请补充细节' })).toBe(true);
+      // schema 只保证非空；trim 边界由服务层拒绝（'  ' 长度 2 通过 schema）。
+      expect(validate({ expectedRevision: 1, note: '  ' })).toBe(true);
+      expect(validate({ expectedRevision: 1, note: 'x', actorId: uuid() })).toBe(false);
+      expect(validate({ expectedRevision: 1, note: 'x', requesterActorId: uuid() })).toBe(false);
+      expect(validate({ expectedRevision: 1, note: 'x', status: 'approved' })).toBe(false);
+      expect(validate({ expectedRevision: 1, note: 'x', decision: {} })).toBe(false);
+      expect(validate({ expectedRevision: 1, note: 'x', decidedAt: 't' })).toBe(false);
+      expect(validate({ expectedRevision: 1, note: 'x', updatedAt: 't' })).toBe(false);
+      expect(validate({ expectedRevision: 1, note: 'x', revision: 9 })).toBe(false);
+      expect(validate({ expectedRevision: 1, note: 'x', stageId: uuid() })).toBe(false);
+      expect(validate({ expectedRevision: 1, note: 'x', proposedStatus: 'completed' })).toBe(
+        false,
+      );
+    });
+
+    it('enforces expectedRevision as a JSON integer >= 1 and note non-empty within the code-point bound', () => {
+      const validate = compile({ ...requestChangesBodySchema });
+      expect(validate({ expectedRevision: 1, note: 'x' })).toBe(true);
+      expect(validate({ expectedRevision: 0, note: 'x' })).toBe(false);
+      expect(validate({ expectedRevision: -1, note: 'x' })).toBe(false);
+      expect(validate({ expectedRevision: 1.5, note: 'x' })).toBe(false);
+      // coerceTypes:false：数字字符串不会悄悄转换。
+      expect(validate({ expectedRevision: '1', note: 'x' })).toBe(false);
+      expect(validate({ expectedRevision: 1, note: '' })).toBe(false);
+      expect(validate({ expectedRevision: 1 })).toBe(false);
+      expect(validate({ note: 'x' })).toBe(false);
+      // 恰好上限个 astral emoji 放行（code point 语义），上限 + 1 拒绝。
+      expect(
+        validate({ expectedRevision: 1, note: '😀'.repeat(STAGE_UPDATE_NOTE_MAX_LENGTH) }),
+      ).toBe(true);
+      expect(
+        validate({ expectedRevision: 1, note: '😀'.repeat(STAGE_UPDATE_NOTE_MAX_LENGTH + 1) }),
+      ).toBe(false);
+    });
+  });
+
+  describe('stageUpdateRequestParamsSchema', () => {
+    it('requires a UUID id and rejects extra params', () => {
+      const validate = compile({ ...stageUpdateRequestParamsSchema });
+      expect(validate({ id: uuid() })).toBe(true);
+      expect(validate({})).toBe(false);
+      expect(validate({ id: 'nope' })).toBe(false);
+      expect(validate({ id: uuid(), extra: 1 })).toBe(false);
+    });
+  });
+
   describe('shared constants', () => {
     it('declares the four request statuses with pending first and the seven legal stage statuses', () => {
       expect(STAGE_UPDATE_REQUEST_STATUSES).toEqual([
@@ -98,6 +152,8 @@ describe('StageUpdateRequest contract schemas', () => {
       ]);
       expect(PROJECT_STAGE_STATUSES).toHaveLength(7);
       expect(STAGE_UPDATE_REASON_MAX_LENGTH).toBeGreaterThan(0);
+      expect(STAGE_UPDATE_NOTE_MAX_LENGTH).toBe(STAGE_UPDATE_REASON_MAX_LENGTH);
+      expect(STAGE_UPDATE_REQUEST_DECISION_TYPES).toEqual(['needs_changes']);
     });
 
     it('stageUpdateRequestJsonSchema declares all four request statuses', () => {
@@ -110,6 +166,36 @@ describe('StageUpdateRequest contract schemas', () => {
         }).properties.status.enum,
       ).toEqual([...STAGE_UPDATE_REQUEST_STATUSES]);
       expect(validate(makeStageUpdateRequest())).toBe(true);
+    });
+
+    it('stageUpdateRequestJsonSchema requires decision (nullable) with only needs_changes', () => {
+      const validate = compile({ ...stageUpdateRequestJsonSchema });
+      // decision 必填且可为 null（pending 申请）。
+      const base = makeStageUpdateRequest();
+      const { decision, ...missingDecision } = base;
+      expect(validate({ ...missingDecision })).toBe(false);
+      expect(validate(makeStageUpdateRequest())).toBe(true);
+
+      // 已决定：type 只允许 STAGE_UPDATE_REQUEST_DECISION_TYPES 声明的类型。
+      const decided = makeStageUpdateRequest({
+        status: 'needs_changes',
+        revision: 2,
+        decision: { type: 'needs_changes', note: '请补充细节', decidedAt: '2026-08-11T08:00:00.000Z' },
+      });
+      expect(validate(decided)).toBe(true);
+      expect(
+        validate({ ...decided, decision: { type: 'approved', note: 'x', decidedAt: 't' } }),
+      ).toBe(false);
+      // decision 对象必须完整，缺 decidedAt / 带额外键均拒绝。
+      expect(
+        validate({ ...decided, decision: { type: 'needs_changes', note: 'x' } }),
+      ).toBe(false);
+      expect(
+        validate({
+          ...decided,
+          decision: { type: 'needs_changes', note: 'x', decidedAt: 't', extra: 1 },
+        }),
+      ).toBe(false);
     });
   });
 });

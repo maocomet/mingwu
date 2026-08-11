@@ -1,5 +1,6 @@
 import type {
   AuthenticatedAiActorContext,
+  RequestChangesInput,
   StageUpdateRequest,
   SubmitStageUpdateRequestInput,
 } from '@mingwu/contracts';
@@ -7,6 +8,7 @@ import {
   AI_ACTOR_CODE_MAX_LENGTH,
   AI_ACTOR_TYPES,
   PROJECT_STAGE_STATUSES,
+  STAGE_UPDATE_NOTE_MAX_LENGTH,
   STAGE_UPDATE_REASON_MAX_LENGTH,
   UUID_PATTERN,
   countCodePoints,
@@ -14,11 +16,15 @@ import {
 import { StageNotFoundError, StageVersionConflictError } from '../../domain/stage/errors.js';
 import type { StageRepository } from '../../domain/stage/repository.js';
 import {
+  StageUpdateRequestDecisionConflictError,
   StageUpdateRequestExpectedVersionInvalidError,
   StageUpdateRequestIdempotencyConflictError,
   StageUpdateRequestIdInvalidError,
+  StageUpdateRequestNoteInvalidError,
+  StageUpdateRequestNotFoundError,
   StageUpdateRequestProposedStatusInvalidError,
   StageUpdateRequestReasonInvalidError,
+  StageUpdateRequestRevisionInvalidError,
   StageUpdateRequesterInvalidError,
 } from '../../domain/stage-update-request/errors.js';
 import type { StageUpdateRequestRepository } from '../../domain/stage-update-request/repository.js';
@@ -30,19 +36,23 @@ import {
 const UUID_REGEX = new RegExp(UUID_PATTERN);
 
 /**
- * StageUpdateRequest 申请服务。只提供“提交申请 + 只读查询”能力，不提供修改、
- * 覆盖、删除或批准申请的方法。身份边界：
- * - 公开 input 只包含 id / stageId / expectedStageVersion / proposedStatus / reason；
+ * StageUpdateRequest 申请服务。提供“提交申请 + 用户要求补充（needs_changes 决定）
+ * + 只读查询”，不提供修改、覆盖、删除、批准或拒绝申请的方法。身份边界：
+ * - 公开 input 只包含 id / stageId / expectedStageVersion / proposedStatus / reason
+ *   （提交）与 expectedRevision / note（要求补充）；
  * - requesterActorId 只从 AuthenticatedAiActorContext 读取，不新增可由客户端指定的
  *   身份字段；
- * - projectId 由服务端读取真实 Stage 后确定，不信任客户端提交的 projectId。
+ * - projectId 由服务端读取真实 Stage 后确定，不信任客户端提交的 projectId；
+ * - 决定入口为单用户 App API 原型，不接收决定者 Actor；正式用户认证留后续安全批次。
  *
  * 申请与正式主进度隔离：
  * - 本服务只读 Stage（findById），绝不调用 Stage 更新、绝不改变 Stage 的 status /
  *   version / 时间字段；成功前后读取 Stage 必须完全相同；
  * - 仅当申请 id 尚不存在时，才读取真实 Stage 并校验 expectedStageVersion 与当前
  *   Stage.version 一致：不一致返回稳定冲突（复用 StageVersionConflictError），不
- *   创建申请，防止基于陈旧状态的申请。
+ *   创建申请，防止基于陈旧状态的申请；
+ * - requestChanges 只修改申请自身的 status / revision / updatedAt / decision，
+ *   绝不读取或调用 Stage 更新能力。
  *
  * 身份防线：
  * - 受信上下文必须在写入前通过防守性校验：actorId 是合法 UUID、actorCode 非空且
@@ -61,6 +71,15 @@ const UUID_REGEX = new RegExp(UUID_PATTERN);
  *   返回已有申请，异语义 → 仓储抛受控冲突，绝不覆盖；
  * - 跨表 TOCTOU：PostgreSQL 阶段“校验 Stage 当前版本 + 插入申请”须在同一事务内
  *   完成并对 Stage 加锁 / 条件验证，本内存原型由 JS 单线程原子性覆盖。
+ *
+ * 决定（requestChanges）并发与幂等：
+ * - 本批一次决定即离开 pending 且不可再次决定；成功决定 revision +1 到 2；
+ * - 已决定后“完全相同”重试（同规范化 note 且 expectedRevision 等于决定所依据的
+ *   版本 revision-1）幂等返回，不再次推进 revision / updatedAt；
+ * - 已决定后不同 note / 错误 expectedRevision，或 pending 下 expectedRevision 与
+ *   当前 revision 不一致，或并发决定竞争落败 → 稳定 StageUpdateRequestDecisionConflictError
+ *   （409），绝不覆盖第一次决定；
+ * - 原子性由仓储 decideIfPending CAS 保证，20 个同 revision 并发最多一个决定成功。
  */
 export class StageUpdateRequestService {
   constructor(
@@ -85,7 +104,8 @@ export class StageUpdateRequestService {
    *   变化 / Stage 不存在等外部状态掩盖）；
    * - id 不存在时才读取真实 Stage：Stage 不存在 → StageNotFoundError（404）；
    * - expectedStageVersion 与当前版本不一致 → StageVersionConflictError（409，不创建申请）；
-   * - 成功后返回完整申请对象（status=pending，createdAt 由服务端写入）。
+   * - 成功后返回完整申请对象（status=pending，revision=1，decision=null，createdAt /
+   *   updatedAt 由服务端单次采样写入）。
    */
   async submit(
     authContext: AuthenticatedAiActorContext,
@@ -133,6 +153,7 @@ export class StageUpdateRequestService {
       throw new StageVersionConflictError(input.stageId, input.expectedStageVersion);
     }
 
+    const now = this.now();
     const request: StageUpdateRequest = {
       id: input.id,
       projectId: stage.projectId,
@@ -142,11 +163,72 @@ export class StageUpdateRequestService {
       proposedStatus: input.proposedStatus,
       reason,
       status: 'pending',
-      createdAt: this.now(),
+      revision: 1,
+      updatedAt: now,
+      decision: null,
+      createdAt: now,
     };
     // 最终仍通过仓储原子插入落账：处理“预检后另一并发请求抢先插入”的竞争，
     // 同 id 同语义 → created=false 幂等返回已有申请；异语义 → 受控冲突。
     const { request: saved } = await this.repository.insertIfAbsent(request);
+    return saved;
+  }
+
+  /**
+   * 用户“要求 AI 补充说明”：把 pending 申请标记为 needs_changes 并保存决定说明。
+   * - expectedRevision 非正整数 → StageUpdateRequestRevisionInvalidError（400）；
+   * - note trim 后为空或按 code point 计数超上限 → StageUpdateRequestNoteInvalidError（400）；
+   * - 申请不存在 → StageUpdateRequestNotFoundError（404）；
+   * - 已决定：只有“完全相同”的重试幂等返回原申请（同规范化 note 且 expectedRevision
+   *   等于决定所依据的版本 revision-1），不再次推进 revision / updatedAt；其余
+   *   （不同 note / 错误 expectedRevision）→ StageUpdateRequestDecisionConflictError（409），
+   *   绝不覆盖第一次决定；
+   * - 仍 pending：expectedRevision 必须等于当前 revision，否则 409；通过后走仓储
+   *   原子 decideIfPending（CAS），并发决定竞争落败 → 409；
+   * - 只修改申请自身的 status / revision / updatedAt / decision，不读取 / 修改正式 Stage。
+   */
+  async requestChanges(id: string, input: RequestChangesInput): Promise<StageUpdateRequest> {
+    if (!Number.isInteger(input.expectedRevision) || input.expectedRevision < 1) {
+      throw new StageUpdateRequestRevisionInvalidError();
+    }
+    const note = input.note.trim();
+    if (note === '' || countCodePoints(note) > STAGE_UPDATE_NOTE_MAX_LENGTH) {
+      throw new StageUpdateRequestNoteInvalidError();
+    }
+
+    const existing = await this.repository.findById(id);
+    if (!existing) {
+      throw new StageUpdateRequestNotFoundError(id);
+    }
+
+    // 已决定：只有“完全相同”的重试幂等返回，其余冲突，绝不覆盖第一次决定。
+    if (existing.status !== 'pending') {
+      if (
+        existing.decision &&
+        existing.decision.note === note &&
+        input.expectedRevision === existing.revision - 1
+      ) {
+        return existing;
+      }
+      throw new StageUpdateRequestDecisionConflictError(id);
+    }
+
+    // 仍 pending：expectedRevision 必须等于当前 revision，随后原子 CAS 决定。
+    if (input.expectedRevision !== existing.revision) {
+      throw new StageUpdateRequestDecisionConflictError(id);
+    }
+    // 只把本次允许写入的最小字段交给仓储（规范化 note + 服务端采样时间）；
+    // status='needs_changes'、revision=current.revision+1 与核心字段派生全部由
+    // 仓储从已保存的 current 完成，服务层不构造可覆盖原申请的新对象。
+    const now = this.now();
+    const saved = await this.repository.decideIfPending(id, input.expectedRevision, {
+      note,
+      decidedAt: now,
+      updatedAt: now,
+    });
+    if (!saved) {
+      throw new StageUpdateRequestDecisionConflictError(id);
+    }
     return saved;
   }
 

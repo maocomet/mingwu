@@ -159,3 +159,158 @@ describe('InMemoryStageUpdateRequestRepository', () => {
     }
   });
 });
+
+describe('InMemoryStageUpdateRequestRepository.decideIfPending (decision CAS)', () => {
+  const DECIDED_AT = '2026-01-01T10:00:00.000Z';
+
+  it('atomically writes a needs_changes decision only for an existing pending request at the expected revision', async () => {
+    const repo = new InMemoryStageUpdateRequestRepository();
+    const pending = makeStageUpdateRequest({ status: 'pending', revision: 1 });
+    await repo.insertIfAbsent(pending);
+
+    const saved = await repo.decideIfPending(pending.id, 1, {
+      note: '请补充细节',
+      decidedAt: DECIDED_AT,
+      updatedAt: DECIDED_AT,
+    });
+    expect(saved).not.toBeNull();
+    expect(saved!.status).toBe('needs_changes');
+    expect(saved!.revision).toBe(2);
+    expect(saved!.decision).toEqual({
+      type: 'needs_changes',
+      note: '请补充细节',
+      decidedAt: DECIDED_AT,
+    });
+    expect(saved!.updatedAt).toBe(DECIDED_AT);
+
+    const read = await repo.findById(pending.id);
+    expect(read).toEqual(saved);
+    expect(read?.status).toBe('needs_changes');
+    expect(read?.revision).toBe(2);
+    expect(read?.decision).toEqual(saved!.decision);
+    // 原申请核心字段（projectId / stageId / actor / 语义）与 createdAt 不变。
+    expect(read?.createdAt).toBe(pending.createdAt);
+    expect(read?.stageId).toBe(pending.stageId);
+    expect(read?.requesterActorId).toBe(pending.requesterActorId);
+  });
+
+  it('derives the decided request from current: every original field comes from current, revision is always exactly +1', async () => {
+    const repo = new InMemoryStageUpdateRequestRepository();
+    // 构造含非默认核心字段的申请，便于逐项比对是否来自 current。
+    const pending = makeStageUpdateRequest({
+      id: uuid(),
+      projectId: uuid(),
+      stageId: uuid(),
+      requesterActorId: uuid(),
+      expectedStageVersion: 3,
+      proposedStatus: 'completed',
+      reason: '不可改写的原理由',
+      status: 'pending',
+      revision: 1,
+      createdAt: '2026-01-01T08:00:00.000Z',
+      updatedAt: '2026-01-01T08:00:00.000Z',
+    });
+    await repo.insertIfAbsent(pending);
+
+    const saved = await repo.decideIfPending(pending.id, 1, {
+      note: '决定说明',
+      decidedAt: DECIDED_AT,
+      updatedAt: DECIDED_AT,
+    });
+    expect(saved).not.toBeNull();
+    // 核心字段 + 创建时间逐项来自 current，且任何调用方参数都无法改写。
+    expect(saved!.id).toBe(pending.id);
+    expect(saved!.projectId).toBe(pending.projectId);
+    expect(saved!.stageId).toBe(pending.stageId);
+    expect(saved!.requesterActorId).toBe(pending.requesterActorId);
+    expect(saved!.expectedStageVersion).toBe(pending.expectedStageVersion);
+    expect(saved!.proposedStatus).toBe(pending.proposedStatus);
+    expect(saved!.reason).toBe(pending.reason);
+    expect(saved!.createdAt).toBe(pending.createdAt);
+    // status 目标与 revision 由仓储固定派生：只允许 needs_changes、revision 只能 +1。
+    expect(saved!.status).toBe('needs_changes');
+    expect(saved!.revision).toBe(pending.revision + 1);
+    // 只写 decision 与 updatedAt。
+    expect(saved!.updatedAt).toBe(DECIDED_AT);
+    expect(saved!.decision).toEqual({
+      type: 'needs_changes',
+      note: '决定说明',
+      decidedAt: DECIDED_AT,
+    });
+  });
+
+  it('returns null without writing for missing / stale revision / non-pending, and never overwrites the first decision', async () => {
+    const repo = new InMemoryStageUpdateRequestRepository();
+    const pending = makeStageUpdateRequest({ status: 'pending', revision: 1 });
+    await repo.insertIfAbsent(pending);
+    const decision = { note: '第一次决定', decidedAt: DECIDED_AT, updatedAt: DECIDED_AT };
+
+    // 不存在。
+    expect(await repo.decideIfPending(uuid(), 1, decision)).toBeNull();
+    // 版本陈旧（expectedRevision 不等于当前 revision）。
+    expect(await repo.decideIfPending(pending.id, 2, decision)).toBeNull();
+    // 已决定后再次决定：不再 pending。
+    await repo.decideIfPending(pending.id, 1, decision);
+    expect(
+      await repo.decideIfPending(pending.id, 2, { note: '第二次决定', decidedAt: '2026-01-01T11:00:00.000Z', updatedAt: '2026-01-01T11:00:00.000Z' }),
+    ).toBeNull();
+
+    // 原决定从未被覆盖（revision / updatedAt / decision 保持第一次决定）。
+    const read = await repo.findById(pending.id);
+    expect(read?.status).toBe('needs_changes');
+    expect(read?.revision).toBe(2);
+    expect(read?.decision).toEqual({ type: 'needs_changes', note: '第一次决定', decidedAt: DECIDED_AT });
+    expect(read?.updatedAt).toBe(DECIDED_AT);
+  });
+
+  it('20 concurrent same-revision decisions: exactly one wins and final revision is 2', async () => {
+    const repo = new InMemoryStageUpdateRequestRepository();
+    const pending = makeStageUpdateRequest({ status: 'pending', revision: 1 });
+    await repo.insertIfAbsent(pending);
+
+    const results = await Promise.all(
+      Array.from({ length: 20 }, (_, i) =>
+        repo.decideIfPending(pending.id, 1, {
+          note: `决定 ${i}`,
+          decidedAt: `2026-01-0${i}`,
+          updatedAt: `2026-01-0${i}`,
+        }),
+      ),
+    );
+    const wins = results.filter((r) => r !== null);
+    expect(wins.length).toBe(1);
+    const read = await repo.findById(pending.id);
+    expect(read?.status).toBe('needs_changes');
+    expect(read?.revision).toBe(2);
+    expect(read?.decision?.note).toBe(wins[0]!.decision!.note);
+    // 无论谁胜出，revision 固定 +1，核心字段仍来自当前申请。
+    expect(read?.projectId).toBe(pending.projectId);
+    expect(read?.createdAt).toBe(pending.createdAt);
+  });
+
+  it('returns deep copies: mutating the decided result does not pollute storage', async () => {
+    const repo = new InMemoryStageUpdateRequestRepository();
+    const pending = makeStageUpdateRequest({ status: 'pending', revision: 1 });
+    await repo.insertIfAbsent(pending);
+
+    const saved = await repo.decideIfPending(pending.id, 1, {
+      note: '请补充细节',
+      decidedAt: DECIDED_AT,
+      updatedAt: DECIDED_AT,
+    });
+    if (!saved) throw new Error('expected a decided request');
+    // 篡改返回对象。
+    saved.reason = 'tampered';
+    saved.projectId = uuid();
+    saved.createdAt = '2000-01-01T00:00:00.000Z';
+    saved.decision = null;
+    saved.revision = 999;
+
+    const read = await repo.findById(pending.id);
+    expect(read?.reason).toBe(pending.reason);
+    expect(read?.projectId).toBe(pending.projectId);
+    expect(read?.createdAt).toBe(pending.createdAt);
+    expect(read?.revision).toBe(2);
+    expect(read?.decision?.note).toBe('请补充细节');
+  });
+});

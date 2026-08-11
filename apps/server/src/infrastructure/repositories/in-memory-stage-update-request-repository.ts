@@ -2,6 +2,7 @@ import type { StageUpdateRequest } from '@mingwu/contracts';
 import { StageUpdateRequestIdempotencyConflictError } from '../../domain/stage-update-request/errors.js';
 import type {
   InsertIfAbsentResult,
+  StageUpdateRequestDecisionWrite,
   StageUpdateRequestRepository,
 } from '../../domain/stage-update-request/repository.js';
 import { sameStageUpdateRequestSemantics } from '../../domain/stage-update-request/semantics.js';
@@ -35,6 +36,40 @@ export class InMemoryStageUpdateRequestRepository implements StageUpdateRequestR
     }
     this.byId.set(request.id, structuredClone(request));
     return { request: structuredClone(request), created: true };
+  }
+
+  /**
+   * 原子决定：同步 Map 检查 + 写入构成单个临界区，仅当存在且 pending 且
+   * revision === expectedRevision 才落盘；任一前置不满足返回 null，不写任何数据。
+   * 不提供普通 update，已决定申请绝不被覆盖。
+   *
+   * 派生规则固定：从已保存的 current 构造新版本，status 固定 needs_changes、
+   * revision 固定 current.revision + 1，只写 decision（type 固定 needs_changes）
+   * 与 updatedAt；原申请核心字段、createdAt 一律来自 current，调用方即使传入
+   * 任意 decision 字段也无法改写它们（接口本身不接收这些字段）。
+   */
+  async decideIfPending(
+    id: string,
+    expectedRevision: number,
+    decision: StageUpdateRequestDecisionWrite,
+  ): Promise<StageUpdateRequest | null> {
+    const current = this.byId.get(id);
+    if (!current || current.status !== 'pending' || current.revision !== expectedRevision) {
+      return null;
+    }
+    const updated: StageUpdateRequest = {
+      ...current,
+      status: 'needs_changes',
+      revision: current.revision + 1,
+      updatedAt: decision.updatedAt,
+      decision: {
+        type: 'needs_changes',
+        note: decision.note,
+        decidedAt: decision.decidedAt,
+      },
+    };
+    this.byId.set(id, structuredClone(updated));
+    return structuredClone(updated);
   }
 
   async findById(id: string): Promise<StageUpdateRequest | null> {

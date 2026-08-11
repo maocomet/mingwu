@@ -25,6 +25,7 @@ import { projectRoutes } from './api/routes/projects.js';
 import { stageRoutes } from './api/routes/stages.js';
 import { studySessionRoutes } from './api/routes/study-sessions.js';
 import { taskRoutes } from './api/routes/tasks.js';
+import { stageUpdateRequestRoutes } from './api/routes/stage-update-requests.js';
 import {
   ProjectConflictError,
   ProjectIdempotencyConflictError,
@@ -44,6 +45,12 @@ import {
   ProjectTaskScopeConflictError,
   ProjectTaskTreeCorruptionError,
 } from './domain/project-task/errors.js';
+import {
+  StageUpdateRequestDecisionConflictError,
+  StageUpdateRequestNoteInvalidError,
+  StageUpdateRequestNotFoundError,
+  StageUpdateRequestRevisionInvalidError,
+} from './domain/stage-update-request/errors.js';
 import {
   StudySessionHistoryCursorInvalidError,
   StudySessionHistoryDataCorruptError,
@@ -138,6 +145,10 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     studySessionService: deps.studySessionService,
     studySessionDetailService: deps.studySessionDetailService,
     studySummaryService: deps.studySummaryService,
+  });
+  app.register(stageUpdateRequestRoutes, {
+    prefix: '/api/v1',
+    stageUpdateRequestService: deps.stageUpdateRequestService,
   });
 
   // MCP Streamable HTTP 挂在根路径 /mcp（不在 /api/v1 下），本地测试专用。
@@ -347,11 +358,37 @@ export function buildApp(deps: AppDeps): FastifyInstance {
         message: error.message,
       });
     }
+    // StageUpdateRequest 用户决定入口：404 申请不存在；409 决定冲突（非 pending /
+    // revision 不匹配 / 已决定后语义不同，绝不覆盖）；400 非法 revision 与 note。
+    // 消息不回显 note、原申请 reason、身份或内部堆栈。
+    if (error instanceof StageUpdateRequestNotFoundError) {
+      return reply.status(404).send({ error: 'stage_update_request_not_found', message: error.message });
+    }
+    if (error instanceof StageUpdateRequestDecisionConflictError) {
+      return reply.status(409).send({
+        error: 'stage_update_request_decision_conflict',
+        message: error.message,
+      });
+    }
+    if (error instanceof StageUpdateRequestRevisionInvalidError) {
+      return reply.status(400).send({
+        error: 'stage_update_request_revision_invalid',
+        message: error.message,
+      });
+    }
+    if (error instanceof StageUpdateRequestNoteInvalidError) {
+      return reply.status(400).send({
+        error: 'stage_update_request_note_invalid',
+        message: error.message,
+      });
+    }
     if (error.validation) {
       request.log.warn({ err: error }, 'request validation failed');
       return reply.status(400).send({ error: 'validation_failed', message: error.message });
     }
-    request.log.error({ err: error }, 'unhandled error');
+    // 未知异常只记录稳定错误分类（类名），绝不记录原始 message / 堆栈 / 请求体：
+    // 攻击者构造的异常消息可能夹带 token / 密码 / 连接串，不能进入响应或日志。
+    request.log.error({ errType: error.name }, 'unhandled error');
     return reply.status(500).send({ error: 'internal_error', message: 'unexpected server error' });
   });
 
