@@ -7,6 +7,7 @@ import {
   aiTaskJsonSchema,
   aiTaskTreeResponseJsonSchema,
   createAiTaskInputSchema,
+  updateOwnAiTaskInputSchema,
   type AiTask,
   type AiTaskNode,
 } from '@mingwu/contracts';
@@ -204,6 +205,69 @@ describe('createAiTaskInputSchema (创建输入白名单)', () => {
     for (const status of AI_TASK_STATUSES) {
       expect(validateStatus(makeAiTask({ status })), `status=${status}`).toBe(true);
     }
+  });
+});
+
+describe('updateOwnAiTaskInputSchema (修改自己任务输入白名单)', () => {
+  const validate = compile({ ...updateOwnAiTaskInputSchema });
+
+  it('accepts a valid update input with taskId + expectedVersion + at least one field', () => {
+    const base = { taskId: uuid(), expectedVersion: 3 };
+    expect(validate({ ...base, title: '新标题' })).toBe(true);
+    expect(validate({ ...base, description: '新描述' })).toBe(true);
+    expect(validate({ ...base, title: '新标题', description: '新描述' })).toBe(true);
+    // description 可显式 null（清空），合法。
+    expect(validate({ ...base, description: null })).toBe(true);
+  });
+
+  it('rejects when neither title nor description is provided (anyOf)', () => {
+    expect(validate({ taskId: uuid(), expectedVersion: 1 })).toBe(false);
+  });
+
+  it('rejects missing required fields', () => {
+    const base = { taskId: uuid(), expectedVersion: 1, title: 'X' };
+    expect(validate({ expectedVersion: 1, title: 'X' })).toBe(false);
+    expect(validate({ taskId: uuid(), title: 'X' })).toBe(false);
+    expect(validate({})).toBe(false);
+  });
+
+  it('rejects smuggled identity / status / protected / unknown fields', () => {
+    const base = { taskId: uuid(), expectedVersion: 1, title: 'X' };
+    expect(validate({ ...base, ownerActorId: uuid() })).toBe(false);
+    expect(validate({ ...base, actor_id: uuid() })).toBe(false);
+    expect(validate({ ...base, actorId: uuid() })).toBe(false);
+    expect(validate({ ...base, actorCode: 'forged' })).toBe(false);
+    expect(validate({ ...base, status: 'completed' })).toBe(false);
+    expect(validate({ ...base, progressPercent: 100 })).toBe(false);
+    expect(validate({ ...base, notes: ['x'] })).toBe(false);
+    expect(validate({ ...base, blockerType: 'x' })).toBe(false);
+    expect(validate({ ...base, blockerReason: 'x' })).toBe(false);
+    expect(validate({ ...base, position: 1 })).toBe(false);
+    expect(validate({ ...base, version: 2 })).toBe(false);
+    expect(validate({ ...base, createdAt: '2026-01-01T00:00:00.000Z' })).toBe(false);
+    expect(validate({ ...base, updatedAt: '2026-01-01T00:00:00.000Z' })).toBe(false);
+    expect(validate({ ...base, completedAt: '2026-01-01T00:00:00.000Z' })).toBe(false);
+    expect(validate({ ...base, archivedAt: '2026-01-01T00:00:00.000Z' })).toBe(false);
+    expect(validate({ ...base, bogus: 1 })).toBe(false);
+  });
+
+  it('rejects non-UUID taskId and coerces / bounds expectedVersion strictly', () => {
+    expect(validate({ taskId: 'nope', expectedVersion: 1, title: 'X' })).toBe(false);
+    // 数值字符串绝不隐式强制转换。
+    expect(validate({ taskId: uuid(), expectedVersion: '1', title: 'X' })).toBe(false);
+    expect(validate({ taskId: uuid(), expectedVersion: 0, title: 'X' })).toBe(false);
+    expect(validate({ taskId: uuid(), expectedVersion: 1.5, title: 'X' })).toBe(false);
+    expect(validate({ taskId: uuid(), expectedVersion: -1, title: 'X' })).toBe(false);
+    expect(validate({ taskId: uuid(), expectedVersion: 1, title: 123 })).toBe(false);
+  });
+
+  it('does NOT wrongly reject padded title / description that is legal after trim', () => {
+    // schema 不设长度边界，带首尾空白的合法输入不应被契约层提前拒绝（trim 语义在服务 / MCP）。
+    const padded = { taskId: uuid(), expectedVersion: 1, title: `  ${'😀'.repeat(200)}  ` };
+    expect(validate(padded)).toBe(true);
+    expect(
+      validate({ taskId: uuid(), expectedVersion: 1, title: 'X', description: '   ' }),
+    ).toBe(true);
   });
 });
 

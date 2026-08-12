@@ -112,6 +112,47 @@ export const createAiTaskInputSchema = {
   },
 } as const;
 
+/**
+ * 修改自己 AI 任务标题 / 描述 的公开输入。owner / 归属 / 状态 / 进度 / 备注 / 阻塞 /
+ * position / version / 时间全部不可提交，owner 只能由服务端认证上下文注入。
+ * - expectedVersion：必填，整数且 >= 1，乐观并发依据，必须与任务当前 version 一致；
+ * - title / description：均为可选，但至少提供一个实际修改字段（description 可用 null
+ *   或空白清空，规范化为 null）；
+ * - 沿用创建时 trim + Unicode code point 上限语义（服务与 MCP refine 执行）。
+ */
+export interface UpdateOwnAiTaskInput {
+  /** 要修改的任务 UUID。 */
+  taskId: string;
+  /** 调用方依据的任务当前 version（乐观并发，整数且 >= 1）。 */
+  expectedVersion: number;
+  /** 可选新标题（trim 后必须非空，且按 Unicode code point 计数不超过 AI_TASK_TITLE_MAX_LENGTH）。 */
+  title?: string;
+  /** 可选新描述；可空，空白清空规范化为 null，按 code point 计数不超过 AI_TASK_DESCRIPTION_MAX_LENGTH。 */
+  description?: string | null;
+}
+
+/**
+ * 修改自己 AI 任务输入的严格白名单。additionalProperties:false 拒绝 ownerActorId /
+ * actorId / actorCode / status / progressPercent / notes / blockerType / blockerReason /
+ * position / version / createdAt / updatedAt / completedAt / archivedAt 等身份、状态或受
+ * 保护字段；expectedVersion 必须是 >= 1 的整数。anyOf 强制 title / description 至少提供
+ * 一个。长度边界诚实且单一：本 schema 只负责类型、UUID 与字段白名单，title / description
+ * 的 trim + code point 上限由共享服务校验 / MCP Zod refine 统一执行，本 schema 不设置
+ * minLength / maxLength，避免对带首尾空白的合法输入产生先于服务的错误拒绝。
+ */
+export const updateOwnAiTaskInputSchema = {
+  type: 'object',
+  required: ['taskId', 'expectedVersion'],
+  additionalProperties: false,
+  properties: {
+    taskId: { type: 'string', pattern: UUID_PATTERN },
+    expectedVersion: { type: 'integer', minimum: 1 },
+    title: { type: 'string' },
+    description: { type: ['string', 'null'] },
+  },
+  anyOf: [{ required: ['title'] }, { required: ['description'] }],
+} as const;
+
 /** AI 任务完整响应契约。additionalProperties:false，字段不允许未声明内容。
  * required 必须与 TypeScript `AiTask` 接口的全部字段一一对应：值可空（null 合法）
  * 与字段缺失（校验失败）严格区分，工具返回的完整 AiTask 不允许缺少任何一个字段。 */

@@ -116,6 +116,48 @@ export class AiTaskRequesterInvalidError extends Error {
 }
 
 /**
+ * 任务不存在，或任务存在但不属于当前认证 Actor。两种情况返回同一个固定脱敏错误，
+ * 调用方无法据此区分"任务缺失"与"他人任务"，避免跨 Actor 探测。消息不含任务 ID。
+ */
+export class AiTaskNotFoundError extends Error {
+  constructor() {
+    super('AiTask not found');
+    this.name = 'AiTaskNotFoundError';
+  }
+}
+
+/**
+ * 乐观并发冲突：调用方依据的 expectedVersion 与任务当前 version 不一致（陈旧版本）。
+ * 固定脱敏消息，不含任务 ID 或版本号。
+ */
+export class AiTaskVersionConflictError extends Error {
+  constructor() {
+    super('AiTask version conflict');
+    this.name = 'AiTaskVersionConflictError';
+  }
+}
+
+/**
+ * 任务已归档，禁止修改。固定脱敏消息，不含任务 ID。
+ */
+export class AiTaskArchivedError extends Error {
+  constructor() {
+    super('AiTask is archived and cannot be modified');
+    this.name = 'AiTaskArchivedError';
+  }
+}
+
+/**
+ * 修改请求没有提供任何实际修改字段（title 与 description 均缺失）。固定脱敏消息。
+ */
+export class AiTaskUpdateInvalidError extends Error {
+  constructor() {
+    super('AiTask update requires at least one modification field');
+    this.name = 'AiTaskUpdateInvalidError';
+  }
+}
+
+/**
  * 任务树数据不一致：当前 owner 作用域内出现父引用不存在、自引用、任意长度循环、
  * 父子跨项目 / 跨 owner，或最终访问节点数不等于输入节点数。只读查询不能把孤儿提升为
  * 根、不能静默丢节点，因此直接失败。这是内部受控错误：消息为固定脱敏文本，不包含任何

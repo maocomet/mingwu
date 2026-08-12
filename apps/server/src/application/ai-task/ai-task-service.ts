@@ -4,6 +4,7 @@ import type {
   AuthenticatedAiActorContext,
   CreateAiTaskInput,
   ListMyTaskTreeResult,
+  UpdateOwnAiTaskInput,
 } from '@mingwu/contracts';
 import {
   AI_ACTOR_CODE_MAX_LENGTH,
@@ -17,9 +18,11 @@ import { ProjectNotFoundError } from '../../domain/project/errors.js';
 import type { ProjectRepository } from '../../domain/project/repository.js';
 import type { ProjectTaskRepository } from '../../domain/project-task/repository.js';
 import {
+  AiTaskArchivedError,
   AiTaskDescriptionInvalidError,
   AiTaskIdempotencyConflictError,
   AiTaskIdInvalidError,
+  AiTaskNotFoundError,
   AiTaskParentNotFoundError,
   AiTaskPositionConflictError,
   AiTaskProjectTaskInvalidError,
@@ -27,8 +30,13 @@ import {
   AiTaskScopeConflictError,
   AiTaskTitleInvalidError,
   AiTaskTreeCorruptError,
+  AiTaskUpdateInvalidError,
+  AiTaskVersionConflictError,
 } from '../../domain/ai-task/errors.js';
-import type { AiTaskRepository } from '../../domain/ai-task/repository.js';
+import type {
+  AiTaskRepository,
+  UpdateAiTaskContentChanges,
+} from '../../domain/ai-task/repository.js';
 
 const UUID_REGEX = new RegExp(UUID_PATTERN);
 
@@ -244,6 +252,100 @@ export class AiTaskService {
     return { tasks: buildAiTaskTree(tasks, projectId, authContext.actorId) };
   }
 
+  /**
+   * 以服务端认证身份修改自己任务的标题 / 描述（只读链路之外的纵向写能力，本批仅支持
+   * title / description）。
+   * - 受信上下文非法 → AiTaskRequesterInvalidError（防守性校验，不读取不写入）；
+   * - taskId 不是合法 UUID → AiTaskIdInvalidError；
+   * - title / description 至少提供一个实际修改字段，否则 → AiTaskUpdateInvalidError；
+   * - title 沿用创建时 trim + code point 上限语义，非法 → AiTaskTitleInvalidError；
+   *   description 可 null / 空白清空（规范化为 null），超上限 → AiTaskDescriptionInvalidError；
+   * - 任务不存在与任务属于其他 Actor 返回同一个 AiTaskNotFoundError（固定脱敏，
+   *   调用方无法区分"缺失"与"他人任务"，禁止跨 Actor 探测 / 修改）；
+   * - 已归档任务拒绝 → AiTaskArchivedError；
+   * - expectedVersion 与任务当前 version 不一致（陈旧版本）→ AiTaskVersionConflictError，
+   *   不覆盖任何新内容；
+   * - 规范化后与现有内容完全相同 → no-op：返回当前任务，不推进 version / updatedAt；
+   * - 有实际变化时经仓储原子 CAS（版本检查 + 写入同一原子边界）落账，成功 version +1、
+   *   updatedAt 刷新，其余字段不变；
+   * - 返回完整白名单投影 AiTask（只含契约 18 个字段），仓储夹带的 runtime 额外字段不得外发；
+   * - 绝不改变 ProjectTask / Stage 或任何正式项目进度。
+   */
+  async updateOwnTask(
+    authContext: AuthenticatedAiActorContext,
+    input: UpdateOwnAiTaskInput,
+  ): Promise<AiTask> {
+    this.assertValidRequesterContext(authContext);
+    if (!UUID_REGEX.test(input.taskId)) {
+      throw new AiTaskIdInvalidError();
+    }
+
+    // 规范化 + 校验修改字段（与创建共享同一 trim + code point 上限语义）。
+    let title: string | undefined;
+    if (input.title !== undefined) {
+      const trimmed = input.title.trim();
+      if (trimmed === '' || countCodePoints(trimmed) > AI_TASK_TITLE_MAX_LENGTH) {
+        throw new AiTaskTitleInvalidError();
+      }
+      title = trimmed;
+    }
+    // 未提供（undefined=不改）、显式清空（null）与字符串三种状态都要区分。
+    let description: string | null | undefined;
+    if (input.description !== undefined) {
+      const trimmed =
+        input.description === null
+          ? null
+          : input.description.trim() === ''
+            ? null
+            : input.description.trim();
+      if (trimmed !== null && countCodePoints(trimmed) > AI_TASK_DESCRIPTION_MAX_LENGTH) {
+        throw new AiTaskDescriptionInvalidError();
+      }
+      description = trimmed;
+    }
+    if (title === undefined && description === undefined) {
+      throw new AiTaskUpdateInvalidError();
+    }
+
+    const existing = await this.repository.findById(input.taskId);
+    // 不存在与属于其他 Actor 使用同一个受控未找到错误：不能向调用方泄露任务是否由他人持有。
+    if (existing === null || existing.ownerActorId !== authContext.actorId) {
+      throw new AiTaskNotFoundError();
+    }
+    if (existing.archivedAt !== null) {
+      throw new AiTaskArchivedError();
+    }
+    if (input.expectedVersion !== existing.version) {
+      throw new AiTaskVersionConflictError();
+    }
+
+    // 规范化后与现有内容完全相同 → no-op：不推进 version / updatedAt，返回当前任务。
+    const titleChanged = title !== undefined && title !== existing.title;
+    const descriptionChanged =
+      description !== undefined && description !== existing.description;
+    if (!titleChanged && !descriptionChanged) {
+      return toTask(existing);
+    }
+
+    // 有实际变化：仓储原子 CAS（版本检查 + 写入同一原子边界），成功 version +1。
+    // 只放真正变化的字段：不能把未提供的字段折叠成 undefined 写进 changes，否则对象展开
+    // `{...existing, ...changes}` 会把既有字段覆盖成 undefined。
+    const changes: UpdateAiTaskContentChanges = {};
+    if (titleChanged) {
+      changes.title = title;
+    }
+    if (descriptionChanged) {
+      changes.description = description;
+    }
+    const updated = await this.repository.updateTaskContent({
+      id: input.taskId,
+      expectedVersion: input.expectedVersion,
+      changes,
+      updatedAt: this.now(),
+    });
+    return toTask(updated);
+  }
+
   private async nextSiblingPosition(
     projectId: string,
     ownerActorId: string,
@@ -327,12 +429,12 @@ export function sortAiTaskSiblingLevel(level: AiTaskNode[]): AiTaskNode[] {
 }
 
 /**
- * 显式白名单投影：只复制 AiTask 契约声明的 18 个既定字段，并新建 notes 数组与 children。
- * 绝不能使用对象展开——仓储对象可能夹带运行时额外字段（connectionId / permissionProfile /
- * token 等），对象展开会把它们原样带进 MCP 响应。此函数保证外发节点只含契约字段，
- * 任何未知字段被丢弃；同时 notes 与 children 都是新建引用（深拷贝），不共享仓储引用。
+ * 显式白名单投影（完整 AiTask）：只复制 AiTask 契约声明的 18 个既定字段，并新建 notes
+ * 数组。绝不能使用对象展开——仓储对象可能夹带运行时额外字段（connectionId /
+ * permissionProfile / token 等），对象展开会把它们原样带进 MCP 响应。此函数保证外发
+ * 对象只含契约字段，任何未知字段被丢弃；notes 是新建引用（深拷贝），不共享仓储引用。
  */
-function toTaskNode(task: AiTask): AiTaskNode {
+function toTask(task: AiTask): AiTask {
   return {
     id: task.id,
     projectId: task.projectId,
@@ -352,8 +454,15 @@ function toTaskNode(task: AiTask): AiTaskNode {
     updatedAt: task.updatedAt,
     completedAt: task.completedAt,
     archivedAt: task.archivedAt,
-    children: [],
   };
+}
+
+/**
+ * 显式白名单投影（AiTaskNode）：完整 AiTask 白名单 + 新建 children 空数组。与 toTask
+ * 同源，绝不含对象展开，仓储夹带的任何运行时额外字段在此被丢弃。
+ */
+function toTaskNode(task: AiTask): AiTaskNode {
+  return { ...toTask(task), children: [] };
 }
 
 /**

@@ -9,15 +9,19 @@ import {
 import { AiTaskService, sortAiTaskSiblingLevel } from '../src/application/ai-task/ai-task-service.js';
 import { ProjectNotFoundError } from '../src/domain/project/errors.js';
 import {
+  AiTaskArchivedError,
   AiTaskDescriptionInvalidError,
   AiTaskIdInvalidError,
   AiTaskIdempotencyConflictError,
+  AiTaskNotFoundError,
   AiTaskParentNotFoundError,
   AiTaskProjectTaskInvalidError,
   AiTaskRequesterInvalidError,
   AiTaskScopeConflictError,
   AiTaskTitleInvalidError,
   AiTaskTreeCorruptError,
+  AiTaskUpdateInvalidError,
+  AiTaskVersionConflictError,
 } from '../src/domain/ai-task/errors.js';
 import type { AiTaskRepository } from '../src/domain/ai-task/repository.js';
 import { makeActorContext, makeAiTask, makeServices, uuid } from './helpers.js';
@@ -52,6 +56,10 @@ function stubAiTaskRepository(overrides: Partial<AiTaskRepository>): AiTaskRepos
     findById: async () => null,
     listByOwner: async () => [],
     createIfAbsent: async (task) => ({ task, created: true }),
+    // 基座仓储无任何任务：任何 CAS 更新都应冲突，测试按需 override 具体行为。
+    updateTaskContent: async () => {
+      throw new AiTaskVersionConflictError();
+    },
   };
   return { ...base, ...overrides };
 }
@@ -733,5 +741,316 @@ describe('AiTaskService.listMyTaskTree', () => {
     expect(node.title).toBe(smuggled.title);
     expect(node.notes).toEqual(['备注1']);
     expect(node.children).toEqual([]);
+  });
+});
+
+describe('AiTaskService.updateOwnTask', () => {
+  /** 通过服务创建一棵单人任务（version 1），返回任务与项目。 */
+  async function seedOwnTask(services: Services, actor = makeActorContext(), title = '原标题') {
+    const projectId = await makeProjectId(services);
+    const created = await services.aiTaskService.create(actor, {
+      id: uuid(),
+      projectId,
+      title,
+      description: '原描述',
+    });
+    return { projectId, task: created.task };
+  }
+
+  it('updates own title and description, bumps version and refreshes updatedAt only', async () => {
+    const services = setup();
+    const actor = makeActorContext();
+    const { task } = await seedOwnTask(services, actor, '老标题');
+    const updated = await services.aiTaskService.updateOwnTask(actor, {
+      taskId: task.id,
+      expectedVersion: task.version,
+      title: '  新标题  ',
+      description: ' 新描述 ',
+    });
+    // 规范化 trim；服务端推进版本与刷新时间。
+    expect(updated.title).toBe('新标题');
+    expect(updated.description).toBe('新描述');
+    expect(updated.version).toBe(2);
+    expect(updated.updatedAt).toBe(FIXED_NOW);
+    // 其余字段不变（归属、位置、正式关联、备注等）。
+    expect(updated.ownerActorId).toBe(actor.actorId);
+    expect(updated.position).toBe(task.position);
+    expect(updated.status).toBe('not_started');
+    expect(updated.progressPercent).toBe(0);
+    expect(updated.notes).toEqual([]);
+    expect(updated.projectTaskId).toBeNull();
+    expect(updated.archivedAt).toBeNull();
+    expect(updated.createdAt).toBe(task.createdAt);
+  });
+
+  it('clears description via null and treats blank as null (single-field updates)', async () => {
+    const services = setup();
+    const actor = makeActorContext();
+    const { task } = await seedOwnTask(services, actor);
+    // 只改描述：null 显式清空。
+    const cleared = await services.aiTaskService.updateOwnTask(actor, {
+      taskId: task.id,
+      expectedVersion: task.version,
+      description: null,
+    });
+    expect(cleared.description).toBeNull();
+    expect(cleared.title).toBe('原标题');
+    expect(cleared.version).toBe(2);
+    // 已为 null 时再空白清空是 no-op（规范化后与现有内容一致），不推进版本。
+    const noopBlank = await services.aiTaskService.updateOwnTask(actor, {
+      taskId: cleared.id,
+      expectedVersion: 2,
+      description: '   ',
+    });
+    expect(noopBlank.description).toBeNull();
+    expect(noopBlank.version).toBe(2);
+    // 把描述改成有值（version 3），再用空白清空 → null（version 4），验证空白→null 规范化。
+    const valued = await services.aiTaskService.updateOwnTask(actor, {
+      taskId: cleared.id,
+      expectedVersion: 2,
+      description: '有值描述',
+    });
+    expect(valued.version).toBe(3);
+    const blanked = await services.aiTaskService.updateOwnTask(actor, {
+      taskId: cleared.id,
+      expectedVersion: 3,
+      description: '   ',
+    });
+    expect(blanked.description).toBeNull();
+    expect(blanked.version).toBe(4);
+  });
+
+  it('treats normalized-identical content as a no-op: no version / updatedAt bump', async () => {
+    const services = setup();
+    const actor = makeActorContext();
+    const { task } = await seedOwnTask(services, actor, '固定标题');
+    // 带首尾空白的相同标题，trim 后与现有内容一致 → no-op。
+    const noop = await services.aiTaskService.updateOwnTask(actor, {
+      taskId: task.id,
+      expectedVersion: task.version,
+      title: '  固定标题  ',
+    });
+    expect(noop.title).toBe('固定标题');
+    expect(noop.version).toBe(1);
+    expect(noop.updatedAt).toBe(FIXED_NOW);
+  });
+
+  it('rejects an invalid requester context without reading or writing (defensive)', async () => {
+    const services = setup();
+    const { task } = await seedOwnTask(services);
+    await expect(
+      services.aiTaskService.updateOwnTask(
+        {} as AuthenticatedAiActorContext,
+        { taskId: task.id, expectedVersion: 1, title: 'X' },
+      ),
+    ).rejects.toBeInstanceOf(AiTaskRequesterInvalidError);
+  });
+
+  it('rejects a non-UUID taskId and an input with no modification field', async () => {
+    const services = setup();
+    const actor = makeActorContext();
+    await expect(
+      services.aiTaskService.updateOwnTask(actor, {
+        taskId: 'not-a-uuid',
+        expectedVersion: 1,
+        title: 'X',
+      }),
+    ).rejects.toBeInstanceOf(AiTaskIdInvalidError);
+    const { task } = await seedOwnTask(services, actor);
+    await expect(
+      services.aiTaskService.updateOwnTask(actor, { taskId: task.id, expectedVersion: 1 }),
+    ).rejects.toBeInstanceOf(AiTaskUpdateInvalidError);
+  });
+
+  it('rejects a blank title and a title over the code point limit', async () => {
+    const services = setup();
+    const actor = makeActorContext();
+    const { task } = await seedOwnTask(services, actor);
+    await expect(
+      services.aiTaskService.updateOwnTask(actor, { taskId: task.id, expectedVersion: 1, title: '   ' }),
+    ).rejects.toBeInstanceOf(AiTaskTitleInvalidError);
+    await expect(
+      services.aiTaskService.updateOwnTask(actor, {
+        taskId: task.id,
+        expectedVersion: 1,
+        title: '😀'.repeat(AI_TASK_TITLE_MAX_LENGTH + 1),
+      }),
+    ).rejects.toBeInstanceOf(AiTaskTitleInvalidError);
+  });
+
+  it('rejects a description over the code point limit', async () => {
+    const services = setup();
+    const actor = makeActorContext();
+    const { task } = await seedOwnTask(services, actor);
+    await expect(
+      services.aiTaskService.updateOwnTask(actor, {
+        taskId: task.id,
+        expectedVersion: 1,
+        description: '中'.repeat(AI_TASK_DESCRIPTION_MAX_LENGTH + 1),
+      }),
+    ).rejects.toBeInstanceOf(AiTaskDescriptionInvalidError);
+  });
+
+  it('returns the SAME controlled not-found error for missing and other-actor tasks (no cross-actor probing)', async () => {
+    const services = setup();
+    const actorA = makeActorContext();
+    const actorB = makeActorContext();
+    const { task } = await seedOwnTask(services, actorA);
+    let missingError: unknown;
+    let otherError: unknown;
+    try {
+      await services.aiTaskService.updateOwnTask(actorA, {
+        taskId: uuid(),
+        expectedVersion: 1,
+        title: 'X',
+      });
+    } catch (err) {
+      missingError = err;
+    }
+    try {
+      await services.aiTaskService.updateOwnTask(actorB, {
+        taskId: task.id,
+        expectedVersion: task.version,
+        title: '偷改他人任务',
+      });
+    } catch (err) {
+      otherError = err;
+    }
+    expect(missingError).toBeInstanceOf(AiTaskNotFoundError);
+    expect(otherError).toBeInstanceOf(AiTaskNotFoundError);
+    // 固定脱敏文案完全一致，且不含任务 / Actor ID。
+    const msg = (e: unknown) => (e as Error).message;
+    expect(msg(missingError)).toBe(msg(otherError));
+    expect(msg(missingError)).not.toContain(task.id);
+    expect(msg(missingError)).not.toContain(actorA.actorId);
+    expect(msg(missingError)).not.toContain(actorB.actorId);
+    // 任务内容未被 actorB 修改。
+    const untouched = await services.aiTaskRepository.findById(task.id);
+    expect(untouched?.title).toBe('原标题');
+    expect(untouched?.version).toBe(1);
+  });
+
+  it('rejects an archived task', async () => {
+    const services = setup();
+    const actor = makeActorContext();
+    const projectId = await makeProjectId(services);
+    // createIfAbsent 不覆盖既有 id，直接种入一条已归档任务（新 id）。
+    const archivedTask = makeAiTask({
+      projectId,
+      ownerActorId: actor.actorId,
+      archivedAt: FIXED_NOW,
+    });
+    await services.aiTaskRepository.createIfAbsent(archivedTask);
+    await expect(
+      services.aiTaskService.updateOwnTask(actor, {
+        taskId: archivedTask.id,
+        expectedVersion: archivedTask.version,
+        title: 'X',
+      }),
+    ).rejects.toBeInstanceOf(AiTaskArchivedError);
+  });
+
+  it('rejects a stale expectedVersion with a stable conflict and never overwrites', async () => {
+    const services = setup();
+    const actor = makeActorContext();
+    const { task } = await seedOwnTask(services, actor, 'v1');
+    // 推进到 version 2。
+    const v2 = await services.aiTaskService.updateOwnTask(actor, {
+      taskId: task.id,
+      expectedVersion: 1,
+      title: 'v2',
+    });
+    expect(v2.version).toBe(2);
+    // 用陈旧版本 1 再改 → 稳定冲突，不覆盖。
+    await expect(
+      services.aiTaskService.updateOwnTask(actor, {
+        taskId: task.id,
+        expectedVersion: 1,
+        title: 'stale',
+      }),
+    ).rejects.toBeInstanceOf(AiTaskVersionConflictError);
+    expect((await services.aiTaskRepository.findById(task.id))?.title).toBe('v2');
+  });
+
+  it('allows the same actor to update sequentially across multiple connections by refreshing the version', async () => {
+    const services = setup();
+    const actor = makeActorContext();
+    const { task } = await seedOwnTask(services, actor, '一稿');
+    // 第一个"连接"以 version 1 提交。
+    const first = await services.aiTaskService.updateOwnTask(actor, {
+      taskId: task.id,
+      expectedVersion: 1,
+      title: '二稿',
+    });
+    expect(first.version).toBe(2);
+    // 第二个"连接"刷新到 version 2 后提交成功。
+    const second = await services.aiTaskService.updateOwnTask(actor, {
+      taskId: first.id,
+      expectedVersion: 2,
+      description: '补充说明',
+    });
+    expect(second.version).toBe(3);
+    expect(second.title).toBe('二稿');
+    expect(second.description).toBe('补充说明');
+  });
+
+  it('never externalizes repository-smuggled runtime fields on the update path (whitelist projection)', async () => {
+    const services = makeServices();
+    const projectId = await makeProjectId(services);
+    const actor = makeActorContext();
+    const clean = makeAiTask({ projectId, ownerActorId: actor.actorId, title: '干净' });
+    const smuggled = Object.assign({}, clean, { connectionId: 'conn-secret', token: 'TKN' });
+    // findById 返回干净任务（供 no-op 判定），updateTaskContent 返回夹带 runtime 字段的任务。
+    const aiTaskService = new AiTaskService(
+      stubAiTaskRepository({
+        findById: async () => structuredClone(clean),
+        // 假仓储正确应用 changes（title → 新标题）但返回仍夹带 runtime 额外字段。
+        updateTaskContent: async (input) =>
+          structuredClone({
+            ...smuggled,
+            ...input.changes,
+            version: 2,
+            updatedAt: FIXED_NOW,
+          }),
+      }),
+      services.projectRepository,
+      services.taskRepository,
+      () => FIXED_NOW,
+    );
+    const updated = await aiTaskService.updateOwnTask(actor, {
+      taskId: clean.id,
+      expectedVersion: 1,
+      title: '新标题',
+    });
+    expect(updated.title).toBe('新标题');
+    expect('connectionId' in updated).toBe(false);
+    expect('token' in updated).toBe(false);
+    // 白名单 18 个字段仍在。
+    expect(updated.ownerActorId).toBe(actor.actorId);
+    expect(updated.version).toBe(2);
+  });
+
+  it('never changes ProjectTask / Stage or any formal progress', async () => {
+    const services = setup();
+    const actor = makeActorContext();
+    const projectId = await makeProjectId(services);
+    const formal = await makeFormalTask(services, projectId);
+    const created = await services.aiTaskService.create(actor, {
+      id: uuid(),
+      projectId,
+      projectTaskId: formal.id,
+      title: '关联正式任务',
+    });
+    const beforeStage = await services.stageRepository.findById(formal.stageId);
+    const beforeFormal = await services.taskRepository.findById(formal.id);
+    await services.aiTaskService.updateOwnTask(actor, {
+      taskId: created.task.id,
+      expectedVersion: 1,
+      description: '改描述不动正式进度',
+    });
+    const afterStage = await services.stageRepository.findById(formal.stageId);
+    const afterFormal = await services.taskRepository.findById(formal.id);
+    expect(afterStage).toEqual(beforeStage);
+    expect(afterFormal).toEqual(beforeFormal);
   });
 });

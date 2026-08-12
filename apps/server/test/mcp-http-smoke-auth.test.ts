@@ -118,6 +118,7 @@ describe('MCP Streamable HTTP real-HTTP auth smoke (127.0.0.1, ephemeral port)',
         'study_get_session',
         'task_create',
         'task_list_my_tasks',
+        'task_update',
       ]);
 
       // 经真实 socket 调用只读工具，身份由服务端凭据解析（工具不接收身份字段）。
@@ -173,7 +174,7 @@ describe('MCP Streamable HTTP real-HTTP auth smoke (127.0.0.1, ephemeral port)',
       ).toBe(1);
 
       const bList = await b.client.listTools();
-      expect(bList.tools).toHaveLength(10);
+      expect(bList.tools).toHaveLength(11);
 
       // B 也通过 DELETE 显式清理（client.close 不保证发送 DELETE）。
       await b.transport.terminateSession();
@@ -330,6 +331,77 @@ describe('MCP Streamable HTTP real-HTTP auth smoke (127.0.0.1, ephemeral port)',
       expect(root.children[0]!.parentTaskId).toBe(rootId);
       // 响应不回显身份 / session / 凭据。
       const serialized = toolText(list);
+      expect(serialized).not.toContain(AUTH_FIXTURES.connection1.token);
+      expect(serialized).not.toContain(AUTH_FIXTURES.connection1.connectionId);
+      expect(serialized).not.toContain('permissionProfile');
+
+      await a.transport.terminateSession();
+      await a.client.close();
+      expect(
+        (app as unknown as { mcpSessions: { size: number } }).mcpSessions.size,
+      ).toBe(0);
+    } finally {
+      await close();
+    }
+  });
+
+  it('real socket: task_create → task_update → task_list_my_tasks roundtrip under the bound actor', async () => {
+    const { app, baseUrl, close } = await startServer();
+    try {
+      const project = await fetch(`${baseUrl}/api/v1/projects`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ id: uuid(), name: 'AI 任务更新冒烟项目' }),
+      });
+      expect(project.status).toBe(201);
+      const projectId = ((await project.json()) as { id: string }).id;
+
+      // 真实 MCP socket + Bearer（connection1 → actorA）创建任务。
+      const a = await connectClient(`${baseUrl}/mcp`, AUTH_FIXTURES.connection1.token);
+      const taskId = uuid();
+      const create = await a.client.callTool({
+        name: 'task_create',
+        arguments: { task_id: taskId, project_id: projectId, title: '更新前标题', description: '旧描述' },
+      });
+      expect(create.isError).not.toBe(true);
+      const created = JSON.parse(toolText(create)) as AiTask;
+      expect(created.version).toBe(1);
+
+      // task_update 修改标题 / 描述，版本推进，归属保持服务端解析的 actorA。
+      const update = await a.client.callTool({
+        name: 'task_update',
+        arguments: {
+          task_id: taskId,
+          expected_version: 1,
+          title: ' 更新后标题 ',
+          description: null,
+        },
+      });
+      expect(update.isError).not.toBe(true);
+      const updated = JSON.parse(toolText(update)) as AiTask;
+      expect(updated.id).toBe(taskId);
+      expect(updated.projectId).toBe(projectId);
+      expect(updated.ownerActorId).toBe(AUTH_FIXTURES.actorA.actorId);
+      expect(updated.title).toBe('更新后标题');
+      expect(updated.description).toBeNull();
+      expect(updated.version).toBe(2);
+      expect(updated.createdAt).toBe(created.createdAt);
+
+      // task_list_my_tasks 读回更新后的树，与 task_update 返回一致。
+      const list = await a.client.callTool({
+        name: 'task_list_my_tasks',
+        arguments: { project_id: projectId },
+      });
+      expect(list.isError).not.toBe(true);
+      const tree = JSON.parse(toolText(list)) as { tasks: AiTaskNode[] };
+      expect(tree.tasks).toHaveLength(1);
+      expect(tree.tasks[0]!.id).toBe(taskId);
+      expect(tree.tasks[0]!.title).toBe('更新后标题');
+      expect(tree.tasks[0]!.description).toBeNull();
+      expect(tree.tasks[0]!.version).toBe(2);
+      expect(tree.tasks[0]!.ownerActorId).toBe(AUTH_FIXTURES.actorA.actorId);
+      // 成功响应不回显凭据 / session / permissionProfile。
+      const serialized = toolText(update) + toolText(list);
       expect(serialized).not.toContain(AUTH_FIXTURES.connection1.token);
       expect(serialized).not.toContain(AUTH_FIXTURES.connection1.connectionId);
       expect(serialized).not.toContain('permissionProfile');

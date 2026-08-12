@@ -17,14 +17,18 @@ import type { StudySessionDetailService } from '../application/study-session-det
 import type { StudyReportService } from '../application/study-report/study-report-service.js';
 import type { ProjectWorkReportService } from '../application/project-work-report/project-work-report-service.js';
 import {
+  AiTaskArchivedError,
   AiTaskDescriptionInvalidError,
   AiTaskIdempotencyConflictError,
   AiTaskIdInvalidError,
+  AiTaskNotFoundError,
   AiTaskParentNotFoundError,
   AiTaskProjectTaskInvalidError,
   AiTaskScopeConflictError,
   AiTaskTitleInvalidError,
   AiTaskTreeCorruptError,
+  AiTaskUpdateInvalidError,
+  AiTaskVersionConflictError,
 } from '../domain/ai-task/errors.js';
 import { ProjectNotFoundError } from '../domain/project/errors.js';
 import { StageNotFoundError, StageVersionConflictError } from '../domain/stage/errors.js';
@@ -45,7 +49,7 @@ import {
 } from '../domain/study-report/errors.js';
 import { StudySessionNotFoundError } from '../domain/study-session/errors.js';
 import type { McpAuthContext } from '../domain/mcp-auth/mcp-auth-context.js';
-import { canCreateAiTask, canListMyTasks } from './ai-task-policy.js';
+import { canCreateAiTask, canListMyTasks, canUpdateOwnTask } from './ai-task-policy.js';
 import { canSubmitStageUpdate } from './stage-update-policy.js';
 import { canAppendStudyReport } from './study-report-policy.js';
 
@@ -206,6 +210,44 @@ const taskCreateInputSchema = z
 const taskListMyTasksInputSchema = z
   .object({
     project_id: uuidField('项目 UUID'),
+  })
+  .strict();
+
+/**
+ * task_update 严格白名单：只允许 task_id / expected_version / 可选 title / 可选
+ * description。.strict() 在运行时拒绝任何额外字段，尤其拒绝 ownerActorId / actor_id /
+ * actorCode / projectId / projectTaskId / parentTaskId / status / progressPercent / notes /
+ * position / version / createdAt / updatedAt / completedAt / archivedAt 等身份、归属、状态
+ * 或受保护字段——owner 只由该连接的服务端认证上下文决定，归属与状态字段本批不可修改。
+ * expected_version 是 z.number()（不强制转换），字符串数值会被拒绝。标题 / 描述长度上限
+ * 与服务层完全统一：先 trim 再按 Unicode code point 计数；"至少提供一个修改字段"由服务层
+ * 与工具回调统一校验（保持单一校验来源），空标题交给 AiTaskService 规范化拒绝。
+ */
+const taskUpdateInputSchema = z
+  .object({
+    task_id: uuidField('要修改的任务 UUID'),
+    expected_version: z
+      .number()
+      .int()
+      .positive()
+      .describe('调用方依据的任务版本（正整数，乐观并发）'),
+    title: z
+      .string()
+      .refine(
+        (value) => countCodePoints(value.trim()) <= AI_TASK_TITLE_MAX_LENGTH,
+        '任务标题超长',
+      )
+      .optional()
+      .describe('新标题（trim 后必须非空，由服务层校验）'),
+    description: z
+      .string()
+      .refine(
+        (value) => countCodePoints(value.trim()) <= AI_TASK_DESCRIPTION_MAX_LENGTH,
+        '任务描述超长',
+      )
+      .optional()
+      .nullable()
+      .describe('新描述（可空 / 空白清空规范化为 null）'),
   })
   .strict();
 
@@ -577,6 +619,76 @@ export function buildMcpServer(deps: McpServerDeps): McpServer {
         }
         if (err instanceof AiTaskIdempotencyConflictError) {
           return toolErrorResult('任务已存在且语义冲突，不覆盖旧任务');
+        }
+        return unexpectedError(deps, err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'task_update',
+    {
+      title: 'Update own AI task content',
+      description:
+        '写：以服务端认证身份修改自己的 AI 私人任务标题 / 描述（本批只支持 title / ' +
+        'description，不改变状态 / 进度 / 备注 / 阻塞 / position / 归属）。expected_version ' +
+        '为乐观并发依据，必须与任务当前版本一致，陈旧版本稳定冲突；规范化后与现有内容相同 ' +
+        '为 no-op，不推进版本。任务不存在与属于其他 AI 返回同一受控错误，禁止跨 Actor 探测。' +
+        'ownerActorId 只由服务端 Bearer 凭据决定，不接受任何身份字段；绝不改变 ProjectTask / ' +
+        'Stage 或任何正式项目进度。匿名连接或非 resident_ai 身份会被拒绝。',
+      inputSchema: taskUpdateInputSchema,
+    },
+    async ({ task_id, expected_version, title, description }) => {
+      const authContext = deps.authContext;
+      // 匿名只读上下文 fail-closed：工具可见，但任何写入都拒绝，不修改任务。
+      if (authContext === null) {
+        deps.logger.error(
+          { errType: 'McpAuthContextMissing' },
+          'task_update denied: no bound identity',
+        );
+        return toolErrorResult('当前连接未授权写操作');
+      }
+      if (!canUpdateOwnTask(authContext)) {
+        deps.logger.error(
+          { errType: 'McpAiTaskUpdatePermissionDenied' },
+          'task_update denied: policy rejected',
+        );
+        return toolErrorResult('当前身份无权修改 AI 任务');
+      }
+      // "至少提供一个修改字段"：MCP 入口与 AiTaskService 统一校验，保持单一语义来源。
+      if (title === undefined && description === undefined) {
+        return toolErrorResult('至少提供一个修改字段');
+      }
+      try {
+        const task = await deps.aiTaskService.updateOwnTask(authContext, {
+          taskId: task_id,
+          expectedVersion: expected_version,
+          title,
+          // 保持 undefined（未提供=不改）与 null（显式清空）的区别，不能把未提供折叠成 null。
+          description,
+        });
+        return textContent(task);
+      } catch (err) {
+        if (err instanceof AiTaskIdInvalidError) {
+          return toolErrorResult('任务 ID 不合法');
+        }
+        if (err instanceof AiTaskUpdateInvalidError) {
+          return toolErrorResult('至少提供一个修改字段');
+        }
+        if (err instanceof AiTaskTitleInvalidError) {
+          return toolErrorResult('任务标题不合法');
+        }
+        if (err instanceof AiTaskDescriptionInvalidError) {
+          return toolErrorResult('任务描述不合法');
+        }
+        if (err instanceof AiTaskNotFoundError) {
+          return toolErrorResult('任务不存在');
+        }
+        if (err instanceof AiTaskArchivedError) {
+          return toolErrorResult('任务已归档，无法修改');
+        }
+        if (err instanceof AiTaskVersionConflictError) {
+          return toolErrorResult('任务版本已变化，请刷新后重试');
         }
         return unexpectedError(deps, err);
       }

@@ -5,6 +5,22 @@ export interface CreateAiTaskIfAbsentResult {
   created: boolean;
 }
 
+/** 原子 CAS 更新任务基础内容时允许变更的字段：只有 title 与 description。 */
+export interface UpdateAiTaskContentChanges {
+  title?: string;
+  description?: string | null;
+}
+
+/** 原子 CAS 更新的输入：id + 乐观并发版本 + 变更字段 + 服务端刷新时间。 */
+export interface UpdateAiTaskContentInput {
+  id: string;
+  /** 调用方依据的任务当前 version；与仓储中现有 version 不一致时拒绝。 */
+  expectedVersion: number;
+  changes: UpdateAiTaskContentChanges;
+  /** 服务端写入的 updatedAt（ISO 字符串）。 */
+  updatedAt: string;
+}
+
 /**
  * 仓储接口。并发正确性与"同一 projectId + ownerActorId + parentTaskId 下 position 唯一"
  * 由仓储保证，业务层不在"先查再写"的窗口里做判断。PostgreSQL 实现将依赖 id 唯一约束 +
@@ -25,4 +41,16 @@ export interface AiTaskRepository {
    * - 否则保存并返回 created=true。
    */
   createIfAbsent(task: AiTask): Promise<CreateAiTaskIfAbsentResult>;
+  /**
+   * 原子 CAS 更新任务基础内容（本批只允许 title / description）。
+   * - 版本检查与写入必须在同一原子边界：id 必须存在，且现有 version === expectedVersion
+   *   才允许写入；任何不符抛 AiTaskVersionConflictError，绝不覆盖；
+   * - 成功时只变更 changes 中的字段，version +1，updatedAt 刷新为输入值，其余字段不变；
+   * - 返回更新后的完整任务（深拷贝）。
+   *
+   * 第六关 PostgreSQL 实现将使用 `UPDATE ... WHERE id=? AND version=?` 原子更新（受
+   * `UPDATE` 行级锁保护，where 版本条件作为乐观并发判断），或等价事务；rows=0 时抛
+   * AiTaskVersionConflictError，避免"先查后写"窗口下的竞态覆盖。
+   */
+  updateTaskContent(input: UpdateAiTaskContentInput): Promise<AiTask>;
 }

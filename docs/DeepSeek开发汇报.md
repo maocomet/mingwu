@@ -5920,8 +5920,6 @@ App API 严格输入、服务层 `pending -> needs_changes`、同语义重试、
 
 本批验收通过，可以提交并推送到 `develop`；下一批任务由小喵在推送后单独追加。
 
----
-
 ## 小喵任务 #31 · MCP `project_list_reports` · 2026-08-11
 
 ### 本批唯一候选计划项
@@ -6569,5 +6567,150 @@ App API 严格输入、服务层 `pending -> needs_changes`、同语义重试、
 
 - 已将 `- [ ] 查询自己的任务` 更新为 `- [x] 查询自己的任务`。
 - 已将 `- [ ] task_list_my_tasks` 更新为 `- [x] task_list_my_tasks`。
+
+本批验收通过，可以提交并推送到 `develop`；下一批任务由小喵在推送后单独追加。
+
+---
+
+## 小喵任务 #34 · 修改自己的 AI 任务基础内容 + MCP `task_update` · 2026-08-12
+
+### 本批候选计划项
+
+- `- [ ] 修改自己的任务`
+- `- [ ] task_update`
+
+本批只建立“修改自己任务的标题 / 描述”这一条小型纵向能力。不要顺手实现完成、状态、备注、进度、阻塞、重排、换父任务、换正式任务关联或查看其他 AI；这些保持为后续独立验收项。
+
+### 必须完成
+
+1. 扩展严格的 `UpdateOwnAiTaskInput`：必填 `expectedVersion`（整数且 >= 1）；可选 `title`、`description`，至少提供一个实际修改字段；沿用创建时 trim + Unicode code point 上限语义，description 可用 null 或空白清空；严格拒绝身份、归属、状态、进度、备注、阻塞、position、version、时间及未知字段。
+2. 为仓储增加原子 CAS 更新：版本检查与写入必须在同一原子边界；成功修改 version 只 +1、updatedAt 刷新，其余保持不变；20 个同 expectedVersion 并发最多一个成功。注释明确 PostgreSQL 未来使用 `UPDATE ... WHERE id=? AND version=?` 或等价事务。
+3. 服务只允许认证 Actor 修改自己的标题 / 描述：不存在与外 Actor 任务使用同一种受控未找到错误；归档任务拒绝；陈旧版本稳定冲突；规范化后完全相同为 no-op，不推进 version / updatedAt；返回完整白名单投影 AiTask，runtime 额外字段不得外发；绝不改变 ProjectTask、Stage 或正式项目进度。
+4. 注册 MCP `task_update`：输入严格只允许 `{ task_id, expected_version, title?, description? }` 且至少一个修改字段；数值字符串不得强制转换；仅 default + resident_ai 可用，其他身份与未知 profile 均拒绝，policy 集中；成功返回完整 AiTask，未找到 / 外 Actor 文案完全相同，冲突、归档、输入和未知异常均受控脱敏。
+5. 测试覆盖标题 / 描述单改与同改、null / 空白清空、no-op、Unicode 上限、陈旧版本、20 并发、跨 Actor 不可探测、同 Actor 多连接连续修改、四类授权拒绝、严格字段与数值字符串、归档、异常脱敏、runtime 字段投影、正式进度不变，以及真实 HTTP 的 `task_create → task_update → task_list_my_tasks` 往返。
+
+### 边界与验收
+
+- 本批不实现或勾选完成、备注、进度、查看他人任务、`task_complete`；`task_update` 本批只支持 title / description。
+- 不新增可指定 owner 的 App API，不实现数据库、AuditLog、前端或正式主进度更新。
+- 运行契约 / 仓储 / 服务 / MCP 专项、根目录 typecheck、全量测试、真实 HTTP 冒烟、NUL / BOM 扫描与 `git diff --check`。
+- 完成后只在本文件末尾追加“检查点 #34”并暂停汇报；不修改计划复选框，不执行 Git / GitHub / VPS，不开始下一批，不读取或修改 `.claude/` 与 `ui素材mingwu/`。
+
+等待 DS 完成检查点后由小喵审核。
+
+---
+
+## 检查点 #34 · 修改自己的 AI 任务标题 / 描述 + MCP `task_update` · 2026-08-12
+
+### 本批次目标
+
+候选完成计划项（均保持未勾选，等待小喵验收）：
+
+- `- [ ] 修改自己的任务`
+- `- [ ] task_update`
+
+本批只建立“修改自己任务的标题 / 描述”这一条小型纵向能力（复用检查点 #32 已验收的 AiTask 契约、领域仓储、内存实现与认证身份），并实现乐观并发（expectedVersion + 原子 CAS）、跨 Actor 隔离、严格字段防伪与集中授权。不实现完成、状态、备注、进度、阻塞、重排、换父任务、换正式任务关联或查看其他 AI。
+
+### 实际完成内容
+
+- `packages/contracts/src/ai-task.ts`：新增 `UpdateOwnAiTaskInput`（必填 `taskId` + `expectedVersion`，可选 `title` / `description`）与严格白名单 `updateOwnAiTaskInputSchema`——`additionalProperties:false` 拒绝身份 / 归属 / 状态 / 进度 / 备注 / 阻塞 / position / version / 时间及未知字段；`expectedVersion` 为 `type: 'integer', minimum: 1`（不设置 minLength / maxLength，trim + code point 上限由服务与 MCP refine 统一执行）；`anyOf` 强制 title / description 至少提供一个。
+- 领域层 `apps/server/src/domain/ai-task/errors.ts`：新增 4 个固定脱敏错误——`AiTaskNotFoundError`（缺失与外 Actor 任务同一错误，防跨 Actor 探测）、`AiTaskVersionConflictError`（陈旧版本）、`AiTaskArchivedError`（归档拒绝）、`AiTaskUpdateInvalidError`（无实际修改字段）；消息均不含任务 / Actor ID 或版本号。
+- 领域层 `apps/server/src/domain/ai-task/repository.ts`：新增 `UpdateAiTaskContentChanges`（只允许 title / description）、`UpdateAiTaskContentInput`（id + expectedVersion + changes + updatedAt）与接口方法 `updateTaskContent`；JSDoc 注明 PostgreSQL 未来使用 `UPDATE ... WHERE id=? AND version=?` 原子更新（行级锁 + where 版本条件），rows=0 抛版本冲突。
+- 基础设施 `apps/server/src/infrastructure/repositories/in-memory-ai-task-repository.ts`：实现原子 CAS——版本检查与写入在同一同步块（方法体无 await），Map 同步读写保证无竞态窗口；成功只变更 changes 字段、version +1、updatedAt 刷新为输入值，返回深拷贝。
+- 应用层 `apps/server/src/application/ai-task/ai-task-service.ts`：新增 `updateOwnTask(authContext, input)`——防守性身份校验 → taskId UUID 校验 → title / description 沿用创建时 trim + code point 上限（description 可 null / 空白清空规范化）→ 至少一个修改字段校验 → `findById`；缺失或 owner 不符统一 `AiTaskNotFoundError` → 归档 `AiTaskArchivedError` → 陈旧版本 `AiTaskVersionConflictError` → 规范化后与现有内容完全相同为 no-op（不推进 version / updatedAt）→ 有实际变化时经仓储原子 CAS 落账。外发统一走显式白名单投影 `toTask`（18 个契约字段，notes 新建引用，绝不用对象展开），仓储夹带的 runtime 额外字段在更新路径同样被丢弃。绝不改变 ProjectTask / Stage 或任何正式进度。
+- MCP 层 `apps/server/src/mcp/ai-task-policy.ts`：新增 `canUpdateOwnTask` fail-closed 修改授权策略（与 canCreateAiTask / canListMyTasks 同一独立 policy 文件，仅 default profile + resident_ai）。
+- `apps/server/src/mcp/mcp-server.ts`：注册写工具 `task_update`。`taskUpdateInputSchema` 为 Zod `.strict()`，严格只允许 `{ task_id, expected_version, title?, description? }`；`expected_version` 用 `z.number().int().positive()`（数值字符串绝不强制转换）；title / description 入口 refine 只查 code point 上限。回调：匿名 → `当前连接未授权写操作`；策略拒绝 → `当前身份无权修改 AI 任务`；title 与 description 均缺失 → `至少提供一个修改字段`；错误映射 `任务 ID 不合法` / `至少提供一个修改字段` / `任务标题不合法` / `任务描述不合法` / `任务不存在`（缺失与外 Actor 同一文案）/ `任务已归档，无法修改` / `任务版本已变化，请刷新后重试`，未知异常统一 `内部错误`（日志只记稳定分类，不记录原始 message / 堆栈 / 客户端内容）。成功返回完整白名单投影 AiTask。回调保持 `undefined`（未提供=不改）与 `null`（显式清空）的区别，不把未提供折叠成 null。
+
+### 新增、修改和删除的文件清单
+
+新增：
+
+- `apps/server/test/mcp-task-update.test.ts`（8 个测试）
+
+修改：
+
+- `packages/contracts/src/ai-task.ts`（UpdateOwnAiTaskInput + updateOwnAiTaskInputSchema）
+- `apps/server/src/domain/ai-task/errors.ts`（4 个新错误）
+- `apps/server/src/domain/ai-task/repository.ts`（UpdateAiTaskContentChanges / UpdateAiTaskContentInput / updateTaskContent）
+- `apps/server/src/infrastructure/repositories/in-memory-ai-task-repository.ts`（原子 CAS updateTaskContent）
+- `apps/server/src/application/ai-task/ai-task-service.ts`（updateOwnTask + toTask / toTaskNode 白名单投影重构）
+- `apps/server/src/mcp/ai-task-policy.ts`（canUpdateOwnTask）
+- `apps/server/src/mcp/mcp-server.ts`（taskUpdateInputSchema + 注册 task_update）
+- `apps/server/test/ai-task-repository.test.ts`（新增 updateTaskContent describe：5 个测试）
+- `apps/server/test/ai-task-contract.test.ts`（新增 updateOwnAiTaskInputSchema describe：6 个测试）
+- `apps/server/test/ai-task-service.test.ts`（新增 updateOwnTask describe：13 个测试；stubAiTaskRepository 补 updateTaskContent）
+- `apps/server/test/mcp-task-list-my-tasks.test.ts`（inline `satisfies AiTaskRepository` 补 updateTaskContent 占位）
+- `apps/server/test/mcp-protocol.test.ts`（工具清单 10→11、写工具 3→4、fieldByTool 加 task_update、expected_version 正整数与 title / description 类型断言）
+- `apps/server/test/mcp-http.test.ts`（工具清单 10→11、写工具断言）
+- `apps/server/test/mcp-http-smoke.test.ts`（工具清单、计数 10→11 ×2）
+- `apps/server/test/mcp-http-smoke-auth.test.ts`（工具清单、计数 10→11、新增真实 HTTP task_create → task_update → task_list_my_tasks 往返）
+
+删除：无。
+
+### 关键设计决定及其依据
+
+- 服务做版本预检 + 仓储做原子 CAS，两层都判版本：服务预检给出干净的早期冲突错误并让 no-op 判定可行（no-op 要求版本匹配，既满足“陈旧版本稳定冲突”又满足“no-op 不推进版本”）；仓储是权威原子边界（内存实现读与写同一同步块，无 await 窗口），未来 PostgreSQL 用 `UPDATE ... WHERE id=? AND version=?` 等价。
+- “至少一个修改字段”由服务层与 MCP 回调统一校验，不用顶层 zod `.refine()`：顶层 refine 会破坏 mcp-protocol 测试对 `inputSchema.type === 'object'` 的断言，且语义来源应集中在服务层。
+- changes 只放实际变化的字段，绝不把未提供的字段折叠成 `undefined` 写进 `{...existing, ...changes}`：测试发现若 `changes: { title: undefined, description: '补充' }`，对象展开会把既有 title 覆盖成 undefined，响应缺失 title 字段——这是本批测试实际暴露并修复的正确性缺陷。
+- description 区分 `undefined`（未提供 = 不改）与 `null`（显式清空）：MCP 回调直接把可选字段透传，不把未提供折叠成 null，否则只改 title 的调用会误清空描述。
+- 白名单投影 `toTask` 同样用于更新返回路径（不只读侧）：仓储夹带的 connectionId / permissionProfile / token / 未知字段在服务返回值即被丢弃，MCP 序列化的是投影结果。
+- 跨 Actor 不可探测：缺失任务与外 Actor 任务返回同一个固定脱敏 `AiTaskNotFoundError` / `任务不存在`，文案与日志不含任何任务 / Actor ID，调用方无法通过错误区别推测他人任务是否存在。
+- 错误消息全部固定脱敏（无 ID / 版本号），未知异常统一“内部错误”且日志只记稳定错误分类；测试用假服务抛 `password=UPDATE_SECRET` 验证响应与日志都不泄露。
+
+### 执行过的测试或检查、命令与真实结果
+
+- 专项测试：`npx vitest run test/ai-task-repository.test.ts test/ai-task-contract.test.ts test/ai-task-service.test.ts test/mcp-task-create.test.ts test/mcp-task-list-my-tasks.test.ts test/mcp-task-update.test.ts test/mcp-protocol.test.ts test/mcp-http.test.ts test/mcp-http-smoke.test.ts test/mcp-http-smoke-auth.test.ts` → **10 个文件、160/160 通过**（仓储 15 + 服务 44 + 契约 27 + MCP 写 create 8 + MCP 写 update 8 + MCP 读 8 + 协议 21 + HTTP 18 + 匿名冒烟 + 认证冒烟 5）。
+- 根目录 typecheck：`npm run typecheck` → **contracts 与 server 均通过**（`tsc --noEmit`，无错误）。
+- 全量测试：`npx vitest run` → **57 个测试文件、947/947 通过**（较上一批 914 增加 33：仓储 +5、契约 +6、服务 +13、mcp-task-update +8、认证冒烟 +1）。
+- 真实 Streamable HTTP 冒烟已纳入全量：mcp-http-smoke-auth.test.ts 新增真实 socket 的 `task_create → task_update → task_list_my_tasks` 完整往返（版本 1→2、描述清空、树读回一致、不回显凭据）；mcp-http-smoke.test.ts 与 mcp-http-smoke-auth.test.ts 的工具计数 10→11。
+- NUL / BOM 扫描：本次新增与修改文件（含新增的 mcp-task-update.test.ts）**NUL=0、BOM=0**。
+- `git diff --check`：通过，仅有 Windows LF→CRLF 提示，无空白错误。
+
+### 未完成内容、已知问题和风险
+
+- 边界外未实现（按小喵任务 #34 边界）：完成、状态、备注、进度、阻塞、重排、换父任务、换正式任务关联、查看其他 AI、`task_complete`；`task_update` 本批只支持 title / description；未新增可指定 owner 的 App API，未实现数据库 / AuditLog / 前端 / 正式主进度更新。
+- 内存仓储仍是单进程内同步原子；多实例 / 多进程并发只在未来 PostgreSQL `UPDATE ... WHERE id=? AND version=?` 实现后才有真实竞态窗口，届时行级锁 + rows=0 判定与内存语义一致（已在接口 JSDoc 注明）。
+- 本批 3 处测试初版失败均为测试自身问题（`createIfAbsent` 不覆盖既有 id 导致归档未生效、空白清空在已是 null 时是合法 no-op、假仓储未应用 changes），已修正断言与种数方式；实现侧唯一真实缺陷（changes 折叠 undefined 覆盖 title）已修复并由测试覆盖。
+- 工具清单 / 计数在 4 个既有测试文件同步更新，全量回归通过，风险低。
+
+### 是否涉及数据库、身份权限、密钥、外部服务或破坏性变化
+
+- 不涉及数据库 migration（仍为内存仓储，无结构变化；仓储接口新增 updateTaskContent，未来 PostgreSQL 语义已在注释约定）。
+- 涉及身份认证 / 权限逻辑：新增写授权策略（fail-closed，集中在 ai-task-policy.ts 独立函数）与乐观并发版本校验，未读取、输出或提交任何真实 Key / Token / 密码 / 凭据。
+- 不涉及 VPS / Cloudflare / GitHub 等外部服务操作；无删除文件等破坏性变更；`.claude/` 与 `ui素材mingwu/` 未读取未修改。
+
+### 建议下一批任务
+
+- 按小喵安排推进后续计划项（如 AI 任务完成 / 备注 / 进度，需保持服务端身份边界、幂等与乐观并发）。
+- 本批两项均为“候选完成”，不作为任何复选框打勾依据。
+
+等待小喵审核。
+
+---
+
+## 小喵审核结果 #34 · 通过 · 2026-08-12
+
+### 验收结论
+
+- `修改自己的任务` 与 MCP `task_update` 已通过验收；本批严格限定为修改当前认证 Actor 自己任务的标题 / 描述，没有扩展到完成、状态、进度、备注、阻塞、重排或归属变更。
+- 修改采用 expectedVersion + 仓储原子 CAS：版本检查与写入位于同一原子边界，成功只推进一次版本并刷新 updatedAt，陈旧版本不会覆盖新内容；规范化后相同内容为 no-op，不推进版本或时间。
+- 任务不存在与外 Actor 任务使用完全相同的受控错误，不能通过修改接口探测他人任务；匿名、temporary_ai、reviewer 与未知权限配置均 fail-closed。
+- 标题 / 描述 trim 与 Unicode code point 上限语义保持一致，description 的未提供、null 与空白清空正确区分；输入严格拒绝伪造身份、归属、状态、进度、备注、版本及未知字段，数值字符串不会被强制转换。
+- 更新返回使用完整 AiTask 白名单投影，仓储夹带的连接、权限、凭据与未知字段不会外发；修改 AITask 不改变 ProjectTask、Stage 或正式项目进度。
+
+### 小喵独立验证
+
+- AiTask 仓储、契约、服务、MCP、协议及真实 HTTP 专项：**6 个测试文件、123/123 通过**。
+- 根目录 typecheck：contracts 与 server 均通过。
+- 全量测试：**57 个测试文件、947/947 通过**。
+- 20 个相同 expectedVersion 并发更新：仅一个成功、其余稳定冲突，最终 version 只从 1 变为 2。
+- 真实 Streamable HTTP：`task_create → task_update → task_list_my_tasks` 往返通过，版本、规范化内容、归属与隐私字段均符合要求。
+- 本批源码、测试、契约与文档：**NUL=0、BOM=0**。
+- `git diff --check`：通过，仅有 Windows LF→CRLF 提示，无空白错误。
+
+### 计划更新
+
+- 已将 `- [ ] 修改自己的任务` 更新为 `- [x] 修改自己的任务`。
+- 已将 `- [ ] task_update` 更新为 `- [x] task_update`。
 
 本批验收通过，可以提交并推送到 `develop`；下一批任务由小喵在推送后单独追加。

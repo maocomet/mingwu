@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { AiTaskPositionConflictError } from '../src/domain/ai-task/errors.js';
+import {
+  AiTaskPositionConflictError,
+  AiTaskVersionConflictError,
+} from '../src/domain/ai-task/errors.js';
 import { InMemoryAiTaskRepository } from '../src/infrastructure/repositories/in-memory-ai-task-repository.js';
 import { makeAiTask, uuid } from './helpers.js';
 
@@ -99,6 +102,107 @@ describe('InMemoryAiTaskRepository', () => {
     await repository.createIfAbsent(makeAiTask({ projectId: uuid(), ownerActorId }));
     await repository.createIfAbsent(makeAiTask({ projectId, ownerActorId: uuid() }));
     expect(await repository.listByOwner(projectId, ownerActorId)).toHaveLength(1);
+  });
+
+  it('updateTaskContent applies CAS changes and bumps version + refreshes updatedAt', async () => {
+    const { repository } = setup();
+    const task = makeAiTask({ title: 'old-title', description: 'old-desc', notes: ['n1'] });
+    await repository.createIfAbsent(task);
+    const updated = await repository.updateTaskContent({
+      id: task.id,
+      expectedVersion: 1,
+      changes: { title: 'new-title', description: null },
+      updatedAt: '2026-08-12T00:00:00.000Z',
+    });
+    expect(updated.title).toBe('new-title');
+    expect(updated.description).toBeNull();
+    expect(updated.version).toBe(2);
+    expect(updated.updatedAt).toBe('2026-08-12T00:00:00.000Z');
+    // 只有变更字段变化，其余字段（含 notes 数组引用隔离）保持不变。
+    expect(updated.notes).toEqual(['n1']);
+    expect(updated.notes).not.toBe(task.notes);
+    expect(updated.projectId).toBe(task.projectId);
+    expect(updated.ownerActorId).toBe(task.ownerActorId);
+    expect(updated.status).toBe(task.status);
+    expect(updated.position).toBe(task.position);
+  });
+
+  it('updateTaskContent rejects a stale expectedVersion and never overwrites', async () => {
+    const { repository } = setup();
+    const task = makeAiTask({ title: 'original' });
+    await repository.createIfAbsent(task);
+    await repository.updateTaskContent({
+      id: task.id,
+      expectedVersion: 1,
+      changes: { title: 'v2' },
+      updatedAt: '2026-08-12T00:00:00.000Z',
+    });
+    // 第二次用旧版本 1 更新 → 稳定冲突，不覆盖 v2。
+    await expect(
+      repository.updateTaskContent({
+        id: task.id,
+        expectedVersion: 1,
+        changes: { title: 'stale-write' },
+        updatedAt: '2026-08-12T00:00:01.000Z',
+      }),
+    ).rejects.toBeInstanceOf(AiTaskVersionConflictError);
+    expect((await repository.findById(task.id))?.title).toBe('v2');
+    expect((await repository.findById(task.id))?.version).toBe(2);
+  });
+
+  it('updateTaskContent rejects a non-existent id with a version conflict', async () => {
+    const { repository } = setup();
+    await expect(
+      repository.updateTaskContent({
+        id: uuid(),
+        expectedVersion: 1,
+        changes: { title: 'ghost' },
+        updatedAt: '2026-08-12T00:00:00.000Z',
+      }),
+    ).rejects.toBeInstanceOf(AiTaskVersionConflictError);
+  });
+
+  it('concurrent updateTaskContent with the same expectedVersion: exactly one wins', async () => {
+    const { repository } = setup();
+    const task = makeAiTask({ title: 'base' });
+    await repository.createIfAbsent(task);
+    const results = await Promise.all(
+      Array.from({ length: 20 }, (_, i) =>
+        repository
+          .updateTaskContent({
+            id: task.id,
+            expectedVersion: 1,
+            changes: { title: `writer-${i}` },
+            updatedAt: '2026-08-12T00:00:00.000Z',
+          })
+          .then(() => 'succeeded')
+          .catch((e) =>
+            e instanceof AiTaskVersionConflictError ? 'conflict' : 'other',
+          ),
+      ),
+    );
+    expect(results.filter((r) => r === 'succeeded')).toHaveLength(1);
+    expect(results.filter((r) => r === 'conflict')).toHaveLength(19);
+    const finalTask = await repository.findById(task.id);
+    expect(finalTask?.version).toBe(2);
+  });
+
+  it('sequential same-connection updateTaskContent calls advance the version each time', async () => {
+    const { repository } = setup();
+    const task = makeAiTask({ title: 'v1' });
+    await repository.createIfAbsent(task);
+    let version = 1;
+    for (let i = 2; i <= 5; i += 1) {
+      const updated = await repository.updateTaskContent({
+        id: task.id,
+        expectedVersion: version,
+        changes: { title: `v${i}` },
+        updatedAt: '2026-08-12T00:00:00.000Z',
+      });
+      expect(updated.version).toBe(i);
+      version = updated.version;
+    }
+    expect((await repository.findById(task.id))?.title).toBe('v5');
   });
 
   it('concurrent createIfAbsent with the same id: one created, rest return existing', async () => {

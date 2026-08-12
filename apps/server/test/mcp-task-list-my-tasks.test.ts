@@ -451,6 +451,10 @@ describe('MCP task_list_my_tasks read-only tool', () => {
         findById: async () => null,
         listByOwner: async () => [structuredClone(smuggled)],
         createIfAbsent: async (task) => ({ task, created: true }),
+        // 本测试只走只读链路，updateTaskContent 不会被调用；占位保证接口完整。
+        updateTaskContent: async () => {
+          throw new Error('updateTaskContent not used in this read-side test');
+        },
       } satisfies AiTaskRepository,
       services.projectRepository,
       services.taskRepository,

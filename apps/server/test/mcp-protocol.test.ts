@@ -55,7 +55,7 @@ function firstText(result: {
 }
 
 describe('MCP protocol (official Client + InMemoryTransport)', () => {
-  it('initialize succeeds and exposes the six read-only tools plus three write tools with strict schemas', async () => {
+  it('initialize succeeds and exposes the seven read-only tools plus four write tools with strict schemas', async () => {
     const { server } = buildTestServer();
     const client = await connectClient(server);
     try {
@@ -71,9 +71,10 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
         'study_get_session',
         'task_create',
         'task_list_my_tasks',
+        'task_update',
       ]);
-      // 七个只读工具都明确只读；三个写工具（study_append_report /
-      // project_submit_stage_update / task_create）不得标“只读”。
+      // 七个只读工具都明确只读；四个写工具（study_append_report /
+      // project_submit_stage_update / task_create / task_update）不得标“只读”。
       const READ_ONLY_TOOLS = new Set([
         'project_get_stage',
         'project_get_status',
@@ -88,6 +89,7 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
         'project_submit_stage_update',
         'study_append_report',
         'task_create',
+        'task_update',
       ]);
       for (const tool of tools.filter((t) => READ_ONLY_TOOLS.has(t.name))) {
         expect(tool.description).toContain('只读');
@@ -119,6 +121,9 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
         // task_list_my_tasks 严格白名单只允许 project_id；身份 / 筛选字段的严格拒绝
         // 在 mcp-task-list-my-tasks.test.ts 中单独覆盖。
         task_list_my_tasks: ['project_id'],
+        // task_update 必填 task_id + expected_version；title / description 可选但至少
+        // 提供一个，严格字段防伪与"至少一个修改字段"在 mcp-task-update.test.ts 单独覆盖。
+        task_update: ['task_id', 'expected_version'],
       };
       // 各工具字段类型：uuid 字段为 string + format uuid；其余字段只断言存在。
       const UUID_FIELDS = new Set([
@@ -151,10 +156,32 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
           }
         }
       }
-      // 写工具精确：仅 study_append_report 与 project_submit_stage_update 两个，
-      // 不存在任何其他写工具（如直接设置关卡状态的工具）。
+      // 写工具精确：四个写工具之外，不存在任何直接设置关卡状态 / 进度 / 他人任务的工具。
       const names = tools.map((t) => t.name);
       expect(names).not.toContain('project_set_stage_status');
+      expect(names).not.toContain('task_complete');
+      expect(names).not.toContain('task_set_progress');
+      // task_update 的 expected_version 为受正数约束的整数（乐观并发），非 UUID。
+      const updateTool = tools.find((t) => t.name === 'task_update')!;
+      const updateProps = updateTool.inputSchema.properties as Record<
+        string,
+        Record<string, unknown>
+      >;
+      expect(updateProps.task_id!.type).toBe('string');
+      expect(updateProps.task_id!.format).toBe('uuid');
+      expect(updateProps.expected_version!.type).toBe('integer');
+      const upVer = updateProps.expected_version! as Record<string, unknown>;
+      const upPositiveBound =
+        (typeof upVer.minimum === 'number' && (upVer.minimum as number) >= 1) ||
+        (typeof upVer.exclusiveMinimum === 'number' && (upVer.exclusiveMinimum as number) >= 0);
+      expect(upPositiveBound).toBe(true);
+      expect(updateProps.title!.type).toBe('string');
+      // description 可空可选：zod-to-json-schema 对 `.string().refine().optional().nullable()`
+      // 生成 anyOf（含 string 与 null 分支），不断言内部结构，只断言同时接受 string 与 null。
+      const descProp = updateProps.description ?? {};
+      const descJson = JSON.stringify(descProp);
+      expect(descJson).toContain('"string"');
+      expect(descJson).toContain('"null"');
       // project_submit_stage_update 的混合类型字段：uuid 字段为 string+format，
       // expected_stage_version 为受正数约束的数字，proposed_status 为带枚举的字符串。
       const submitTool = tools.find((t) => t.name === 'project_submit_stage_update')!;

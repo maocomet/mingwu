@@ -34,3 +34,20 @@ export function canListMyTasks(context: McpAuthContext): boolean {
   }
   return context.actorType === 'resident_ai';
 }
+
+/**
+ * `task_update` 的修改授权策略（接入真实数据库权限表之前的临时策略）。
+ * 与 canCreateAiTask / canListMyTasks 同一独立 policy 文件，授权判断集中在这里，
+ * 不把权限字符串散落在工具回调中；第六关用权限表替换本实现即可，工具回调无需改动。
+ *
+ * 规则（fail-closed）：只有 permissionProfile === 'default' 且 actorType 为 resident_ai
+ * 的连接可以修改自己的长期 AI 私人任务；temporary_ai、reviewer、未知 permission profile
+ * 或缺失身份一律拒绝。修改只针对自己（owner 由服务端认证身份解析）的标题 / 描述，绝不
+ * 改变其他 AI、其他项目或任何正式进度。拒绝结果由调用方返回稳定脱敏错误。
+ */
+export function canUpdateOwnTask(context: McpAuthContext): boolean {
+  if (context.permissionProfile !== 'default') {
+    return false;
+  }
+  return context.actorType === 'resident_ai';
+}

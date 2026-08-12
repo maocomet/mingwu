@@ -2,8 +2,9 @@ import type { AiTask } from '@mingwu/contracts';
 import type {
   AiTaskRepository,
   CreateAiTaskIfAbsentResult,
+  UpdateAiTaskContentInput,
 } from '../../domain/ai-task/repository.js';
-import { AiTaskPositionConflictError } from '../../domain/ai-task/errors.js';
+import { AiTaskPositionConflictError, AiTaskVersionConflictError } from '../../domain/ai-task/errors.js';
 
 /**
  * 第三关接口开发用的内存仓储。并发原子性与"同一父级（projectId + ownerActorId +
@@ -51,5 +52,23 @@ export class InMemoryAiTaskRepository implements AiTaskRepository {
     }
     this.tasks.set(task.id, structuredClone(task));
     return { task, created: true };
+  }
+
+  async updateTaskContent(input: UpdateAiTaskContentInput): Promise<AiTask> {
+    // 原子 CAS：读与写在同一同步块内完成，方法体内没有 await，Map 同步读写保证
+    // "检查版本 → 写入" 不存在竞态窗口。PostgreSQL 第六关用 `UPDATE ... WHERE id=? AND
+    // version=?` 原子更新 + rows=0 判定冲突，语义与此一致。
+    const existing = this.tasks.get(input.id);
+    if (existing === undefined || existing.version !== input.expectedVersion) {
+      throw new AiTaskVersionConflictError();
+    }
+    const updated: AiTask = {
+      ...existing,
+      ...input.changes,
+      version: existing.version + 1,
+      updatedAt: input.updatedAt,
+    };
+    this.tasks.set(input.id, structuredClone(updated));
+    return structuredClone(updated);
   }
 }

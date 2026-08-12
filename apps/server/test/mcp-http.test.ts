@@ -125,7 +125,7 @@ async function createProjectWithData(app: App): Promise<{ projectId: string; sta
 }
 
 describe('MCP Streamable HTTP via /mcp', () => {
-  it('initialize establishes a session; tools/list exposes six read-only tools plus three write tools', async () => {
+  it('initialize establishes a session; tools/list exposes seven read-only tools plus four write tools', async () => {
     const { app } = setup();
     try {
       const { sessionId, protocolVersion } = await initialize(app);
@@ -154,6 +154,7 @@ describe('MCP Streamable HTTP via /mcp', () => {
         'study_get_session',
         'task_create',
         'task_list_my_tasks',
+        'task_update',
       ]);
       const READ_ONLY_TOOLS = new Set([
         'project_get_stage',
@@ -191,6 +192,13 @@ describe('MCP Streamable HTTP via /mcp', () => {
         'stage_id',
       ]);
       expect(submitTool.description).not.toContain('只读');
+      // 写工具 task_update 恰好两个必填字段（task_id + expected_version）。
+      const updateTool = tools.find((t) => t.name === 'task_update')!;
+      expect([...(updateTool.inputSchema.required ?? [])].sort()).toEqual([
+        'expected_version',
+        'task_id',
+      ]);
+      expect(updateTool.description).not.toContain('只读');
       for (const tool of tools.filter(
         (t) => READ_ONLY_TOOLS.has(t.name) && t.name !== 'study_get_current_session',
       )) {
