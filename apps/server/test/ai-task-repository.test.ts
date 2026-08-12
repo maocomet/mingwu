@@ -187,6 +187,96 @@ describe('InMemoryAiTaskRepository', () => {
     expect(finalTask?.version).toBe(2);
   });
 
+  it('completeTask applies CAS: completed status, 100% progress, same time, version +1', async () => {
+    const { repository } = setup();
+    const task = makeAiTask({
+      title: 'do-it',
+      description: 'desc',
+      notes: ['n1'],
+      status: 'not_started',
+      progressPercent: 0,
+    });
+    await repository.createIfAbsent(task);
+    const completed = await repository.completeTask({
+      id: task.id,
+      expectedVersion: 1,
+      completedAt: '2026-08-12T00:00:00.000Z',
+    });
+    expect(completed.status).toBe('completed');
+    expect(completed.progressPercent).toBe(100);
+    // completedAt 与 updatedAt 为同一服务端时间。
+    expect(completed.completedAt).toBe('2026-08-12T00:00:00.000Z');
+    expect(completed.updatedAt).toBe('2026-08-12T00:00:00.000Z');
+    expect(completed.version).toBe(2);
+    // 其余字段保持不变（含 notes 数组引用隔离）。
+    expect(completed.title).toBe(task.title);
+    expect(completed.description).toBe(task.description);
+    expect(completed.notes).toEqual(['n1']);
+    expect(completed.notes).not.toBe(task.notes);
+    expect(completed.projectId).toBe(task.projectId);
+    expect(completed.ownerActorId).toBe(task.ownerActorId);
+    expect(completed.position).toBe(task.position);
+    expect(completed.createdAt).toBe(task.createdAt);
+  });
+
+  it('completeTask rejects a stale expectedVersion and never overwrites', async () => {
+    const { repository } = setup();
+    const task = makeAiTask({ title: 'original' });
+    await repository.createIfAbsent(task);
+    await repository.completeTask({
+      id: task.id,
+      expectedVersion: 1,
+      completedAt: '2026-08-12T00:00:00.000Z',
+    });
+    // 第二次用旧版本 1 完成 → 稳定冲突，不覆盖已完成状态。
+    await expect(
+      repository.completeTask({
+        id: task.id,
+        expectedVersion: 1,
+        completedAt: '2026-08-12T00:00:01.000Z',
+      }),
+    ).rejects.toBeInstanceOf(AiTaskVersionConflictError);
+    const after = await repository.findById(task.id);
+    expect(after?.status).toBe('completed');
+    expect(after?.version).toBe(2);
+  });
+
+  it('completeTask rejects a non-existent id with a version conflict', async () => {
+    const { repository } = setup();
+    await expect(
+      repository.completeTask({
+        id: uuid(),
+        expectedVersion: 1,
+        completedAt: '2026-08-12T00:00:00.000Z',
+      }),
+    ).rejects.toBeInstanceOf(AiTaskVersionConflictError);
+  });
+
+  it('concurrent completeTask with the same expectedVersion: exactly one wins', async () => {
+    const { repository } = setup();
+    const task = makeAiTask({ title: 'base' });
+    await repository.createIfAbsent(task);
+    const results = await Promise.all(
+      Array.from({ length: 20 }, () =>
+        repository
+          .completeTask({
+            id: task.id,
+            expectedVersion: 1,
+            completedAt: '2026-08-12T00:00:00.000Z',
+          })
+          .then(() => 'succeeded')
+          .catch((e) =>
+            e instanceof AiTaskVersionConflictError ? 'conflict' : 'other',
+          ),
+      ),
+    );
+    expect(results.filter((r) => r === 'succeeded')).toHaveLength(1);
+    expect(results.filter((r) => r === 'conflict')).toHaveLength(19);
+    const finalTask = await repository.findById(task.id);
+    expect(finalTask?.status).toBe('completed');
+    expect(finalTask?.version).toBe(2);
+  });
+
   it('sequential same-connection updateTaskContent calls advance the version each time', async () => {
     const { repository } = setup();
     const task = makeAiTask({ title: 'v1' });

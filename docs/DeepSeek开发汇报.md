@@ -2855,6 +2855,8 @@ PUT 使用严格白名单请求体：
 
 等待小喵审核。
 
+---
+
 ## 小喵审核结果 #12 · 需要小返修 · 2026-08-10
 
 ### 审核结论
@@ -6714,3 +6716,145 @@ App API 严格输入、服务层 `pending -> needs_changes`、同语义重试、
 - 已将 `- [ ] task_update` 更新为 `- [x] task_update`。
 
 本批验收通过，可以提交并推送到 `develop`；下一批任务由小喵在推送后单独追加。
+
+---
+
+## 小喵任务 #35 · 完成自己的 AI 任务 + MCP `task_complete` · 2026-08-12
+
+### 本批候选计划项
+
+- `- [ ] 完成自己的任务`
+- `- [ ] task_complete`
+
+本批只建立“当前认证 AI 完成自己的私人任务”这一条纵向能力。AITask 完成仅代表该 AI 的个人工作完成，绝不直接完成 ProjectTask、Stage 或推进项目地图；不要顺手实现备注、进度、阻塞、查看其他 AI、审核包或正式主进度申请。
+
+### 必须完成
+
+1. 扩展严格完成契约：只含 `taskId` 与必填 `expectedVersion`（整数 >= 1），公开 Schema 严格拒绝身份、归属、状态、进度、备注、阻塞、position、version、时间与未知字段。
+2. 为仓储增加原子完成 CAS：只有 id 存在且 version 匹配才写；成功原子设置 `status='completed'`、`progressPercent=100`、`completedAt` 与 `updatedAt` 为同一服务端时间、version +1，其余不变；20 个同版本并发最多一个成功。注释明确未来 PostgreSQL 的条件 UPDATE 语义。
+3. 服务只允许认证 Actor 完成自己的任务：不存在与外 Actor 任务返回同一未找到错误；归档拒绝；陈旧版本稳定冲突；首次完成落账；已完成且 expectedVersion 匹配为 no-op，不推进版本或时间，陈旧版本仍先冲突；返回完整 18 字段白名单投影；绝不调用 ProjectTask、Stage 或 StageUpdateRequest 服务。
+4. 注册 `task_complete`：输入严格只允许 `{ task_id, expected_version }`，数值字符串不可转换；仅 default + resident_ai 可用，其他身份和未知 profile 均 fail-closed，policy 集中；成功返回完整 AiTask，未找到 / 外 Actor 文案相同，冲突、归档与未知异常均脱敏。
+5. 测试覆盖首次完成不变量、当前版本 no-op、已完成的陈旧版本冲突、仓储与服务各自 20 并发、跨 Actor 不可探测、同 Actor 多连接读取一致、四类授权拒绝、严格字段、归档、异常与 runtime 字段脱敏，以及真实 HTTP 的 `task_create → task_complete → task_list_my_tasks`。
+6. 独立证明完成前后关联 ProjectTask、Stage、项目状态聚合和地图进度完全不变，不创建 StageUpdateRequest 或审核记录。
+
+### 边界与验收
+
+- 不实现或勾选备注、进度、查看他人任务；不新增通用 status 更新入口，不把 completed 之外的状态迁移塞进本批。
+- 不新增可指定 owner 的 App API，不实现数据库、AuditLog、前端、审核包或正式主进度申请。
+- 运行契约 / 仓储 / 服务 / MCP 专项、根目录 typecheck、全量测试、真实 HTTP 冒烟、NUL / BOM 扫描与 `git diff --check`。
+- 完成后仅在本文件末尾追加“检查点 #35”并暂停汇报；不修改计划复选框，不执行 Git / GitHub / VPS，不开始下一批，不读取或修改 `.claude/` 与 `ui素材mingwu/`。
+
+等待 DS 完成检查点后由小喵审核。
+
+---
+
+## 检查点 #35 · 2026-08-12
+
+### 本批次目标
+
+完成“当前认证 AI 完成自己的私人任务”这一条纵向能力：建立严格完成契约、仓储原子完成 CAS、服务完成语义、`task_complete` MCP 工具，并独立证明 AI 任务完成不改变正式任务 / 关卡 / 地图进度。
+
+### 候选完成的计划项目（原文，未打勾）
+
+- `- [ ] 完成自己的任务`
+- `- [ ] task_complete`
+
+### 实际完成内容
+
+1. **契约**（`packages/contracts/src/ai-task.ts`）：新增 `CompleteAiTaskInput`（`taskId` + 必填 `expectedVersion`）与 `completeAiTaskInputSchema`（`additionalProperties:false`，`taskId` 为 UUID pattern，`expectedVersion` 为 `integer >= 1`；严格拒绝身份、归属、状态、进度、备注、阻塞、position、version、时间与未知字段）。
+2. **仓储**（`domain/ai-task/repository.ts` + `in-memory-ai-task-repository.ts`）：新增 `CompleteTaskInput` 与 `AiTaskRepository.completeTask` 原子完成 CAS——id 必须存在且现有 version === expectedVersion 才写，同一同步块内完成（无 await，无竞态窗口）；成功原子设置 `status='completed'`、`progressPercent=100`、`completedAt` 与 `updatedAt` 为输入的服务端时间（同一值）、version +1，其余字段不变；注释明确未来 PostgreSQL `UPDATE ... SET status='completed', progress_percent=100, completed_at=?, updated_at=?, version=version+1 WHERE id=? AND version=?` 语义。
+3. **服务**（`AiTaskService.completeOwnTask`）：只允许认证 Actor 完成自己的任务（身份由 authContext 解析）；不存在与外 Actor 任务返回同一 `AiTaskNotFoundError`（跨 Actor 不可探测）；归档拒绝 `AiTaskArchivedError`；陈旧版本先于“已完成的 no-op”判定，稳定 `AiTaskVersionConflictError`；首次完成经仓储原子 CAS 落账；已完成且 expectedVersion 匹配为 no-op（直接返回当前任务，不推进版本 / 时间）；返回完整 18 字段白名单投影；绝不调用 ProjectTask / Stage / StageUpdateRequest 服务。
+4. **策略**（`mcp/ai-task-policy.ts`）：新增 `canCompleteOwnTask`（fail-closed，仅 default + resident_ai），与既有 AI 任务策略同文件集中，授权判断不散落在工具回调。
+5. **MCP**（`mcp-server.ts`）：注册 `task_complete`，输入严格只允许 `{ task_id, expected_version }`（`.strict()`，`expected_version` 为 `z.number()`，数值字符串不强制转换）；匿名连接返回“当前连接未授权写操作”，非默认 profile / 非 resident_ai 返回“当前身份无权完成 AI 任务”；成功返回完整 AiTask；未找到 / 外 Actor 同一文案“任务不存在”，冲突“任务版本已变化，请刷新后重试”，归档“任务已归档，无法完成”，未知异常统一“内部错误”并脱敏日志。
+6. **测试**：新增 `mcp-task-complete.test.ts`（8 例），并在仓储 / 契约 / 服务 / 协议 / HTTP 相关文件补充完成路径用例与工具计数更新。
+
+### 新增、修改、删除的文件清单
+
+- 新增：`apps/server/test/mcp-task-complete.test.ts`
+- 修改：
+  - `packages/contracts/src/ai-task.ts`
+  - `apps/server/src/domain/ai-task/repository.ts`
+  - `apps/server/src/infrastructure/repositories/in-memory-ai-task-repository.ts`
+  - `apps/server/src/application/ai-task/ai-task-service.ts`
+  - `apps/server/src/mcp/ai-task-policy.ts`
+  - `apps/server/src/mcp/mcp-server.ts`
+  - `apps/server/test/ai-task-contract.test.ts`
+  - `apps/server/test/ai-task-repository.test.ts`
+  - `apps/server/test/ai-task-service.test.ts`
+  - `apps/server/test/mcp-task-list-my-tasks.test.ts`
+  - `apps/server/test/mcp-protocol.test.ts`
+  - `apps/server/test/mcp-http.test.ts`
+  - `apps/server/test/mcp-http-smoke.test.ts`
+  - `apps/server/test/mcp-http-smoke-auth.test.ts`
+- 删除：无
+
+### 关键设计决定及其依据
+
+- **幂等 no-op 语义**：已完成且版本一致 → 直接返回当前任务，不推进版本 / 时间，重复调用安全；陈旧版本无论如何先冲突（客户端刷新后重试），保证“陈旧客户端总是得到冲突而非静默成功”。
+- **双保险并发**：服务层版本预检查提供干净的早期冲突与 no-op 判定；仓储 `completeTask` CAS 是权威原子边界（版本检查 + 写入同一同步块），两者语义一致。
+- **同一服务端时间**：`completedAt` 与 `updatedAt` 复用 `this.now()` 的同一值，避免完成时刻与更新时刻分叉。
+- **跨 Actor 不可探测**：不存在任务与外 Actor 任务复用同一受控错误，外部无法经完成入口探测他人任务存在性。
+- **白名单投影**：返回只用 `toTask` 显式 18 字段投影，仓储夹带的连接 / 权限 / 凭据 / 未知运行时字段不外发。
+- **正式进度隔离**：完成只写 AiTask 状态，不触碰 ProjectTask / Stage / 项目状态聚合 / StageUpdateRequest（独立测试证明前后完全一致、零申请）。
+
+### 执行过的测试或检查（命令与真实结果）
+
+- AiTask 专项（11 个测试文件、**188/188 通过**）：
+  - `ai-task-repository.test.ts` 19/19（含仓储 20 并发完成恰一个成功）
+  - `ai-task-contract.test.ts` 31/31
+  - `ai-task-service.test.ts` 58/58（含服务 20 并发恰一个成功、跨 Actor 不可探测、正式进度不变证明）
+  - `mcp-task-create.test.ts` 9/9、`mcp-task-list-my-tasks.test.ts` 9/9、`mcp-task-update.test.ts` 8/8、`mcp-task-complete.test.ts` 8/8
+  - `mcp-protocol.test.ts` 21/21、`mcp-http.test.ts` 18/18、`mcp-http-smoke.test.ts` 1/1、`mcp-http-smoke-auth.test.ts` 6/6
+- 根目录 typecheck：`npm run typecheck`，contracts 与 server 均通过。
+- 全量测试：`npm test`，**58 个测试文件、975/975 通过**（任务 #34 时为 947，本批净增 28 例）。
+- 真实 Streamable HTTP 冒烟：`task_create → task_complete → task_list_my_tasks` 往返通过；重复完成（已刷新版本）no-op，版本 / 时间不再推进。
+- 本批全部源码、测试与契约文件：**NUL=0、BOM=0**。
+- `git diff --check`：通过，仅有 Windows LF→CRLF 提示，无空白错误。
+
+### 未完成内容、已知问题和风险
+
+- 已归档任务完成被拒绝（设计如此，归档后不允许再完成）。
+- 备注、进度、查看他人任务、通用 status 更新入口、可指定 owner 的 App API、数据库 / AuditLog / 前端 / 审核包 / 正式主进度申请均未实现，属于本批明确边界。
+- AITask 完成不代表正式任务 / 关卡完成；正式进度推进仍走既有 StageUpdateRequest / 正式任务流程，本批不改变该边界。
+
+### 是否涉及数据库、身份权限、密钥、外部服务或破坏性变化
+
+- 数据库 / Migration：无。
+- 身份权限：新增 `task_complete` 写权限策略 `canCompleteOwnTask`（fail-closed，default + resident_ai），属于权限逻辑新增，未改变认证机制或既有策略；故按协作规则立即建立本检查点。
+- 密钥：无。
+- 外部服务：无（未操作 VPS / Cloudflare / GitHub，未部署或重启任何服务）。
+- 破坏性变化：无。
+
+### 建议下一批任务
+
+- `- [ ] 给任务增加备注`（AITask notes 追加，仍严格 owner 白名单、version CAS、跨 Actor 不可探测、正式进度隔离）。
+- 或按小喵在 #34 验收中安排的顺序等待推送后追加。
+
+等待小喵审核。
+
+---
+
+## 小喵审核结果 #35 · 通过 · 2026-08-12
+
+### 审核结论
+
+- **通过。** `完成自己的任务` 与 MCP `task_complete` 已满足本批验收标准。
+- 完成操作只作用于当前认证 Actor 自己的 AI 私人任务：首次完成原子写入 `completed`、`progressPercent=100`、同一服务端时间的 `completedAt/updatedAt`，并将版本推进一次。
+- 已完成任务在版本匹配时稳定 no-op；陈旧版本优先返回冲突。不存在任务与其他 Actor 的任务使用同一受控错误，不能据此探测归属。
+- 仓储与服务层 20 路同版本并发均最多一次真实写入；关联正式任务后，ProjectTask、Stage、项目状态聚合及 StageUpdateRequest 均保持不变。
+- MCP 输入严格拒绝数值字符串、身份字段及受保护字段；权限仅开放给 `resident_ai + default`，匿名、临时 AI、审核模型和未知权限配置均 fail-closed。
+
+### 小喵独立复验
+
+- 定向测试：**6 个文件，143/143 通过**。
+- 全量测试：**58 个文件，975/975 通过**。
+- `npm run typecheck`：contracts 与 server 均通过。
+- `git diff --check`：通过（仅 Windows LF→CRLF 提示，无空白错误）。
+- 代码审阅未发现新的必须返修项；未触碰 VPS、数据库或既有外部服务。
+
+### 计划更新
+
+- `[x] 完成自己的任务`
+- `[x] task_complete`
+
+检查点 #35 正式验收通过，可以进入下一批。

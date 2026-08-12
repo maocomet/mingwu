@@ -1,6 +1,7 @@
 import type { AiTask } from '@mingwu/contracts';
 import type {
   AiTaskRepository,
+  CompleteTaskInput,
   CreateAiTaskIfAbsentResult,
   UpdateAiTaskContentInput,
 } from '../../domain/ai-task/repository.js';
@@ -67,6 +68,28 @@ export class InMemoryAiTaskRepository implements AiTaskRepository {
       ...input.changes,
       version: existing.version + 1,
       updatedAt: input.updatedAt,
+    };
+    this.tasks.set(input.id, structuredClone(updated));
+    return structuredClone(updated);
+  }
+
+  async completeTask(input: CompleteTaskInput): Promise<AiTask> {
+    // 原子 CAS：读与写在同一同步块内完成，方法体内没有 await，Map 同步读写保证
+    // "检查版本 → 写入" 不存在竞态窗口。PostgreSQL 第六关用
+    // `UPDATE ... SET status='completed', progress_percent=100, completed_at=?,
+    //  updated_at=?, version=version+1 WHERE id=? AND version=?` 原子更新 + rows=0
+    // 判定冲突，语义与此一致。
+    const existing = this.tasks.get(input.id);
+    if (existing === undefined || existing.version !== input.expectedVersion) {
+      throw new AiTaskVersionConflictError();
+    }
+    const updated: AiTask = {
+      ...existing,
+      status: 'completed',
+      progressPercent: 100,
+      completedAt: input.completedAt,
+      updatedAt: input.completedAt,
+      version: existing.version + 1,
     };
     this.tasks.set(input.id, structuredClone(updated));
     return structuredClone(updated);

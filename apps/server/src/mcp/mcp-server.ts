@@ -49,7 +49,12 @@ import {
 } from '../domain/study-report/errors.js';
 import { StudySessionNotFoundError } from '../domain/study-session/errors.js';
 import type { McpAuthContext } from '../domain/mcp-auth/mcp-auth-context.js';
-import { canCreateAiTask, canListMyTasks, canUpdateOwnTask } from './ai-task-policy.js';
+import {
+  canCompleteOwnTask,
+  canCreateAiTask,
+  canListMyTasks,
+  canUpdateOwnTask,
+} from './ai-task-policy.js';
 import { canSubmitStageUpdate } from './stage-update-policy.js';
 import { canAppendStudyReport } from './study-report-policy.js';
 
@@ -248,6 +253,24 @@ const taskUpdateInputSchema = z
       .optional()
       .nullable()
       .describe('新描述（可空 / 空白清空规范化为 null）'),
+  })
+  .strict();
+
+/**
+ * task_complete 严格白名单：只允许 task_id / expected_version。.strict() 在运行时拒绝
+ * 任何额外字段，尤其拒绝 ownerActorId / actor_id / actorCode / projectId / status /
+ * progressPercent / notes / position / version / completedAt 等身份、归属、状态或受保护
+ * 字段——owner 只由该连接的服务端认证上下文决定，完成操作不允许客户端提交任何状态、
+ * 进度或时间。expected_version 是 z.number()（不强制转换），字符串数值会被拒绝。
+ */
+const taskCompleteInputSchema = z
+  .object({
+    task_id: uuidField('要完成的任务 UUID'),
+    expected_version: z
+      .number()
+      .int()
+      .positive()
+      .describe('调用方依据的任务版本（正整数，乐观并发）'),
   })
   .strict();
 
@@ -686,6 +709,61 @@ export function buildMcpServer(deps: McpServerDeps): McpServer {
         }
         if (err instanceof AiTaskArchivedError) {
           return toolErrorResult('任务已归档，无法修改');
+        }
+        if (err instanceof AiTaskVersionConflictError) {
+          return toolErrorResult('任务版本已变化，请刷新后重试');
+        }
+        return unexpectedError(deps, err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'task_complete',
+    {
+      title: 'Complete own AI task',
+      description:
+        '写：以服务端认证身份完成自己的 AI 私人任务（幂等，可安全重试）。expected_version ' +
+        '为乐观并发依据，必须与任务当前版本一致，陈旧版本稳定冲突；首次完成落账，成功时 ' +
+        'status=completed、progressPercent=100、completedAt 与 updatedAt 为同一服务端时间、' +
+        'version +1；已完成任务且版本一致为 no-op（不推进版本 / 时间），重复调用安全。任务不存在 ' +
+        '与属于其他 AI 返回同一受控错误，禁止跨 Actor 探测。ownerActorId 只由服务端 Bearer ' +
+        '凭据决定，不接受任何身份字段；完成只改变自己的任务，绝不改变 ProjectTask / Stage / ' +
+        '地图或任何正式项目进度。匿名连接或非 resident_ai 身份会被拒绝。',
+      inputSchema: taskCompleteInputSchema,
+    },
+    async ({ task_id, expected_version }) => {
+      const authContext = deps.authContext;
+      // 匿名只读上下文 fail-closed：工具可见，但任何写入都拒绝，不完成任务。
+      if (authContext === null) {
+        deps.logger.error(
+          { errType: 'McpAuthContextMissing' },
+          'task_complete denied: no bound identity',
+        );
+        return toolErrorResult('当前连接未授权写操作');
+      }
+      if (!canCompleteOwnTask(authContext)) {
+        deps.logger.error(
+          { errType: 'McpAiTaskCompletePermissionDenied' },
+          'task_complete denied: policy rejected',
+        );
+        return toolErrorResult('当前身份无权完成 AI 任务');
+      }
+      try {
+        const task = await deps.aiTaskService.completeOwnTask(authContext, {
+          taskId: task_id,
+          expectedVersion: expected_version,
+        });
+        return textContent(task);
+      } catch (err) {
+        if (err instanceof AiTaskIdInvalidError) {
+          return toolErrorResult('任务 ID 不合法');
+        }
+        if (err instanceof AiTaskNotFoundError) {
+          return toolErrorResult('任务不存在');
+        }
+        if (err instanceof AiTaskArchivedError) {
+          return toolErrorResult('任务已归档，无法完成');
         }
         if (err instanceof AiTaskVersionConflictError) {
           return toolErrorResult('任务版本已变化，请刷新后重试');

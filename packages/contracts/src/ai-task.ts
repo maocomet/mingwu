@@ -153,6 +153,36 @@ export const updateOwnAiTaskInputSchema = {
   anyOf: [{ required: ['title'] }, { required: ['description'] }],
 } as const;
 
+/**
+ * 完成自己 AI 任务的公开输入。owner / 归属 / 状态 / 进度 / 备注 / 阻塞 / position /
+ * version / 时间全部不可提交，owner 只能由服务端认证上下文注入。
+ * - taskId：要完成的任务 UUID；
+ * - expectedVersion：必填，整数且 >= 1，乐观并发依据，必须与任务当前 version 一致。
+ */
+export interface CompleteAiTaskInput {
+  /** 要完成的任务 UUID。 */
+  taskId: string;
+  /** 调用方依据的任务当前 version（乐观并发，整数且 >= 1）。 */
+  expectedVersion: number;
+}
+
+/**
+ * 完成自己 AI 任务输入的严格白名单。additionalProperties:false 拒绝 ownerActorId /
+ * actorId / actorCode / status / progressPercent / notes / blockerType / blockerReason /
+ * position / version / createdAt / updatedAt / completedAt / archivedAt 等身份、状态或受
+ * 保护字段；expectedVersion 必须是 >= 1 的整数。完成只影响自己任务的状态与时间，绝不
+ * 直接推进 ProjectTask / Stage / 地图进度（由服务层保证且独立证明）。
+ */
+export const completeAiTaskInputSchema = {
+  type: 'object',
+  required: ['taskId', 'expectedVersion'],
+  additionalProperties: false,
+  properties: {
+    taskId: { type: 'string', pattern: UUID_PATTERN },
+    expectedVersion: { type: 'integer', minimum: 1 },
+  },
+} as const;
+
 /** AI 任务完整响应契约。additionalProperties:false，字段不允许未声明内容。
  * required 必须与 TypeScript `AiTask` 接口的全部字段一一对应：值可空（null 合法）
  * 与字段缺失（校验失败）严格区分，工具返回的完整 AiTask 不允许缺少任何一个字段。 */

@@ -116,6 +116,7 @@ describe('MCP Streamable HTTP real-HTTP auth smoke (127.0.0.1, ephemeral port)',
         'study_append_report',
         'study_get_current_session',
         'study_get_session',
+        'task_complete',
         'task_create',
         'task_list_my_tasks',
         'task_update',
@@ -174,7 +175,7 @@ describe('MCP Streamable HTTP real-HTTP auth smoke (127.0.0.1, ephemeral port)',
       ).toBe(1);
 
       const bList = await b.client.listTools();
-      expect(bList.tools).toHaveLength(11);
+      expect(bList.tools).toHaveLength(12);
 
       // B 也通过 DELETE 显式清理（client.close 不保证发送 DELETE）。
       await b.transport.terminateSession();
@@ -402,6 +403,85 @@ describe('MCP Streamable HTTP real-HTTP auth smoke (127.0.0.1, ephemeral port)',
       expect(tree.tasks[0]!.ownerActorId).toBe(AUTH_FIXTURES.actorA.actorId);
       // 成功响应不回显凭据 / session / permissionProfile。
       const serialized = toolText(update) + toolText(list);
+      expect(serialized).not.toContain(AUTH_FIXTURES.connection1.token);
+      expect(serialized).not.toContain(AUTH_FIXTURES.connection1.connectionId);
+      expect(serialized).not.toContain('permissionProfile');
+
+      await a.transport.terminateSession();
+      await a.client.close();
+      expect(
+        (app as unknown as { mcpSessions: { size: number } }).mcpSessions.size,
+      ).toBe(0);
+    } finally {
+      await close();
+    }
+  });
+
+  it('real socket: task_create → task_complete → task_list_my_tasks roundtrip under the bound actor', async () => {
+    const { app, baseUrl, close } = await startServer();
+    try {
+      const project = await fetch(`${baseUrl}/api/v1/projects`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ id: uuid(), name: 'AI 任务完成冒烟项目' }),
+      });
+      expect(project.status).toBe(201);
+      const projectId = ((await project.json()) as { id: string }).id;
+
+      // 真实 MCP socket + Bearer（connection1 → actorA）创建任务。
+      const a = await connectClient(`${baseUrl}/mcp`, AUTH_FIXTURES.connection1.token);
+      const taskId = uuid();
+      const create = await a.client.callTool({
+        name: 'task_create',
+        arguments: { task_id: taskId, project_id: projectId, title: '要完成的任务' },
+      });
+      expect(create.isError).not.toBe(true);
+      const created = JSON.parse(toolText(create)) as AiTask;
+      expect(created.status).toBe('not_started');
+      expect(created.version).toBe(1);
+
+      // task_complete 完成自己任务：状态 / 进度 / 时间 / 版本一次落账。
+      const complete = await a.client.callTool({
+        name: 'task_complete',
+        arguments: { task_id: taskId, expected_version: 1 },
+      });
+      expect(complete.isError).not.toBe(true);
+      const completed = JSON.parse(toolText(complete)) as AiTask;
+      expect(completed.id).toBe(taskId);
+      expect(completed.projectId).toBe(projectId);
+      expect(completed.ownerActorId).toBe(AUTH_FIXTURES.actorA.actorId);
+      expect(completed.status).toBe('completed');
+      expect(completed.progressPercent).toBe(100);
+      expect(completed.completedAt).toBeTypeOf('string');
+      expect(completed.completedAt).toBe(completed.updatedAt);
+      expect(completed.version).toBe(2);
+
+      // 重复完成（同一连接，已刷新版本）→ no-op：版本 / 时间不再推进。
+      const again = await a.client.callTool({
+        name: 'task_complete',
+        arguments: { task_id: taskId, expected_version: 2 },
+      });
+      expect(again.isError).not.toBe(true);
+      const noop = JSON.parse(toolText(again)) as AiTask;
+      expect(noop.status).toBe('completed');
+      expect(noop.version).toBe(2);
+      expect(noop.updatedAt).toBe(completed.updatedAt);
+
+      // task_list_my_tasks 读回完成后的树，与 task_complete 返回一致。
+      const list = await a.client.callTool({
+        name: 'task_list_my_tasks',
+        arguments: { project_id: projectId },
+      });
+      expect(list.isError).not.toBe(true);
+      const tree = JSON.parse(toolText(list)) as { tasks: AiTaskNode[] };
+      expect(tree.tasks).toHaveLength(1);
+      expect(tree.tasks[0]!.id).toBe(taskId);
+      expect(tree.tasks[0]!.status).toBe('completed');
+      expect(tree.tasks[0]!.progressPercent).toBe(100);
+      expect(tree.tasks[0]!.version).toBe(2);
+      expect(tree.tasks[0]!.ownerActorId).toBe(AUTH_FIXTURES.actorA.actorId);
+      // 成功响应不回显凭据 / session / permissionProfile。
+      const serialized = toolText(complete) + toolText(list);
       expect(serialized).not.toContain(AUTH_FIXTURES.connection1.token);
       expect(serialized).not.toContain(AUTH_FIXTURES.connection1.connectionId);
       expect(serialized).not.toContain('permissionProfile');

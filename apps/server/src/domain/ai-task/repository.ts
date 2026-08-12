@@ -21,6 +21,15 @@ export interface UpdateAiTaskContentInput {
   updatedAt: string;
 }
 
+/** 原子 CAS 完成任务的输入：id + 乐观并发版本 + 服务端完成时间。 */
+export interface CompleteTaskInput {
+  id: string;
+  /** 调用方依据的任务当前 version；与仓储中现有 version 不一致时拒绝。 */
+  expectedVersion: number;
+  /** 服务端写入的完成时间（ISO 字符串），completedAt 与 updatedAt 共用同一值。 */
+  completedAt: string;
+}
+
 /**
  * 仓储接口。并发正确性与"同一 projectId + ownerActorId + parentTaskId 下 position 唯一"
  * 由仓储保证，业务层不在"先查再写"的窗口里做判断。PostgreSQL 实现将依赖 id 唯一约束 +
@@ -53,4 +62,18 @@ export interface AiTaskRepository {
    * AiTaskVersionConflictError，避免"先查后写"窗口下的竞态覆盖。
    */
   updateTaskContent(input: UpdateAiTaskContentInput): Promise<AiTask>;
+  /**
+   * 原子 CAS 完成任务：
+   * - 版本检查与写入必须在同一原子边界：id 必须存在，且现有 version === expectedVersion
+   *   才允许写入；任何不符抛 AiTaskVersionConflictError，绝不覆盖；
+   * - 成功时原子设置 status='completed'、progressPercent=100、completedAt 与 updatedAt 为
+   *   输入的服务端时间（同一值）、version +1，其余字段不变；
+   * - 返回完成后的完整任务（深拷贝）。
+   *
+   * 第六关 PostgreSQL 实现将使用
+   * `UPDATE ... SET status='completed', progress_percent=100, completed_at=?, updated_at=?,
+   *  version=version+1 WHERE id=? AND version=?` 原子更新（`UPDATE` 行级锁 + where 版本
+   * 条件），rows=0 时抛 AiTaskVersionConflictError。
+   */
+  completeTask(input: CompleteTaskInput): Promise<AiTask>;
 }

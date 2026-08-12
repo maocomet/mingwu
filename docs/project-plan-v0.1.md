@@ -183,7 +183,7 @@ Windows App
 - [x] 创建 AI 任务
 - [x] 查询自己的任务
 - [x] 修改自己的任务
-- [ ] 完成自己的任务
+- [x] 完成自己的任务
 - [ ] 给任务增加备注
 - [ ] 给任务增加进度
 - [ ] 查看其他 AI 任务的只读信息
@@ -225,7 +225,7 @@ Windows App
 - [x] task_list_my_tasks
 - [x] task_create
 - [x] task_update
-- [ ] task_complete
+- [x] task_complete
 - [x] study_get_current_session
 - [x] study_append_report
 - [x] study_get_session

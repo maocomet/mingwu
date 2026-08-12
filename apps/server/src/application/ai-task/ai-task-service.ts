@@ -2,6 +2,7 @@ import type {
   AiTask,
   AiTaskNode,
   AuthenticatedAiActorContext,
+  CompleteAiTaskInput,
   CreateAiTaskInput,
   ListMyTaskTreeResult,
   UpdateOwnAiTaskInput,
@@ -342,6 +343,60 @@ export class AiTaskService {
       expectedVersion: input.expectedVersion,
       changes,
       updatedAt: this.now(),
+    });
+    return toTask(updated);
+  }
+
+  /**
+   * 完成自己的 AI 私人任务（幂等，可安全重试）。
+   *
+   * 权限与隔离（跨 AI 不可探测）：
+   * - 只允许已认证 Actor 完成自己的任务；身份由 authContext 解析，绝不信任客户端输入；
+   * - 不存在与外 Actor 的任务返回同一个 AiTaskNotFoundError，外部无法通过完成入口探测
+   *   其他 AI 的任务存在性；
+   * - 已归档任务拒绝完成（AiTaskArchivedError）。
+   *
+   * 并发与幂等：
+   * - expectedVersion 与任务当前 version 不一致 → AiTaskVersionConflictError（陈旧版本先
+   *   于"已完成的 no-op"判定，保证陈旧客户端总是得到冲突而非静默成功）；
+   * - 首次完成落账：版本一致且尚未完成 → 仓储原子 CAS，成功设置 status='completed'、
+   *   progressPercent=100、completedAt 与 updatedAt 为同一服务端时间、version +1；
+   * - 已完成任务 + expectedVersion 一致 → no-op：直接返回当前任务，不推进版本 / 时间，
+   *   重复调用安全且不会产生重复副作用。
+   *
+   * 边界：本方法只写 AiTask 状态，绝不调用 ProjectTask / Stage / StageUpdateRequest
+   * 服务，不产生阶段更新申请或审计记录，完成不改变正式任务、关卡或地图进度（独立证明）。
+   */
+  async completeOwnTask(
+    authContext: AuthenticatedAiActorContext,
+    input: CompleteAiTaskInput,
+  ): Promise<AiTask> {
+    this.assertValidRequesterContext(authContext);
+    if (!UUID_REGEX.test(input.taskId)) {
+      throw new AiTaskIdInvalidError();
+    }
+    const existing = await this.repository.findById(input.taskId);
+    if (existing === null || existing.ownerActorId !== authContext.actorId) {
+      throw new AiTaskNotFoundError();
+    }
+    if (existing.archivedAt !== null) {
+      throw new AiTaskArchivedError();
+    }
+    // 陈旧版本：无论任务是否已完成，版本不一致一律先冲突，客户端刷新后重试。
+    if (input.expectedVersion !== existing.version) {
+      throw new AiTaskVersionConflictError();
+    }
+    // 已完成任务 + 版本一致 → no-op：返回当前任务，不推进版本 / 时间，重复调用安全。
+    if (existing.status === 'completed') {
+      return toTask(existing);
+    }
+    // 首次完成：仓储原子 CAS（版本检查 + 写入同一原子边界），completedAt 与 updatedAt
+    // 使用同一服务端时间，版本 +1。
+    const completedAt = this.now();
+    const updated = await this.repository.completeTask({
+      id: input.taskId,
+      expectedVersion: input.expectedVersion,
+      completedAt,
     });
     return toTask(updated);
   }

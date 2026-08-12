@@ -56,8 +56,11 @@ function stubAiTaskRepository(overrides: Partial<AiTaskRepository>): AiTaskRepos
     findById: async () => null,
     listByOwner: async () => [],
     createIfAbsent: async (task) => ({ task, created: true }),
-    // 基座仓储无任何任务：任何 CAS 更新都应冲突，测试按需 override 具体行为。
+    // 基座仓储无任何任务：任何 CAS 更新 / 完成都应冲突，测试按需 override 具体行为。
     updateTaskContent: async () => {
+      throw new AiTaskVersionConflictError();
+    },
+    completeTask: async () => {
       throw new AiTaskVersionConflictError();
     },
   };
@@ -1052,5 +1055,286 @@ describe('AiTaskService.updateOwnTask', () => {
     const afterFormal = await services.taskRepository.findById(formal.id);
     expect(afterStage).toEqual(beforeStage);
     expect(afterFormal).toEqual(beforeFormal);
+  });
+});
+
+describe('AiTaskService.completeOwnTask', () => {
+  /** 通过服务创建一棵单人任务（version 1），返回任务与项目。 */
+  async function seedOwnTask(services: Services, actor = makeActorContext(), title = '待办') {
+    const projectId = await makeProjectId(services);
+    const created = await services.aiTaskService.create(actor, {
+      id: uuid(),
+      projectId,
+      title,
+      description: '原描述',
+    });
+    return { projectId, task: created.task };
+  }
+
+  it('first completion sets completed status, 100% progress and the SAME server time', async () => {
+    const services = setup();
+    const actor = makeActorContext();
+    const { task } = await seedOwnTask(services, actor, '第一件');
+    const completed = await services.aiTaskService.completeOwnTask(actor, {
+      taskId: task.id,
+      expectedVersion: task.version,
+    });
+    // completedAt 与 updatedAt 为同一服务端时间；版本 +1；其余字段不变。
+    expect(completed.status).toBe('completed');
+    expect(completed.progressPercent).toBe(100);
+    expect(completed.completedAt).toBe(FIXED_NOW);
+    expect(completed.updatedAt).toBe(FIXED_NOW);
+    expect(completed.completedAt).toBe(completed.updatedAt);
+    expect(completed.version).toBe(2);
+    expect(completed.title).toBe('第一件');
+    expect(completed.ownerActorId).toBe(actor.actorId);
+    expect(completed.position).toBe(task.position);
+    expect(completed.notes).toEqual([]);
+    expect(completed.archivedAt).toBeNull();
+    expect(completed.createdAt).toBe(task.createdAt);
+  });
+
+  it('is a no-op when already completed and version matches: no version / time bump', async () => {
+    const services = setup();
+    const actor = makeActorContext();
+    const { task } = await seedOwnTask(services, actor);
+    const first = await services.aiTaskService.completeOwnTask(actor, {
+      taskId: task.id,
+      expectedVersion: 1,
+    });
+    expect(first.version).toBe(2);
+    // 已完成 + 版本一致 → no-op：直接返回当前任务，不推进版本 / 时间。
+    const again = await services.aiTaskService.completeOwnTask(actor, {
+      taskId: task.id,
+      expectedVersion: 2,
+    });
+    expect(again.status).toBe('completed');
+    expect(again.version).toBe(2);
+    expect(again.updatedAt).toBe(FIXED_NOW);
+    expect(again.completedAt).toBe(FIXED_NOW);
+    // 仓储真实状态也未再次变更。
+    const stored = await services.aiTaskRepository.findById(task.id);
+    expect(stored?.version).toBe(2);
+  });
+
+  it('conflicts FIRST on a stale version even when the task is already completed', async () => {
+    const services = setup();
+    const actor = makeActorContext();
+    const { task } = await seedOwnTask(services, actor);
+    await services.aiTaskService.completeOwnTask(actor, {
+      taskId: task.id,
+      expectedVersion: 1,
+    });
+    // 已完成 + 陈旧版本 → 稳定冲突（陈旧版本先于 no-op 判定）。
+    await expect(
+      services.aiTaskService.completeOwnTask(actor, {
+        taskId: task.id,
+        expectedVersion: 1,
+      }),
+    ).rejects.toBeInstanceOf(AiTaskVersionConflictError);
+    expect((await services.aiTaskRepository.findById(task.id))?.version).toBe(2);
+  });
+
+  it('rejects a stale expectedVersion on a fresh task and never overwrites', async () => {
+    const services = setup();
+    const actor = makeActorContext();
+    const { task } = await seedOwnTask(services, actor);
+    // 任务当前 version 为 1，用陈旧版本… 先推进一次再用旧版本重试。
+    await services.aiTaskService.completeOwnTask(actor, {
+      taskId: task.id,
+      expectedVersion: 1,
+    });
+    await expect(
+      services.aiTaskService.completeOwnTask(actor, {
+        taskId: task.id,
+        expectedVersion: 1,
+      }),
+    ).rejects.toBeInstanceOf(AiTaskVersionConflictError);
+    const stored = await services.aiTaskRepository.findById(task.id);
+    expect(stored?.status).toBe('completed');
+    expect(stored?.version).toBe(2);
+  });
+
+  it('rejects an invalid requester context and a non-UUID taskId', async () => {
+    const services = setup();
+    const { task } = await seedOwnTask(services);
+    await expect(
+      services.aiTaskService.completeOwnTask(
+        {} as AuthenticatedAiActorContext,
+        { taskId: task.id, expectedVersion: 1 },
+      ),
+    ).rejects.toBeInstanceOf(AiTaskRequesterInvalidError);
+    const actor = makeActorContext();
+    await expect(
+      services.aiTaskService.completeOwnTask(actor, {
+        taskId: 'not-a-uuid',
+        expectedVersion: 1,
+      }),
+    ).rejects.toBeInstanceOf(AiTaskIdInvalidError);
+  });
+
+  it('returns the SAME controlled not-found error for missing and other-actor tasks (no cross-actor probing)', async () => {
+    const services = setup();
+    const actorA = makeActorContext();
+    const actorB = makeActorContext();
+    const { task } = await seedOwnTask(services, actorA);
+    let missingError: unknown;
+    let otherError: unknown;
+    try {
+      await services.aiTaskService.completeOwnTask(actorA, {
+        taskId: uuid(),
+        expectedVersion: 1,
+      });
+    } catch (err) {
+      missingError = err;
+    }
+    try {
+      await services.aiTaskService.completeOwnTask(actorB, {
+        taskId: task.id,
+        expectedVersion: task.version,
+      });
+    } catch (err) {
+      otherError = err;
+    }
+    expect(missingError).toBeInstanceOf(AiTaskNotFoundError);
+    expect(otherError).toBeInstanceOf(AiTaskNotFoundError);
+    // 固定脱敏文案完全一致，且不含任务 / Actor ID。
+    const msg = (e: unknown) => (e as Error).message;
+    expect(msg(missingError)).toBe(msg(otherError));
+    expect(msg(missingError)).not.toContain(task.id);
+    expect(msg(missingError)).not.toContain(actorA.actorId);
+    expect(msg(missingError)).not.toContain(actorB.actorId);
+    // 他人任务未被完成。
+    const untouched = await services.aiTaskRepository.findById(task.id);
+    expect(untouched?.status).toBe('not_started');
+    expect(untouched?.version).toBe(1);
+  });
+
+  it('rejects an archived task', async () => {
+    const services = setup();
+    const actor = makeActorContext();
+    const projectId = await makeProjectId(services);
+    // createIfAbsent 不覆盖既有 id，直接种入一条已归档任务（新 id）。
+    const archivedTask = makeAiTask({
+      projectId,
+      ownerActorId: actor.actorId,
+      archivedAt: FIXED_NOW,
+    });
+    await services.aiTaskRepository.createIfAbsent(archivedTask);
+    await expect(
+      services.aiTaskService.completeOwnTask(actor, {
+        taskId: archivedTask.id,
+        expectedVersion: archivedTask.version,
+      }),
+    ).rejects.toBeInstanceOf(AiTaskArchivedError);
+    expect((await services.aiTaskRepository.findById(archivedTask.id))?.status).toBe('not_started');
+  });
+
+  it('allows the same actor to complete sequentially across multiple connections by refreshing the version', async () => {
+    const services = setup();
+    const actor = makeActorContext();
+    const { task } = await seedOwnTask(services, actor, '多连接');
+    // 第一个"连接"以 version 1 完成。
+    const first = await services.aiTaskService.completeOwnTask(actor, {
+      taskId: task.id,
+      expectedVersion: 1,
+    });
+    expect(first.version).toBe(2);
+    // 第二个"连接"刷新到 version 2 后重试 → no-op，不推进版本。
+    const second = await services.aiTaskService.completeOwnTask(actor, {
+      taskId: first.id,
+      expectedVersion: 2,
+    });
+    expect(second.version).toBe(2);
+    expect(second.status).toBe('completed');
+  });
+
+  it('exactly one of 20 concurrent completeOwnTask calls wins on the same version', async () => {
+    const services = setup();
+    const actor = makeActorContext();
+    const { task } = await seedOwnTask(services, actor, '并发完成');
+    const results = await Promise.all(
+      Array.from({ length: 20 }, () =>
+        services.aiTaskService
+          .completeOwnTask(actor, { taskId: task.id, expectedVersion: 1 })
+          .then(() => 'succeeded')
+          .catch((e) => (e instanceof AiTaskVersionConflictError ? 'conflict' : 'other')),
+      ),
+    );
+    expect(results.filter((r) => r === 'succeeded')).toHaveLength(1);
+    expect(results.filter((r) => r === 'conflict')).toHaveLength(19);
+    const finalTask = await services.aiTaskRepository.findById(task.id);
+    expect(finalTask?.status).toBe('completed');
+    expect(finalTask?.version).toBe(2);
+  });
+
+  it('never externalizes repository-smuggled runtime fields on the complete path (whitelist projection)', async () => {
+    const services = makeServices();
+    const projectId = await makeProjectId(services);
+    const actor = makeActorContext();
+    const clean = makeAiTask({ projectId, ownerActorId: actor.actorId, title: '干净' });
+    const smuggled = Object.assign({}, clean, { connectionId: 'conn-secret', token: 'TKN' });
+    const aiTaskService = new AiTaskService(
+      stubAiTaskRepository({
+        findById: async () => structuredClone(clean),
+        // 假仓储正确落账完成状态但返回仍夹带 runtime 额外字段。
+        completeTask: async (input) =>
+          structuredClone({
+            ...smuggled,
+            status: 'completed',
+            progressPercent: 100,
+            completedAt: input.completedAt,
+            updatedAt: input.completedAt,
+            version: 2,
+          }),
+      }),
+      services.projectRepository,
+      services.taskRepository,
+      () => FIXED_NOW,
+    );
+    const completed = await aiTaskService.completeOwnTask(actor, {
+      taskId: clean.id,
+      expectedVersion: 1,
+    });
+    expect(completed.status).toBe('completed');
+    expect('connectionId' in completed).toBe(false);
+    expect('token' in completed).toBe(false);
+    // 白名单 18 个字段仍在。
+    expect(completed.ownerActorId).toBe(actor.actorId);
+    expect(completed.version).toBe(2);
+  });
+
+  it('leaves ProjectTask / Stage / project status / map progress untouched and creates NO StageUpdateRequest', async () => {
+    const services = setup();
+    const actor = makeActorContext();
+    const projectId = await makeProjectId(services);
+    const formal = await makeFormalTask(services, projectId);
+    // 项目状态聚合（关卡 + 正式任务进度）在完成前采样。
+    const beforeProject = await services.projectStatusService.getStatus(projectId);
+    const beforeStage = await services.stageRepository.findById(formal.stageId);
+    const beforeFormal = await services.taskRepository.findById(formal.id);
+    const beforeRequests = await services.stageUpdateRequestRepository.listByStage(formal.stageId);
+    // 创建并完成一条关联正式任务的 AI 私人任务。
+    const created = await services.aiTaskService.create(actor, {
+      id: uuid(),
+      projectId,
+      projectTaskId: formal.id,
+      title: '要完成的任务',
+    });
+    await services.aiTaskService.completeOwnTask(actor, {
+      taskId: created.task.id,
+      expectedVersion: 1,
+    });
+    // AI 私人任务确实完成了。
+    expect((await services.aiTaskRepository.findById(created.task.id))?.status).toBe('completed');
+    // 正式进度 / 关卡 / 项目聚合完全不变。
+    const afterProject = await services.projectStatusService.getStatus(projectId);
+    const afterStage = await services.stageRepository.findById(formal.stageId);
+    const afterFormal = await services.taskRepository.findById(formal.id);
+    const afterRequests = await services.stageUpdateRequestRepository.listByStage(formal.stageId);
+    expect(afterProject).toEqual(beforeProject);
+    expect(afterStage).toEqual(beforeStage);
+    expect(afterFormal).toEqual(beforeFormal);
+    expect(afterRequests).toEqual(beforeRequests);
   });
 });

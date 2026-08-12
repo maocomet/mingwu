@@ -6,6 +6,7 @@ import {
   AI_TASK_TITLE_MAX_LENGTH,
   aiTaskJsonSchema,
   aiTaskTreeResponseJsonSchema,
+  completeAiTaskInputSchema,
   createAiTaskInputSchema,
   updateOwnAiTaskInputSchema,
   type AiTask,
@@ -268,6 +269,53 @@ describe('updateOwnAiTaskInputSchema (修改自己任务输入白名单)', () =>
     expect(
       validate({ taskId: uuid(), expectedVersion: 1, title: 'X', description: '   ' }),
     ).toBe(true);
+  });
+});
+
+describe('completeAiTaskInputSchema (完成自己任务输入白名单)', () => {
+  const validate = compile({ ...completeAiTaskInputSchema });
+
+  it('accepts a valid complete input with only taskId + expectedVersion', () => {
+    expect(validate({ taskId: uuid(), expectedVersion: 3 })).toBe(true);
+    expect(validate({ taskId: uuid(), expectedVersion: 1 })).toBe(true);
+  });
+
+  it('rejects missing required fields', () => {
+    expect(validate({ expectedVersion: 1 })).toBe(false);
+    expect(validate({ taskId: uuid() })).toBe(false);
+    expect(validate({})).toBe(false);
+  });
+
+  it('rejects smuggled identity / status / protected / unknown fields', () => {
+    const base = { taskId: uuid(), expectedVersion: 1 };
+    expect(validate({ ...base, ownerActorId: uuid() })).toBe(false);
+    expect(validate({ ...base, actor_id: uuid() })).toBe(false);
+    expect(validate({ ...base, actorId: uuid() })).toBe(false);
+    expect(validate({ ...base, actorCode: 'forged' })).toBe(false);
+    expect(validate({ ...base, projectId: uuid() })).toBe(false);
+    expect(validate({ ...base, status: 'completed' })).toBe(false);
+    expect(validate({ ...base, progressPercent: 100 })).toBe(false);
+    expect(validate({ ...base, notes: ['x'] })).toBe(false);
+    expect(validate({ ...base, blockerType: 'x' })).toBe(false);
+    expect(validate({ ...base, blockerReason: 'x' })).toBe(false);
+    expect(validate({ ...base, position: 1 })).toBe(false);
+    expect(validate({ ...base, version: 2 })).toBe(false);
+    expect(validate({ ...base, createdAt: '2026-01-01T00:00:00.000Z' })).toBe(false);
+    expect(validate({ ...base, updatedAt: '2026-01-01T00:00:00.000Z' })).toBe(false);
+    expect(validate({ ...base, completedAt: '2026-01-01T00:00:00.000Z' })).toBe(false);
+    expect(validate({ ...base, archivedAt: '2026-01-01T00:00:00.000Z' })).toBe(false);
+    expect(validate({ ...base, title: 'X' })).toBe(false);
+    expect(validate({ ...base, description: 'X' })).toBe(false);
+    expect(validate({ ...base, bogus: 1 })).toBe(false);
+  });
+
+  it('rejects non-UUID taskId and coerces / bounds expectedVersion strictly', () => {
+    expect(validate({ taskId: 'nope', expectedVersion: 1 })).toBe(false);
+    // 数值字符串绝不隐式强制转换。
+    expect(validate({ taskId: uuid(), expectedVersion: '1' })).toBe(false);
+    expect(validate({ taskId: uuid(), expectedVersion: 0 })).toBe(false);
+    expect(validate({ taskId: uuid(), expectedVersion: 1.5 })).toBe(false);
+    expect(validate({ taskId: uuid(), expectedVersion: -1 })).toBe(false);
   });
 });
 
