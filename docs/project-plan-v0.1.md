@@ -181,7 +181,7 @@ Windows App
 ### AI Task API
 
 - [x] 创建 AI 任务
-- [ ] 查询自己的任务
+- [x] 查询自己的任务
 - [ ] 修改自己的任务
 - [ ] 完成自己的任务
 - [ ] 给任务增加备注
@@ -222,7 +222,7 @@ Windows App
 - [x] project_get_stage
 - [x] project_submit_stage_update
 - [x] project_list_reports
-- [ ] task_list_my_tasks
+- [x] task_list_my_tasks
 - [x] task_create
 - [ ] task_update
 - [ ] task_complete

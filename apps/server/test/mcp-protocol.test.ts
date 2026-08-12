@@ -70,8 +70,9 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
         'study_get_current_session',
         'study_get_session',
         'task_create',
+        'task_list_my_tasks',
       ]);
-      // 六个只读工具都明确只读；三个写工具（study_append_report /
+      // 七个只读工具都明确只读；三个写工具（study_append_report /
       // project_submit_stage_update / task_create）不得标“只读”。
       const READ_ONLY_TOOLS = new Set([
         'project_get_stage',
@@ -80,6 +81,7 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
         'project_list_reports',
         'study_get_session',
         'study_get_current_session',
+        'task_list_my_tasks',
       ]);
       const writeTools = tools.filter((t) => !READ_ONLY_TOOLS.has(t.name));
       expect(writeTools.map((t) => t.name).sort()).toEqual([
@@ -114,6 +116,9 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
         // 为可选字段，不进 required；可选字段的严格拒绝与长度边界在
         // mcp-task-create.test.ts 中单独覆盖。
         task_create: ['task_id', 'project_id', 'title'],
+        // task_list_my_tasks 严格白名单只允许 project_id；身份 / 筛选字段的严格拒绝
+        // 在 mcp-task-list-my-tasks.test.ts 中单独覆盖。
+        task_list_my_tasks: ['project_id'],
       };
       // 各工具字段类型：uuid 字段为 string + format uuid；其余字段只断言存在。
       const UUID_FIELDS = new Set([

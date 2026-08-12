@@ -153,6 +153,7 @@ describe('MCP Streamable HTTP via /mcp', () => {
         'study_get_current_session',
         'study_get_session',
         'task_create',
+        'task_list_my_tasks',
       ]);
       const READ_ONLY_TOOLS = new Set([
         'project_get_stage',
@@ -161,6 +162,7 @@ describe('MCP Streamable HTTP via /mcp', () => {
         'project_list_reports',
         'study_get_session',
         'study_get_current_session',
+        'task_list_my_tasks',
       ]);
       for (const tool of tools) {
         if (READ_ONLY_TOOLS.has(tool.name)) {

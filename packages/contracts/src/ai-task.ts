@@ -163,3 +163,55 @@ export const aiTaskJsonSchema = {
     archivedAt: { type: ['string', 'null'] },
   },
 } as const;
+
+/** AI 私人任务树节点：完整 AiTask 字段 + 直接子节点列表。 */
+export interface AiTaskNode extends AiTask {
+  /**
+   * 直接子节点。每层按 position ASC、相同 position 按 id ASC 稳定排序（服务层保证，
+   * JSON Schema 无法表达排序，只约束结构）；叶子节点为空数组。
+   */
+  children: AiTaskNode[];
+}
+
+/** 查询自己任务树的响应：tasks 为根节点数组，递归包含完整子树。 */
+export interface ListMyTaskTreeResult {
+  tasks: AiTaskNode[];
+}
+
+/**
+ * 任务树节点定义（内嵌在 aiTaskTreeResponseJsonSchema.$defs.aiTaskNode，通过
+ * `$ref: '#/$defs/aiTaskNode'` JSON 指针自引用实现任意深度递归）。required 覆盖完整
+ * AiTask 的 18 个字段与 children 共 19 个字段；additionalProperties:false 拒绝任何
+ * 未声明内容（含身份字段）。排序由服务层保证，本 schema 只约束结构与类型。
+ */
+const aiTaskNodeDefinition = {
+  type: 'object',
+  required: [...aiTaskJsonSchema.required, 'children'],
+  additionalProperties: false,
+  properties: {
+    ...aiTaskJsonSchema.properties,
+    children: {
+      type: 'array',
+      items: { $ref: '#/$defs/aiTaskNode' },
+    },
+  },
+} as const;
+
+/**
+ * 查询自己任务树（MCP task_list_my_tasks）的完整响应契约。additionalProperties:false
+ * 拒绝身份 / session / 凭据等任何未声明内容；tasks 数组项是严格递归的 AiTaskNode。
+ */
+export const aiTaskTreeResponseJsonSchema = {
+  type: 'object',
+  required: ['tasks'],
+  additionalProperties: false,
+  properties: {
+    tasks: {
+      type: 'array',
+      items: { $ref: '#/$defs/aiTaskNode' },
+    },
+  },
+  $defs: {
+    aiTaskNode: aiTaskNodeDefinition,
+  },
+} as const;

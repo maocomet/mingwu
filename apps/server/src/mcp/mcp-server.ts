@@ -24,6 +24,7 @@ import {
   AiTaskProjectTaskInvalidError,
   AiTaskScopeConflictError,
   AiTaskTitleInvalidError,
+  AiTaskTreeCorruptError,
 } from '../domain/ai-task/errors.js';
 import { ProjectNotFoundError } from '../domain/project/errors.js';
 import { StageNotFoundError, StageVersionConflictError } from '../domain/stage/errors.js';
@@ -44,7 +45,7 @@ import {
 } from '../domain/study-report/errors.js';
 import { StudySessionNotFoundError } from '../domain/study-session/errors.js';
 import type { McpAuthContext } from '../domain/mcp-auth/mcp-auth-context.js';
-import { canCreateAiTask } from './ai-task-policy.js';
+import { canCreateAiTask, canListMyTasks } from './ai-task-policy.js';
 import { canSubmitStageUpdate } from './stage-update-policy.js';
 import { canAppendStudyReport } from './study-report-policy.js';
 
@@ -193,6 +194,18 @@ const taskCreateInputSchema = z
       .optional()
       .nullable()
       .describe('任务描述（可空；trim 后为空规范化为 null）'),
+  })
+  .strict();
+
+/**
+ * task_list_my_tasks 严格白名单：只允许 project_id（UUID）。.strict() 在运行时拒绝
+ * 任何额外字段，尤其拒绝 ownerActorId / actor_id / actorCode / connectionId /
+ * permissionProfile / status 等身份、归属、连接或筛选字段——身份只由该连接的服务端
+ * 认证上下文决定，状态筛选不在本批能力范围内，防止通过伪造字段探测他人任务。
+ */
+const taskListMyTasksInputSchema = z
+  .object({
+    project_id: uuidField('项目 UUID'),
   })
   .strict();
 
@@ -564,6 +577,55 @@ export function buildMcpServer(deps: McpServerDeps): McpServer {
         }
         if (err instanceof AiTaskIdempotencyConflictError) {
           return toolErrorResult('任务已存在且语义冲突，不覆盖旧任务');
+        }
+        return unexpectedError(deps, err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'task_list_my_tasks',
+    {
+      title: 'List my own AI task tree',
+      description:
+        '只读：返回当前身份在指定项目中的完整个人 AI 任务树（AiTaskNode 递归结构，' +
+        '每层按 position 升序、相同 position 按 id 升序稳定排序）。项目不存在时明确报错；' +
+        '当前身份无任务时返回空数组（正常结果）。身份只能由服务端 Bearer 凭据决定，' +
+        '不接受任何身份字段；响应不回显 session / connection / permissionProfile / 凭据' +
+        '等任何身份信息。匿名连接或非 resident_ai 身份会被拒绝。绝不修改任何任务或正式进度。',
+      inputSchema: taskListMyTasksInputSchema,
+    },
+    async ({ project_id }) => {
+      const authContext = deps.authContext;
+      // 匿名只读上下文 fail-closed：工具可见，但任何读取都拒绝，不返回任务数据。
+      if (authContext === null) {
+        deps.logger.error(
+          { errType: 'McpAuthContextMissing' },
+          'task_list_my_tasks denied: no bound identity',
+        );
+        return toolErrorResult('当前连接未授权读操作');
+      }
+      if (!canListMyTasks(authContext)) {
+        deps.logger.error(
+          { errType: 'McpAiTaskReadPermissionDenied' },
+          'task_list_my_tasks denied: policy rejected',
+        );
+        return toolErrorResult('当前身份无权读取任务树');
+      }
+      try {
+        const tree = await deps.aiTaskService.listMyTaskTree(authContext, project_id);
+        return textContent(tree);
+      } catch (err) {
+        if (err instanceof ProjectNotFoundError) {
+          return toolErrorResult('项目不存在');
+        }
+        if (err instanceof AiTaskTreeCorruptError) {
+          // 树完整性失败：细节只进服务端日志，响应固定脱敏文本，不泄露任务 / 项目 / Actor ID。
+          deps.logger.error(
+            { errType: 'AiTaskTreeCorruptError' },
+            'task_list_my_tasks tree integrity failure',
+          );
+          return toolErrorResult('任务树数据不一致');
         }
         return unexpectedError(deps, err);
       }

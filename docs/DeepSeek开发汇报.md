@@ -2855,8 +2855,6 @@ PUT 使用严格白名单请求体：
 
 等待小喵审核。
 
----
-
 ## 小喵审核结果 #12 · 需要小返修 · 2026-08-10
 
 ### 审核结论
@@ -6165,8 +6163,6 @@ App API 严格输入、服务层 `pending -> needs_changes`、同语义重试、
 
 等待小喵审核。
 
----
-
 ## 小喵审核结果 #32 · 需要返修契约完整性与 trim 长度语义 · 2026-08-12
 
 ### 审核结论
@@ -6304,5 +6300,274 @@ App API 严格输入、服务层 `pending -> needs_changes`、同语义重试、
 
 - 已将 `- [ ] 创建 AI 任务` 更新为 `- [x] 创建 AI 任务`。
 - 已将 `- [ ] task_create` 更新为 `- [x] task_create`。
+
+本批验收通过，可以提交并推送到 `develop`；下一批任务由小喵在推送后单独追加。
+
+---
+
+## 小喵任务 #33 · 查询自己的 AI 任务树 + MCP `task_list_my_tasks` · 2026-08-12
+
+### 本批候选计划项
+
+- `- [ ] 查询自己的任务`
+- `- [ ] task_list_my_tasks`
+
+这两项作为同一条只读纵向能力完成：复用检查点 #32 已验收的 AITask、仓储与认证身份，返回当前 Actor 在指定项目中的完整个人任务树。不要实现修改、完成、备注、进度或查看其他 AI。
+
+### 必须完成
+
+1. 扩展契约，定义严格的递归 `AiTaskNode` / 任务树响应：每个节点包含完整 AiTask 字段与 `children`；根节点和每层 children 均按 `position ASC`、相同 position 按 `id ASC` 稳定排序。响应字段全部 required，数组项 `additionalProperties:false`。
+2. 在 `AiTaskService` 增加 `listMyTaskTree(authContext, projectId)`：
+   - 项目不存在返回受控错误；
+   - owner 只取服务端 `authContext.actorId`，调用方不能指定或切换 Actor；
+   - 只读取当前项目、当前 owner 的任务，不返回其他 Actor 或其他项目数据；合法无任务返回空数组；
+   - 返回深拷贝，调用方修改结果不能污染仓储。
+3. 增加树完整性防线：当前 owner 范围内若出现父引用不存在、自引用、任意长度循环、父子跨项目 / 跨 owner，或最终访问节点数不等于输入节点数，必须失败，不能把孤儿提升为根、不能静默丢节点。对外使用固定脱敏错误，不泄露任务、项目或 Actor ID；细节只进服务端日志。
+4. 注册 MCP 只读工具 `task_list_my_tasks`：
+   - 输入严格只允许 `{ project_id: UUID }`，拒绝 `ownerActorId`、`actor_id`、`actorCode`、`connectionId`、状态筛选及其他未知字段；
+   - 必须有服务端绑定身份；仅 `permissionProfile=default` 且 `resident_ai` 可读取长期个人任务树，匿名、temporary_ai、reviewer、未知 profile 均 fail-closed；授权策略集中在独立 policy，不把字符串散落在回调中；
+   - 返回 `{ tasks: AiTaskNode[] }`；不能回显 session、connection、permission profile、凭据或额外身份信息。
+5. 身份隐私：Actor B 查询同项目只能得到 B 自己的树 / 空树，不能通过错误区别推测 Actor A 的任务是否存在；同一 Actor 的不同连接应读取同一任务树。
+6. 测试至少覆盖：空树、多层树、每层稳定排序、深拷贝、跨项目与跨 Actor 隔离、同 Actor 多连接一致、严格拒绝伪造 owner 字段、四类授权拒绝、未知项目、孤儿 / 自引用 / 多节点循环 / 跨范围脏数据受控失败且响应不泄露 ID、完整响应 Schema，以及真实 Streamable HTTP 冒烟。
+
+### 边界与验收
+
+- 不实现 `task_update`、`task_complete`、备注、进度或查看其他 AI；不新增可指定 owner 的 App API，不实现数据库、AuditLog 或前端。
+- 运行契约 / 仓储 / 服务 / MCP 专项、根目录 typecheck、全量测试、真实 HTTP 冒烟、NUL / BOM 扫描与 `git diff --check`。
+- 完成后在本文件末尾追加检查点并暂停；不修改计划复选框，不执行 Git / GitHub / VPS 操作，不开始下一批，不读取或修改 `.claude/` 与 `ui素材mingwu/`。
+
+等待 DS 完成检查点后由小喵审核。
+
+---
+
+## 检查点 #33 · 查询自己的 AI 任务树 + MCP `task_list_my_tasks` · 2026-08-12
+
+### 本批次目标
+
+候选完成计划项：
+
+- `- [ ] 查询自己的任务`
+- `- [ ] task_list_my_tasks`
+
+这两项作为同一条只读纵向能力完成：复用检查点 #32 已验收的 AiTask 契约、领域仓储、内存实现与认证身份，新增 `AiTaskService.listMyTaskTree(authContext, projectId)` 与 MCP 只读工具 `task_list_my_tasks`，返回当前 Actor 在指定项目中的完整个人任务树（AiTaskNode 递归结构）。不实现修改、完成、备注、进度或查看其他 AI。
+
+### 实际完成内容
+
+- `packages/contracts/src/ai-task.ts`：新增 `AiTaskNode extends AiTask`（完整 AiTask 字段 + `children`）与 `ListMyTaskTreeResult` 接口；`aiTaskTreeResponseJsonSchema` 完整响应契约——`required: ['tasks']`、`additionalProperties:false`，`$defs.aiTaskNode` 的 required 覆盖完整 AiTask 的 18 个字段 + children 共 19 个，children 数组项通过 `$ref: '#/$defs/aiTaskNode'` 自引用实现任意深度递归。
+- 领域层 `apps/server/src/domain/ai-task/errors.ts`：新增 `AiTaskTreeCorruptError`（固定脱敏消息，不含任何任务 / 项目 / Actor ID，细节只进服务端日志）。
+- 应用层 `apps/server/src/application/ai-task/ai-task-service.ts`：新增 `listMyTaskTree(authContext, projectId)`——防守性身份校验 → 项目存在校验（ProjectNotFoundError）→ `listByOwner(projectId, actorId)` 只读当前作用域 → `buildAiTaskTree` 纯函数组装树（深拷贝，节点与 notes 全部新建）。树完整性防线：父引用不存在 / 自引用 / 任意长度循环 / 跨项目跨 owner 父引用 / 深度超 100 / 访问节点数 ≠ 输入节点数 → `AiTaskTreeCorruptError`，绝不把孤儿提升为根、绝不静默丢节点。每层按 position ASC、相同 position 按 id ASC 稳定排序（导出 `sortAiTaskSiblingLevel` 纯函数，可对不可达的 id 兜底分支做确定性单测）。
+- MCP 层 `apps/server/src/mcp/ai-task-policy.ts`：新增 `canListMyTasks` fail-closed 只读授权策略（与 `canCreateAiTask` 同一独立 policy 文件，不把权限字符串散落在回调）。
+- `apps/server/src/mcp/mcp-server.ts`：注册只读工具 `task_list_my_tasks`。`taskListMyTasksInputSchema` 为 Zod `.strict()` 白名单，只允许 `project_id: UUID`，拒绝 ownerActorId / actor_id / actorCode / connectionId / permissionProfile / status 等身份、连接或筛选字段。返回 `{ tasks: AiTaskNode[] }`；错误映射：项目不存在 → `项目不存在`、树不一致 → `任务树数据不一致`（日志只记 `AiTaskTreeCorruptError` 分类）、匿名 → `当前连接未授权读操作`、策略拒绝 → `当前身份无权读取任务树`。
+
+### 新增、修改和删除的文件清单
+
+新增：
+
+- `apps/server/test/mcp-task-list-my-tasks.test.ts`（8 个测试）
+
+修改：
+
+- `packages/contracts/src/ai-task.ts`（AiTaskNode / ListMyTaskTreeResult / aiTaskTreeResponseJsonSchema）
+- `apps/server/src/domain/ai-task/errors.ts`（AiTaskTreeCorruptError）
+- `apps/server/src/application/ai-task/ai-task-service.ts`（listMyTaskTree + buildAiTaskTree + sortAiTaskSiblingLevel + AI_TASK_TREE_MAX_DEPTH）
+- `apps/server/src/mcp/ai-task-policy.ts`（canListMyTasks）
+- `apps/server/src/mcp/mcp-server.ts`（taskListMyTasksInputSchema + 注册 task_list_my_tasks）
+- `apps/server/test/ai-task-service.test.ts`（新增 listMyTaskTree describe：13 个测试）
+- `apps/server/test/ai-task-contract.test.ts`（新增 aiTaskTreeResponseJsonSchema describe：7 个测试）
+- `apps/server/test/mcp-http-smoke.test.ts`（工具清单加 task_list_my_tasks、计数 9→10）
+- `apps/server/test/mcp-http-smoke-auth.test.ts`（工具清单、计数 9→10、新增真实 HTTP task_list_my_tasks 冒烟）
+- `apps/server/test/mcp-protocol.test.ts`（工具清单、READ_ONLY_TOOLS 6→7、fieldByTool 加 task_list_my_tasks）
+- `apps/server/test/mcp-http.test.ts`（工具清单、READ_ONLY_TOOLS 6→7）
+
+删除：无。
+
+### 关键设计决定及其依据
+
+- 递归契约用 `$defs` + `$ref: '#/$defs/aiTaskNode'`：先用脚本实证 AJV v8 对递归 schema 的行为——`$ref: '#'` 在独立编译时正确，但嵌入响应 schema 后指向错误根节点；`$defs` 自包含且可用既有 `compile({...schema})` 模式独立编译，是唯一稳妥写法。`required` 覆盖 19 个字段、每个节点 `additionalProperties:false`，身份 / session / 凭据字段在任意层级都被拒绝。
+- 树完整性防线独立于创建流程：正常创建在服务层保证同项目同 owner 的父引用，但只读侧仍对仓储内可能出现的脏数据 fail-closed（父引用不在当前作用域 / 自引用 / 任意长度循环 / 跨项目跨 owner / 访问节点数不符），失败用固定脱敏 `AiTaskTreeCorruptError`，细节只进日志，不泄露任何 ID。
+- 深拷贝：仓储 `listByOwner` 已 structuredClone，`buildAiTaskTree` 又为每个节点新建对象与 notes 数组，调用方修改返回树不污染仓储（测试验证）。
+- 身份隐私：Actor B 查询同项目只返回自己的树 / 空树（成功结果而非错误），错误通道（项目不存在）对所有身份一致，无法通过错误区别推测 Actor A 的任务是否存在；同 Actor 的多条连接读取同一棵任务树。
+- 只读授权与写授权同样 fail-closed 且集中在独立 policy：仅 default profile + resident_ai 可读长期个人任务树；temporary_ai / reviewer / 未知 profile / 匿名一律拒绝，返回稳定脱敏文案。
+- 输入严格白名单只允许 `project_id`，状态筛选、身份字段与连接字段都在 `.strict()` 层拒绝——防止通过伪造字段切换 / 探测他人任务。
+- 排序是服务层保证（JSON Schema 无法表达排序），契约只约束结构与类型；"相同 position 按 id"兜底分支在正常数据模型下不可达，故把 `sortAiTaskSiblingLevel` 导出为纯函数做确定性单测。
+
+### 执行过的测试或检查、命令与真实结果
+
+- 专项测试：`npx vitest run test/ai-task-repository.test.ts test/ai-task-service.test.ts test/mcp-task-create.test.ts test/mcp-task-list-my-tasks.test.ts test/ai-task-contract.test.ts test/mcp-http-smoke.test.ts test/mcp-http-smoke-auth.test.ts` → **7 个文件、84/84 通过**（仓储 10 + 服务 31 + MCP 写 9 + MCP 读 8 + 契约 21 + 匿名冒烟 1 + 认证冒烟 4）。
+- 根目录 typecheck：`npm run typecheck` → **contracts 与 server 均通过**（`tsc --noEmit`，无错误）。
+- 全量测试：`npx vitest run` → **56 个测试文件、910/910 通过**（较上一批 881 增加 29：服务 +13、契约 +7、MCP 读 +8、认证冒烟 +1）。
+- 真实 Streamable HTTP 冒烟已纳入全量：mcp-http-smoke-auth.test.ts 新增真实 socket 的 task_create 建树 → task_list_my_tasks 读回归属与嵌套结构的完整往返；mcp-http-smoke.test.ts 与 mcp-http-auth 的工具计数 9→10。
+- NUL / BOM 扫描：本次新增与修改文件 **NUL=0、BOM=0**。
+- `git diff --check`：通过，仅有 Windows LF→CRLF 提示，无空白错误。
+
+### 未完成内容、已知问题和风险
+
+- 边界外未实现（按小喵任务 #33 边界）：`task_update`、`task_complete`、备注、进度、查看其他 AI、可指定 owner 的 App API、数据库 / AuditLog / 前端。
+- `AiTaskTreeCorruptError` 只在只读查询路径可达（正常创建流程在服务层已保证同项目同 owner 的父引用）；脏数据需要绕过服务层直接注入仓储才会触发，属于纵深防线。
+- 排序的 id 兜底分支在正常数据模型下不可达，通过导出纯函数单测覆盖；未来若允许显式 position 或改排序规则，需同步更新该纯函数测试。
+- `McpServerDeps` 未新增依赖（复用 aiTaskService），但工具清单与计数在 4 个既有测试文件中同步更新，全量回归通过，风险低。
+
+### 是否涉及数据库、身份权限、密钥、外部服务或破坏性变化
+
+- 不涉及数据库 migration（仍为内存仓储，无结构变化）。
+- 涉及身份认证 / 权限逻辑：新增只读授权策略（fail-closed，集中在 ai-task-policy.ts 独立函数），未读取、输出或提交任何真实 Key / Token / 密码 / 凭据。
+- 不涉及 VPS / Cloudflare / GitHub 等外部服务操作；无删除文件等破坏性变更；`.claude/` 与 `ui素材mingwu/` 未读取未修改。
+
+### 建议下一批任务
+
+- 按小喵安排推进后续计划项（如 AI 任务更新 / 完成 / 备注 / 进度，需保持服务端身份边界、幂等与乐观并发）。
+- 本批两项均为“候选完成”，不作为任何复选框打勾依据。
+
+等待小喵审核。
+
+---
+
+## 小喵审核结果 #33 · 需要返修读侧范围与响应投影边界 · 2026-08-12
+
+### 审核结论
+
+`task_list_my_tasks` 的认证授权、严格输入、多连接身份一致、递归排序、孤儿 / 自引用 / 循环检测和正常数据隔离方向均正确；小喵独立运行根目录 typecheck 与全量测试，结果为 **56 个测试文件、910/910 通过**。但现有测试没有覆盖“仓储返回值自身越界或夹带运行时额外属性”的反例，目前仍不能勾选 `查询自己的任务` 与 `task_list_my_tasks`。
+
+### 必须修复 1：服务层没有复核仓储返回节点自身的项目与 owner
+
+`listMyTaskTree` 调用 `repository.listByOwner(projectId, actorId)` 后直接把结果交给 `buildAiTaskTree`。`buildAiTaskTree` 只检查父引用是否落在输入集合中，没有逐节点确认：
+
+- `task.projectId === projectId`
+- `task.ownerActorId === authContext.actorId`
+
+因此，只要未来 PostgreSQL adapter 查询条件回归、映射错误，或测试替身返回一条“无父节点但属于其他项目 / 其他 Actor”的任务，该任务会被当作合法根节点返回。现有“跨项目父引用”测试只能证明父节点被过滤后会形成孤儿，不能证明返回集合自身的范围被服务层 fail-closed 复核。
+
+返修要求：
+
+1. 在应用服务的读侧信任边界逐节点校验 projectId 与 ownerActorId；发现任何不符统一抛 `AiTaskTreeCorruptError`，不得返回部分树。
+2. 新增两个使用受控假仓储 / 可注入返回值的服务测试：单个无父节点的 `projectId` 越界、单个无父节点的 `ownerActorId` 越界，二者都必须失败。
+3. MCP 层继续映射为固定脱敏错误，响应与日志不得出现错误任务、项目或 Actor ID。
+
+### 必须修复 2：对象展开会把运行时额外字段直接带入 MCP 响应
+
+节点当前通过 `{ ...task, notes: [...task.notes], children: [] }` 构造。TypeScript 类型与 `aiTaskTreeResponseJsonSchema.additionalProperties:false` 都不会在运行时自动删除额外属性，而 MCP 回调也没有用该 Schema 校验 / 投影 `textContent(tree)`。因此仓储对象若夹带 `connectionId`、`permissionProfile`、`token` 或任意其他字段，对象展开会把它们原样序列化给客户端；这与“不能回显 session / connection / permission profile / 凭据或额外身份信息”冲突。
+
+返修要求：
+
+1. 不要使用对象展开作为外发节点投影。显式构造 `AiTaskNode` 白名单，只复制 AiTask 的 18 个既定字段并新建 notes / children；或在边界执行等价的严格运行时投影。不能只补 TypeScript 类型或只新增一个未执行的 Schema。
+2. 新增服务层反例：假仓储任务在运行时夹带 `connectionId`、`permissionProfile`、`token` 和普通未知字段，返回树中这些字段必须全部不存在。
+3. 新增 MCP 协议反例，确认最终文本响应同样不含上述字段及测试秘密值；正常完整 18 字段和递归 children 仍保留。
+
+### 复验要求与边界
+
+- 只返修上述两个同源的读侧信任边界，不开始 `task_update`、完成、备注或下一批。
+- 重新运行 AiTask 契约 / 服务 / MCP 专项、根目录 typecheck、全量测试、真实 Streamable HTTP 冒烟、NUL / BOM 扫描与 `git diff --check`，把真实数字追加到本文件末尾。
+- 不修改计划复选框，不执行 Git / GitHub / VPS 操作，不读取或修改 `.claude/` 与 `ui素材mingwu/`。
+
+等待 DS 返修后由小喵复验。
+
+---
+
+## 检查点 #33 返修 · 读侧范围复核 + 响应白名单投影 · 2026-08-12
+
+### 本批次目标
+
+按「小喵审核结果 #33」返修 `task_list_my_tasks` 读取链路上两个同源的隐私边界问题，完成后仍保持暂停，等待小喵复验：
+
+1. 服务层在读取信任边界逐节点复核仓储返回节点自身的 `projectId` / `ownerActorId` 归属，任何不符统一抛 `AiTaskTreeCorruptError`（固定脱敏），绝不返回部分树；
+2. 外发节点不再使用对象展开，改为显式 `AiTaskNode` 白名单投影，只复制 AiTask 契约的 18 个既定字段并新建 notes / children，仓储夹带的运行时额外字段（connectionId / permissionProfile / token / 任意未知字段）一律丢弃，不进 MCP 响应。
+
+### 候选完成的计划项目原文（仅候选，不打勾）
+
+- `docs/project-plan-v0.1.md:184` — `- [ ] 查询自己的任务`
+- `docs/project-plan-v0.1.md:225` — `- [ ] task_list_my_tasks`
+
+### 实际完成内容
+
+**修复 1 — 读侧逐节点范围复核（`apps/server/src/application/ai-task/ai-task-service.ts`）**
+
+- `buildAiTaskTree` 签名从 `buildAiTaskTree(tasks)` 改为 `buildAiTaskTree(tasks, projectId, ownerActorId)`，把"当前作用域"作为读侧信任边界基准显式传入；
+- 在组装树之前对仓储返回的每个任务做逐节点复核：`task.projectId !== projectId || task.ownerActorId !== ownerActorId` 任一命中即抛 `AiTaskTreeCorruptError`（固定脱敏消息，不含任务 / 项目 / Actor ID），绝不返回部分树；
+- `listMyTaskTree` 在 `repository.listByOwner(projectId, authContext.actorId)` 之后，把 `projectId` 与 `authContext.actorId` 传给 `buildAiTaskTree`；
+- 同步更新 `listMyTaskTree` 与 `buildAiTaskTree` 的文档注释，明确信任边界与外发投影规则。
+
+**修复 2 — 显式白名单投影（同文件）**
+
+- 新增模块级纯函数 `toTaskNode(task: AiTask): AiTaskNode`：逐个字段复制 AiTask 契约的 18 个既定字段，`notes: [...task.notes]` 与 `children: []` 均为新建引用；
+- 节点构造从 `{ ...task, notes: [...task.notes], children: [] }` 改为 `nodes.set(task.id, toTaskNode(task))`。对象展开被彻底移除，仓储夹带的任何运行时额外字段都在投影时被丢弃；
+- 未改动契约 schema（`aiTaskTreeResponseJsonSchema.additionalProperties: false` 保持不变），修复发生在服务层边界，不依赖调用方校验。
+
+**新增服务层反例（`apps/server/test/ai-task-service.test.ts`，+3 个测试）**
+
+- 新增受控假仓储 `stubAiTaskRepository`（只替换需要的接口，其余按安全默认实现），用于注入正常创建流程无法产生的越界 / 夹带数据；
+- 单条无父节点任务 `projectId` 越界（另一项目）→ `listMyTaskTree` 必须抛 `AiTaskTreeCorruptError`；
+- 单条无父节点任务 `ownerActorId` 越界（另一 owner，projectId 在当前项目内）→ 必须抛 `AiTaskTreeCorruptError`；
+- 仓储任务夹带 `connectionId` / `permissionProfile` / `token` / 未知字段 `bogus` → 返回树中这些字段全部不存在，正常完整 18 字段与递归 children 保留。
+
+**新增 MCP 协议反例（`apps/server/test/mcp-task-list-my-tasks.test.ts`，+1 个测试）**
+
+- 真实 `AiTaskService` + 受控假仓储（`listByOwner` 返回夹带 connectionId / permissionProfile / token / bogus 的任务）走完整 MCP 链路；
+- 断言最终 `textContent(tree)` 文本响应绝不含这些字段及测试秘密值；解析后正常完整 18 字段、notes 与递归 children 仍保留。
+
+### 新增、修改和删除的文件清单
+
+- 修改：`apps/server/src/application/ai-task/ai-task-service.ts`（读侧范围复核 + `toTaskNode` 白名单投影 + 注释）
+- 修改：`apps/server/test/ai-task-service.test.ts`（+`stubAiTaskRepository` 辅助，+3 个读侧反例测试）
+- 修改：`apps/server/test/mcp-task-list-my-tasks.test.ts`（新增 MCP 协议反例测试；该文件为批次 #33 新增的未提交文件，仍处于待审核状态）
+- 未新增、未删除任何其他文件；未触碰 `.claude/` 与 `ui素材mingwu/`。
+
+### 关键设计决定及其依据
+
+1. **范围复核放在 `buildAiTaskTree` 边界而非仅依赖仓储过滤**：仓储 `listByOwner` 的过滤契约可以被未来的 PostgreSQL adapter 回归、映射错误或测试替身破坏，服务层必须在组装响应前做 fail-closed 复核，把"越界数据"与"树结构损坏"统一按 `AiTaskTreeCorruptError` 处理，避免出现"仓储返回了不属于当前作用域的合法根节点"这种静默泄露。
+2. **投影在服务层做，不依赖 MCP 层 Schema 校验**：MCP 回调直接序列化服务返回值，没有对 `textContent` 执行 JSON Schema 校验；`additionalProperties: false` 与 TS 类型都不会在运行时删除额外属性。因此白名单投影必须发生在服务层的唯一外发边界，对象展开被彻底移除。
+3. **`toTaskNode` 显式列出 18 个字段**：显式字段列表在编译期锁定契约字段集合，未来 AiTask 增加字段时若忘记同步投影，会先被类型系统提示；同时 `notes` / `children` 新建引用继续保持深拷贝语义。
+
+### 执行过的测试或检查、命令与真实结果
+
+- AiTask 专项（契约 / 服务 / MCP）：`npx vitest run test/ai-task-service.test.ts test/ai-task-contract.test.ts test/mcp-task-list-my-tasks.test.ts` → **3 个文件、64/64 通过**（服务 34、契约 21、MCP 9）。
+- 根目录 typecheck：`npm run typecheck` → **contracts 与 server 均 tsc --noEmit 通过，无错误**。
+- 全量测试：`npx vitest run`（apps/server）→ **56 个测试文件、914/914 通过**（较上一轮 910 净增 4：服务层 +3、MCP 协议 +1）。
+- 真实 Streamable HTTP 冒烟 + 协议：`npx vitest run test/mcp-http-smoke.test.ts test/mcp-http-smoke-auth.test.ts test/mcp-http.test.ts test/mcp-protocol.test.ts` → **4 个文件、44/44 通过**，含真实 127.0.0.1 临时端口 socket 上 `task_create` → `task_list_my_tasks` 读回嵌套树 + 无身份信息回显。
+- NUL / BOM 扫描：`grep -rPl "\x00"` 与 BOM 扫描 → **干净，无命中**。
+- `git diff --check` → **exit 0**（仅有 LF→CRLF 换行提示，无空白错误）。
+
+### 未完成内容、已知问题和风险
+
+- 本批次只返修读取链路的两个信任边界，未开始 `task_update`、完成、备注或下一批计划项。
+- `task_list_my_tasks` 与 `查询自己的任务` 仍为"候选完成"，等待小喵复验通过后才由小喵决定是否打勾。
+- 仓库尚未提交 / 推送，全部变更（含批次 #33 与本返修）都在工作区待审核。
+
+### 是否涉及数据库、身份权限、密钥、外部服务或破坏性变化
+
+- 不涉及数据库结构 / Migration。
+- 涉及身份认证 / 权限逻辑：本次为读侧信任边界的加固（逐节点归属复核 + 外发字段白名单），未引入新认证流程，未读取、输出或提交任何真实 Key / Token / 密码 / 凭据。
+- 不涉及 VPS / Cloudflare / GitHub 等外部服务操作；无删除文件等破坏性变更；`.claude/` 与 `ui素材mingwu/` 未读取未修改。
+
+### 建议下一批任务
+
+- 按小喵安排推进后续计划项（如 `task_update` / 完成 / 备注，需保持服务端身份边界、幂等与乐观并发）。
+
+等待小喵审核。
+
+---
+
+## 小喵复验结果 #33 · 通过 · 2026-08-12
+
+### 验收结论
+
+- `查询自己的任务` 与 MCP `task_list_my_tasks` 已通过复验：只读取服务端认证身份在指定项目中的个人 AiTask 树，调用方无法指定 owner，其他项目与其他 Actor 数据不会进入结果。
+- 递归节点完整保留 AiTask 的 18 个契约字段与 `children`，根节点和每层子节点按 position、id 稳定排序；空树、多层树、深拷贝、同 Actor 多连接一致均符合要求。
+- 匿名、temporary_ai、reviewer 与未知权限配置均 fail-closed；输入严格拒绝 owner、身份、连接、权限与筛选字段，错误响应保持受控脱敏。
+- 首轮发现的两项读侧隐私缺口已修复：服务现在逐节点复核 projectId 与 ownerActorId；外发节点采用显式 18 字段白名单投影，仓储夹带的连接、权限、凭据和未知字段不会进入服务或 MCP 响应。
+
+### 小喵独立复验
+
+- AiTask 服务、契约、MCP 与真实 Streamable HTTP 专项：**4 个测试文件、68/68 通过**。
+- 根目录 typecheck：contracts 与 server 均通过。
+- 全量测试：**56 个测试文件、914/914 通过**。
+- 越界根任务反例：projectId 越界和 ownerActorId 越界均稳定抛出受控树损坏错误，不返回部分数据。
+- 运行时额外字段反例：`connectionId`、`permissionProfile`、`token` 与未知字段在服务结果和最终 MCP 文本响应中均不存在，正常 18 字段与 children 保持完整。
+- 本批源码、测试、契约与文档扫描：**NUL=0、BOM=0**。
+- `git diff --check`：通过，仅有 Windows LF→CRLF 提示，无空白错误。
+
+### 计划更新
+
+- 已将 `- [ ] 查询自己的任务` 更新为 `- [x] 查询自己的任务`。
+- 已将 `- [ ] task_list_my_tasks` 更新为 `- [x] task_list_my_tasks`。
 
 本批验收通过，可以提交并推送到 `develop`；下一批任务由小喵在推送后单独追加。

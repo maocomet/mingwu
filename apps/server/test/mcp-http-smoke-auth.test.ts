@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import type { AiTask, StudyReport } from '@mingwu/contracts';
+import type { AiTask, AiTaskNode, StudyReport } from '@mingwu/contracts';
 import { buildApp } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
 import { AUTH_FIXTURES, makeAuthenticator } from './mcp-auth-fixtures.js';
@@ -117,6 +117,7 @@ describe('MCP Streamable HTTP real-HTTP auth smoke (127.0.0.1, ephemeral port)',
         'study_get_current_session',
         'study_get_session',
         'task_create',
+        'task_list_my_tasks',
       ]);
 
       // 经真实 socket 调用只读工具，身份由服务端凭据解析（工具不接收身份字段）。
@@ -172,7 +173,7 @@ describe('MCP Streamable HTTP real-HTTP auth smoke (127.0.0.1, ephemeral port)',
       ).toBe(1);
 
       const bList = await b.client.listTools();
-      expect(bList.tools).toHaveLength(9);
+      expect(bList.tools).toHaveLength(10);
 
       // B 也通过 DELETE 显式清理（client.close 不保证发送 DELETE）。
       await b.transport.terminateSession();
@@ -269,6 +270,69 @@ describe('MCP Streamable HTTP real-HTTP auth smoke (127.0.0.1, ephemeral port)',
       expect(task.ownerActorId).toBe(AUTH_FIXTURES.actorA.actorId);
       expect(task.status).toBe('not_started');
       expect(task.progressPercent).toBe(0);
+
+      await a.transport.terminateSession();
+      await a.client.close();
+      expect(
+        (app as unknown as { mcpSessions: { size: number } }).mcpSessions.size,
+      ).toBe(0);
+    } finally {
+      await close();
+    }
+  });
+
+  it('real socket: task_create then task_list_my_tasks reads back the bound actor personal tree', async () => {
+    const { app, baseUrl, close } = await startServer();
+    try {
+      const project = await fetch(`${baseUrl}/api/v1/projects`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ id: uuid(), name: 'AI 任务树冒烟项目' }),
+      });
+      expect(project.status).toBe(201);
+      const projectId = ((await project.json()) as { id: string }).id;
+
+      // 经真实 MCP socket + Bearer（connection1 → actorA，resident_ai/default）创建根与子任务。
+      const a = await connectClient(`${baseUrl}/mcp`, AUTH_FIXTURES.connection1.token);
+      const rootId = uuid();
+      const rootCreate = await a.client.callTool({
+        name: 'task_create',
+        arguments: { task_id: rootId, project_id: projectId, title: '冒烟根任务' },
+      });
+      expect(rootCreate.isError).not.toBe(true);
+      const childId = uuid();
+      const childCreate = await a.client.callTool({
+        name: 'task_create',
+        arguments: {
+          task_id: childId,
+          project_id: projectId,
+          parent_task_id: rootId,
+          title: '冒烟子任务',
+        },
+      });
+      expect(childCreate.isError).not.toBe(true);
+
+      // task_list_my_tasks 读回同一棵树：归属只来自服务端 Bearer 解析的 actorA。
+      const list = await a.client.callTool({
+        name: 'task_list_my_tasks',
+        arguments: { project_id: projectId },
+      });
+      expect(list.isError).not.toBe(true);
+      const tree = JSON.parse(toolText(list)) as { tasks: AiTaskNode[] };
+      expect(tree.tasks).toHaveLength(1);
+      const root = tree.tasks[0]!;
+      expect(root.id).toBe(rootId);
+      expect(root.ownerActorId).toBe(AUTH_FIXTURES.actorA.actorId);
+      expect(root.title).toBe('冒烟根任务');
+      expect(root.children).toHaveLength(1);
+      expect(root.children[0]!.id).toBe(childId);
+      expect(root.children[0]!.ownerActorId).toBe(AUTH_FIXTURES.actorA.actorId);
+      expect(root.children[0]!.parentTaskId).toBe(rootId);
+      // 响应不回显身份 / session / 凭据。
+      const serialized = toolText(list);
+      expect(serialized).not.toContain(AUTH_FIXTURES.connection1.token);
+      expect(serialized).not.toContain(AUTH_FIXTURES.connection1.connectionId);
+      expect(serialized).not.toContain('permissionProfile');
 
       await a.transport.terminateSession();
       await a.client.close();

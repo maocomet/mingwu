@@ -1,7 +1,9 @@
 import type {
   AiTask,
+  AiTaskNode,
   AuthenticatedAiActorContext,
   CreateAiTaskInput,
+  ListMyTaskTreeResult,
 } from '@mingwu/contracts';
 import {
   AI_ACTOR_CODE_MAX_LENGTH,
@@ -24,6 +26,7 @@ import {
   AiTaskRequesterInvalidError,
   AiTaskScopeConflictError,
   AiTaskTitleInvalidError,
+  AiTaskTreeCorruptError,
 } from '../../domain/ai-task/errors.js';
 import type { AiTaskRepository } from '../../domain/ai-task/repository.js';
 
@@ -34,6 +37,12 @@ const UUID_REGEX = new RegExp(UUID_PATTERN);
  * parentTaskId）下单调递增、必然收敛，只要并发创建数低于上限即全部成功。
  */
 const AUTO_POSITION_RETRY_LIMIT = 50;
+
+/**
+ * 任务树最大深度防线。超过即视为数据不一致：防病态深层数据导致遍历过深 / 资源耗尽。
+ * 正常树由 position 唯一性约束自然有限，此上限只作为读侧的兜底防线。
+ */
+const AI_TASK_TREE_MAX_DEPTH = 100;
 
 /** 幂等语义：同 id + 同 project + 同 owner + 同 projectTaskId + 同 parentTaskId +
  * 同规范化标题 / 描述视为同一任务。position 由服务端自动分配，不参与比较。 */
@@ -204,6 +213,37 @@ export class AiTaskService {
     return this.repository.findById(id);
   }
 
+  /**
+   * 以服务端认证身份返回当前项目 + 当前 owner 的完整个人任务树（只读）。
+   * - 受信上下文非法 → AiTaskRequesterInvalidError（防守性校验，不读取）；
+   * - 项目不存在 → ProjectNotFoundError（受控错误）；
+   * - owner 只取服务端 authContext.actorId，调用方不能指定 / 切换 Actor；只读取当前
+   *   项目、当前 owner 的任务，绝不返回其他 Actor 或其他项目的数据；
+   * - 合法无任务 → `{ tasks: [] }`（正常结果，不是错误）；
+   * - 返回深拷贝（节点与 notes 均新建），调用方修改结果不污染仓储；
+   * - 树完整性防线：仓储返回的任何任务归属（projectId / ownerActorId）越界、父引用
+   *   不存在 / 自引用 / 任意长度循环 / 父子跨项目跨 owner / 访问节点数不等于输入节点
+   *   数 → AiTaskTreeCorruptError（固定脱敏，不含 ID，细节只进服务端日志），绝不返回
+   *   部分树；
+   * - 外发节点用显式白名单投影（只复制契约字段 + 新建 notes / children），仓储对象夹带
+   *   的任何运行时额外字段（connectionId / 凭据等）都会被丢弃，不进入响应。
+   */
+  async listMyTaskTree(
+    authContext: AuthenticatedAiActorContext,
+    projectId: string,
+  ): Promise<ListMyTaskTreeResult> {
+    this.assertValidRequesterContext(authContext);
+    const project = await this.projectRepository.findById(projectId);
+    if (!project) {
+      throw new ProjectNotFoundError(projectId);
+    }
+    const tasks = await this.repository.listByOwner(projectId, authContext.actorId);
+    // 读侧信任边界：仓储返回的任务对象可能来自不可信存储，逐节点复核其归属
+    // （projectId / ownerActorId）是否真的属于当前作用域，任何不符统一抛
+    // AiTaskTreeCorruptError（固定脱敏），绝不返回部分树。
+    return { tasks: buildAiTaskTree(tasks, projectId, authContext.actorId) };
+  }
+
   private async nextSiblingPosition(
     projectId: string,
     ownerActorId: string,
@@ -273,4 +313,137 @@ export class AiTaskService {
       throw new AiTaskRequesterInvalidError();
     }
   }
+}
+
+/**
+ * 对同一父级的一层兄弟节点做稳定排序：position ASC，相同 position 按 id ASC。
+ * 导出为纯函数以便对"相同 position 按 id"兜底分支做确定性单测——正常数据模型下
+ * position 在同一父级唯一，该分支只在异常 / 未来数据中出现，但契约要求仍然明确。
+ */
+export function sortAiTaskSiblingLevel(level: AiTaskNode[]): AiTaskNode[] {
+  return level.sort(
+    (a, b) => a.position - b.position || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  );
+}
+
+/**
+ * 显式白名单投影：只复制 AiTask 契约声明的 18 个既定字段，并新建 notes 数组与 children。
+ * 绝不能使用对象展开——仓储对象可能夹带运行时额外字段（connectionId / permissionProfile /
+ * token 等），对象展开会把它们原样带进 MCP 响应。此函数保证外发节点只含契约字段，
+ * 任何未知字段被丢弃；同时 notes 与 children 都是新建引用（深拷贝），不共享仓储引用。
+ */
+function toTaskNode(task: AiTask): AiTaskNode {
+  return {
+    id: task.id,
+    projectId: task.projectId,
+    ownerActorId: task.ownerActorId,
+    projectTaskId: task.projectTaskId,
+    parentTaskId: task.parentTaskId,
+    title: task.title,
+    description: task.description,
+    status: task.status,
+    progressPercent: task.progressPercent,
+    notes: [...task.notes],
+    blockerType: task.blockerType,
+    blockerReason: task.blockerReason,
+    position: task.position,
+    version: task.version,
+    createdAt: task.createdAt,
+    updatedAt: task.updatedAt,
+    completedAt: task.completedAt,
+    archivedAt: task.archivedAt,
+    children: [],
+  };
+}
+
+/**
+ * 把某项目 + 某 owner 的全部任务组装成完整任务树（纯函数，不触仓储）。
+ * projectId / ownerActorId 是读侧信任边界的基准作用域。
+ *
+ * 信任边界防线（任一命中即抛 AiTaskTreeCorruptError，消息固定脱敏）：
+ * - 仓储返回的任何任务 projectId 或 ownerActorId 与当前作用域不符（越界数据）——
+ *   绝不能返回部分树 / 跨项目 / 跨 Actor 数据，统一按数据不一致处理；
+ * - 父引用不存在：parentTaskId 指向作用域外的任务（孤儿）或任意不存在 ID；
+ * - 自引用：parentTaskId === id；
+ * - 任意长度循环：沿父链向上出现重复节点；
+ * - 深度超过 AI_TASK_TREE_MAX_DEPTH 或最终访问节点数 !== 输入节点数。
+ * 绝不能把孤儿提升为根、绝不能静默丢节点。
+ *
+ * 外发投影：节点用显式白名单构造（toTaskNode），只复制 AiTask 契约的 18 个既定字段
+ * 并新建 notes / children，绝不使用对象展开——对象展开会把仓储对象夹带的运行时额外
+ * 字段（connectionId / permissionProfile / 凭据等）原样带进响应。
+ *
+ * 排序：每层 children / 根数组按 position ASC、相同 position 按 id ASC 稳定排序。
+ * 返回深拷贝：节点对象与 notes 数组全部新建，调用方修改不污染传入任务。
+ */
+function buildAiTaskTree(tasks: AiTask[], projectId: string, ownerActorId: string): AiTaskNode[] {
+  if (tasks.length === 0) {
+    return [];
+  }
+  const byId = new Map<string, AiTask>();
+  for (const task of tasks) byId.set(task.id, task);
+
+  // 读侧信任边界：逐节点复核归属。仓储返回的每个任务必须属于当前项目 + 当前 owner，
+  // 任何不符（即使只有一条越界根任务）统一抛 AiTaskTreeCorruptError，绝不返回部分树。
+  for (const task of tasks) {
+    if (task.projectId !== projectId || task.ownerActorId !== ownerActorId) {
+      throw new AiTaskTreeCorruptError();
+    }
+  }
+
+  // 父引用必须落在当前作用域内；自引用与指向作用域外 / 不存在的父引用都视为不一致。
+  for (const task of tasks) {
+    if (task.parentTaskId === null) continue;
+    if (task.parentTaskId === task.id) throw new AiTaskTreeCorruptError();
+    if (!byId.has(task.parentTaskId)) throw new AiTaskTreeCorruptError();
+  }
+
+  // 环检测：从每个节点沿父链向上，当前路径上重复即存在任意长度循环。
+  const reachesRoot = new Set<string>();
+  for (const task of tasks) {
+    const path = new Set<string>();
+    let cursor: string | null = task.id;
+    while (cursor !== null) {
+      if (reachesRoot.has(cursor)) break;
+      if (path.has(cursor)) throw new AiTaskTreeCorruptError();
+      path.add(cursor);
+      cursor = byId.get(cursor)!.parentTaskId;
+    }
+    for (const id of path) reachesRoot.add(id);
+  }
+
+  // 组装：每个任务经显式白名单投影新建节点（只复制契约字段 + 新建 notes / children），
+  // 按父引用分组挂接；无父的为根。禁止对象展开：夹带的运行时额外字段必须被丢弃。
+  const nodes = new Map<string, AiTaskNode>();
+  const roots: AiTaskNode[] = [];
+  for (const task of tasks) nodes.set(task.id, toTaskNode(task));
+  for (const task of tasks) {
+    const node = nodes.get(task.id)!;
+    if (task.parentTaskId === null) {
+      roots.push(node);
+    } else {
+      nodes.get(task.parentTaskId)!.children.push(node);
+    }
+  }
+
+  // 每层稳定排序：position ASC，相同 position 按 id ASC（sortAiTaskSiblingLevel 是
+  // 导出纯函数，可对"相同 position 按 id"兜底分支做确定性单测）。
+  sortAiTaskSiblingLevel(roots);
+  for (const node of nodes.values()) sortAiTaskSiblingLevel(node.children);
+
+  // 遍历防线：深度超限或最终访问节点数不等于输入节点数 → 数据不一致。
+  let visited = 0;
+  const stack: Array<{ node: AiTaskNode; depth: number }> = roots.map((n) => ({
+    node: n,
+    depth: 1,
+  }));
+  while (stack.length > 0) {
+    const { node, depth } = stack.pop()!;
+    visited += 1;
+    if (depth > AI_TASK_TREE_MAX_DEPTH) throw new AiTaskTreeCorruptError();
+    for (const child of node.children) stack.push({ node: child, depth: depth + 1 });
+  }
+  if (visited !== tasks.length) throw new AiTaskTreeCorruptError();
+
+  return roots;
 }

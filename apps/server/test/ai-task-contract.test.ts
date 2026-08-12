@@ -5,7 +5,10 @@ import {
   AI_TASK_STATUSES,
   AI_TASK_TITLE_MAX_LENGTH,
   aiTaskJsonSchema,
+  aiTaskTreeResponseJsonSchema,
   createAiTaskInputSchema,
+  type AiTask,
+  type AiTaskNode,
 } from '@mingwu/contracts';
 import { makeAiTask, uuid } from './helpers.js';
 
@@ -201,5 +204,115 @@ describe('createAiTaskInputSchema (创建输入白名单)', () => {
     for (const status of AI_TASK_STATUSES) {
       expect(validateStatus(makeAiTask({ status })), `status=${status}`).toBe(true);
     }
+  });
+});
+
+describe('aiTaskTreeResponseJsonSchema (查询自己任务树响应)', () => {
+  const validate = compile({ ...aiTaskTreeResponseJsonSchema });
+
+  /** 构造完整合法 AiTaskNode：完整 AiTask 字段 + children。 */
+  const node = (overrides: Partial<AiTask> = {}, children: AiTaskNode[] = []): AiTaskNode => ({
+    ...makeAiTask(overrides),
+    children,
+  });
+
+  const without = (task: object, key: string): unknown =>
+    Object.fromEntries(Object.entries(task).filter(([k]) => k !== key));
+
+  it('accepts a multi-level tree with full fields at every level', () => {
+    expect(
+      validate({
+        tasks: [node({ title: '根' }, [node({ title: '子' }, [node({ title: '孙' })])])],
+      }),
+    ).toBe(true);
+  });
+
+  it('accepts an empty tasks array (合法无任务)', () => {
+    expect(validate({ tasks: [] })).toBe(true);
+  });
+
+  it('requires all 19 node fields including children at every level', () => {
+    const defs = aiTaskTreeResponseJsonSchema.$defs as {
+      aiTaskNode: { required: readonly string[] };
+    };
+    expect([...defs.aiTaskNode.required].sort()).toEqual(
+      [...aiTaskJsonSchema.required, 'children'].sort(),
+    );
+    // 完整 19 个字段中缺任一字段（根或深层）都应拒绝。
+    expect(validate({ tasks: [without(node({ title: '根' }), 'title')] })).toBe(false);
+    expect(validate({ tasks: [without(node({ title: '根' }), 'children')] })).toBe(false);
+    // 孙节点缺少 children 字段（AiTaskNode 要求 children，故意缺失）→ 拒绝。
+    expect(
+      validate({
+        tasks: [
+          node({ title: '根' }, [
+            node({ title: '子' }, [without(makeAiTask({ title: '孙' }), 'children') as AiTaskNode]),
+          ]),
+        ],
+      }),
+    ).toBe(false);
+    // 深层节点缺少非 children 的 AiTask 必填字段同样拒绝。
+    expect(
+      validate({
+        tasks: [
+          {
+            ...makeAiTask({ title: '根' }),
+            children: [without(node({ title: '子' }), 'ownerActorId')],
+          },
+        ],
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects extra undeclared fields at any level (身份 / session / 凭据一律拒绝)', () => {
+    const leakedRoot = {
+      ...node({ title: '根' }),
+      connectionId: 'conn-1',
+      permissionProfile: 'default',
+      actor_code: 'forged',
+    };
+    expect(validate({ tasks: [leakedRoot] })).toBe(false);
+    // 深层节点夹带身份字段：Object.assign 绕过 TS 字面量多余属性检查，仍会被 schema 拒绝。
+    const leakedChild: unknown = {
+      tasks: [
+        {
+          ...makeAiTask({ title: '根' }),
+          children: [Object.assign({}, makeAiTask({ title: '子' }), { children: [], actor_id: uuid() })],
+        },
+      ],
+    };
+    expect(validate(leakedChild)).toBe(false);
+    // 响应外层包装也不允许额外字段。
+    expect(validate({ tasks: [], leaked: true })).toBe(false);
+  });
+
+  it('rejects a non-array children', () => {
+    expect(validate({ tasks: [{ ...node({ title: '根' }), children: 'oops' }] })).toBe(false);
+  });
+
+  it('treats nullable AiTask fields as present-and-null at every level', () => {
+    expect(
+      validate({
+        tasks: [
+          node(
+            {
+              title: '根',
+              projectTaskId: null,
+              parentTaskId: null,
+              description: null,
+              blockerType: null,
+              blockerReason: null,
+              completedAt: null,
+              archivedAt: null,
+            },
+            [node({ title: '子', projectTaskId: null, parentTaskId: null, description: null })],
+          ),
+        ],
+      }),
+    ).toBe(true);
+  });
+
+  it('rejects an object that is not an array at tasks', () => {
+    expect(validate({ tasks: {} })).toBe(false);
   });
 });

@@ -2,10 +2,11 @@ import { describe, expect, it } from 'vitest';
 import {
   AI_TASK_DESCRIPTION_MAX_LENGTH,
   AI_TASK_TITLE_MAX_LENGTH,
+  type AiTaskNode,
   type AuthenticatedAiActorContext,
   type AiActorType,
 } from '@mingwu/contracts';
-import { AiTaskService } from '../src/application/ai-task/ai-task-service.js';
+import { AiTaskService, sortAiTaskSiblingLevel } from '../src/application/ai-task/ai-task-service.js';
 import { ProjectNotFoundError } from '../src/domain/project/errors.js';
 import {
   AiTaskDescriptionInvalidError,
@@ -16,8 +17,10 @@ import {
   AiTaskRequesterInvalidError,
   AiTaskScopeConflictError,
   AiTaskTitleInvalidError,
+  AiTaskTreeCorruptError,
 } from '../src/domain/ai-task/errors.js';
-import { makeActorContext, makeServices, uuid } from './helpers.js';
+import type { AiTaskRepository } from '../src/domain/ai-task/repository.js';
+import { makeActorContext, makeAiTask, makeServices, uuid } from './helpers.js';
 
 const FIXED_NOW = '2026-08-12T00:00:00.000Z';
 
@@ -38,6 +41,19 @@ type Services = ReturnType<typeof setup>;
 async function makeProjectId(services: Services): Promise<string> {
   const { project } = await services.projectService.createProject({ id: uuid(), name: 'AI 项目' });
   return project.id;
+}
+
+/**
+ * 受控假仓储：只替换需要的接口，其余按安全默认实现。用于注入"越界归属" / "夹带额外
+ * 字段"的读侧反例——这些脏数据无法通过正常创建流程产生，只能从仓储直接喂入服务。
+ */
+function stubAiTaskRepository(overrides: Partial<AiTaskRepository>): AiTaskRepository {
+  const base: AiTaskRepository = {
+    findById: async () => null,
+    listByOwner: async () => [],
+    createIfAbsent: async (task) => ({ task, created: true }),
+  };
+  return { ...base, ...overrides };
 }
 
 /** 创建正式 ProjectTask（用于 projectTaskId 关联校验），返回其任务对象。 */
@@ -392,5 +408,330 @@ describe('AiTaskService.create', () => {
     // A 的两条连接共享同一身份：同一 actorId 下都能看到同一任务（同一 owner 归属）。
     expect(await services.aiTaskRepository.listByOwner(projectId, actorA.actorId)).toHaveLength(1);
     expect((await services.aiTaskRepository.listByOwner(projectId, actorA.actorId))[0]!.id).toBe(task.task.id);
+  });
+});
+
+describe('AiTaskService.listMyTaskTree', () => {
+  it('returns an empty tree for a project without any tasks of the actor', async () => {
+    const services = setup();
+    const projectId = await makeProjectId(services);
+    const { tasks } = await services.aiTaskService.listMyTaskTree(makeActorContext(), projectId);
+    expect(tasks).toEqual([]);
+  });
+
+  it('returns the full nested personal tree with server-owned fields intact', async () => {
+    const services = setup();
+    const projectId = await makeProjectId(services);
+    const actor = makeActorContext();
+    const root = await services.aiTaskService.create(actor, { id: uuid(), projectId, title: '根' });
+    const child = await services.aiTaskService.create(actor, {
+      id: uuid(),
+      projectId,
+      parentTaskId: root.task.id,
+      title: '子',
+    });
+    const grand = await services.aiTaskService.create(actor, {
+      id: uuid(),
+      projectId,
+      parentTaskId: child.task.id,
+      title: '孙',
+    });
+    const { tasks } = await services.aiTaskService.listMyTaskTree(actor, projectId);
+    expect(tasks).toHaveLength(1);
+    const node = tasks[0]!;
+    expect(node.id).toBe(root.task.id);
+    expect(node.children).toHaveLength(1);
+    expect(node.children[0]!.id).toBe(child.task.id);
+    expect(node.children[0]!.children).toHaveLength(1);
+    expect(node.children[0]!.children[0]!.id).toBe(grand.task.id);
+    expect(node.children[0]!.children[0]!.children).toEqual([]);
+    // 完整字段（含服务端初始化字段）被保留。
+    expect(node.ownerActorId).toBe(actor.actorId);
+    expect(node.status).toBe('not_started');
+    expect(node.progressPercent).toBe(0);
+    expect(node.notes).toEqual([]);
+    expect(node.version).toBe(1);
+    expect(node.createdAt).toBe(FIXED_NOW);
+    expect(node.updatedAt).toBe(FIXED_NOW);
+  });
+
+  it('sorts each sibling level by position ASC (roots and children)', async () => {
+    const services = setup();
+    const projectId = await makeProjectId(services);
+    const actor = makeActorContext();
+    const r1 = await services.aiTaskService.create(actor, { id: uuid(), projectId, title: 'r1' });
+    const r2 = await services.aiTaskService.create(actor, { id: uuid(), projectId, title: 'r2' });
+    const r3 = await services.aiTaskService.create(actor, { id: uuid(), projectId, title: 'r3' });
+    const c11 = await services.aiTaskService.create(actor, {
+      id: uuid(),
+      projectId,
+      parentTaskId: r1.task.id,
+      title: 'c11',
+    });
+    const c12 = await services.aiTaskService.create(actor, {
+      id: uuid(),
+      projectId,
+      parentTaskId: r1.task.id,
+      title: 'c12',
+    });
+    const c31 = await services.aiTaskService.create(actor, {
+      id: uuid(),
+      projectId,
+      parentTaskId: r3.task.id,
+      title: 'c31',
+    });
+    const c32 = await services.aiTaskService.create(actor, {
+      id: uuid(),
+      projectId,
+      parentTaskId: r3.task.id,
+      title: 'c32',
+    });
+    const c33 = await services.aiTaskService.create(actor, {
+      id: uuid(),
+      projectId,
+      parentTaskId: r3.task.id,
+      title: 'c33',
+    });
+    const { tasks } = await services.aiTaskService.listMyTaskTree(actor, projectId);
+    expect(tasks.map((t) => t.id)).toEqual([r1.task.id, r2.task.id, r3.task.id]);
+    expect(tasks[0]!.children.map((c) => c.id)).toEqual([c11.task.id, c12.task.id]);
+    expect(tasks[1]!.children).toEqual([]);
+    expect(tasks[2]!.children.map((c) => c.id)).toEqual([c31.task.id, c32.task.id, c33.task.id]);
+  });
+
+  it('sorts equal-position siblings by id ASC (defensive tiebreak on the pure function)', () => {
+    // 正常数据模型下 position 在同一父级唯一，该兜底分支不可通过公共 API 到达；
+    // 用导出纯函数对"相同 position 按 id"的契约要求做确定性验证。
+    const mk = (id: string, position: number): AiTaskNode => ({
+      ...makeAiTask({ id, title: id, position }),
+      children: [],
+    });
+    const level = [mk('b', 1), mk('a', 1), mk('c', 2), mk('d', 1)];
+    const sorted = sortAiTaskSiblingLevel(level);
+    expect(sorted.map((n) => n.id)).toEqual(['a', 'b', 'd', 'c']);
+  });
+
+  it('returns a deep copy: mutating the result does not pollute the repository', async () => {
+    const services = setup();
+    const projectId = await makeProjectId(services);
+    const actor = makeActorContext();
+    const root = await services.aiTaskService.create(actor, { id: uuid(), projectId, title: '根' });
+    const first = await services.aiTaskService.listMyTaskTree(actor, projectId);
+    // 深度篡改返回结果。
+    const node = first.tasks[0]!;
+    node.title = '被篡改';
+    node.notes.push('伪造备注');
+    node.children.push({ ...node, id: uuid(), title: '伪造子', children: [] });
+    const second = await services.aiTaskService.listMyTaskTree(actor, projectId);
+    expect(second.tasks).toHaveLength(1);
+    expect(second.tasks[0]!.title).toBe('根');
+    expect(second.tasks[0]!.notes).toEqual([]);
+    expect(second.tasks[0]!.children).toEqual([]);
+    const stored = await services.aiTaskRepository.findById(root.task.id);
+    expect(stored?.title).toBe('根');
+    expect(stored?.notes).toEqual([]);
+  });
+
+  it('rejects an invalid requester context without reading (defensive check)', async () => {
+    const services = setup();
+    const projectId = await makeProjectId(services);
+    const badContexts: Array<Partial<AuthenticatedAiActorContext>> = [
+      { actorId: 'not-a-uuid' },
+      { actorCode: '   ' },
+      { actorType: 'not-a-type' as AiActorType },
+    ];
+    for (const patch of badContexts) {
+      await expect(
+        services.aiTaskService.listMyTaskTree({ ...makeActorContext(), ...patch }, projectId),
+      ).rejects.toBeInstanceOf(AiTaskRequesterInvalidError);
+    }
+  });
+
+  it('rejects an unknown project with a controlled error', async () => {
+    const services = setup();
+    await expect(services.aiTaskService.listMyTaskTree(makeActorContext(), uuid())).rejects.toBeInstanceOf(
+      ProjectNotFoundError,
+    );
+  });
+
+  it('isolates by project: tasks in another project are not visible', async () => {
+    const services = setup();
+    const actor = makeActorContext();
+    const projectA = await makeProjectId(services);
+    const projectB = await makeProjectId(services);
+    await services.aiTaskService.create(actor, { id: uuid(), projectId: projectA, title: 'A 项目任务' });
+    const { tasks } = await services.aiTaskService.listMyTaskTree(actor, projectB);
+    expect(tasks).toEqual([]);
+  });
+
+  it('isolates by actor: another actor sees an empty tree for the same project', async () => {
+    const services = setup();
+    const projectId = await makeProjectId(services);
+    const actorA = makeActorContext();
+    await services.aiTaskService.create(actorA, { id: uuid(), projectId, title: 'A 的任务' });
+    const actorB = makeActorContext();
+    const { tasks } = await services.aiTaskService.listMyTaskTree(actorB, projectId);
+    expect(tasks).toEqual([]);
+  });
+
+  it('fails on an orphan parent reference (parent not in the current owner scope)', async () => {
+    const services = setup();
+    const projectId = await makeProjectId(services);
+    const actor = makeActorContext();
+    await services.aiTaskRepository.createIfAbsent(
+      makeAiTask({
+        id: uuid(),
+        projectId,
+        ownerActorId: actor.actorId,
+        parentTaskId: uuid(),
+      }),
+    );
+    await expect(services.aiTaskService.listMyTaskTree(actor, projectId)).rejects.toBeInstanceOf(
+      AiTaskTreeCorruptError,
+    );
+  });
+
+  it('fails on a self-referencing task', async () => {
+    const services = setup();
+    const projectId = await makeProjectId(services);
+    const actor = makeActorContext();
+    const id = uuid();
+    await services.aiTaskRepository.createIfAbsent(
+      makeAiTask({ id, projectId, ownerActorId: actor.actorId, parentTaskId: id }),
+    );
+    await expect(services.aiTaskService.listMyTaskTree(actor, projectId)).rejects.toBeInstanceOf(
+      AiTaskTreeCorruptError,
+    );
+  });
+
+  it('fails on a multi-node cycle without promoting orphans to roots or dropping nodes', async () => {
+    const services = setup();
+    const projectId = await makeProjectId(services);
+    const actor = makeActorContext();
+    const a = uuid();
+    const b = uuid();
+    const c = uuid();
+    // a→b、b→c、c→a：三者互相成环，没有任何根节点。
+    await services.aiTaskRepository.createIfAbsent(
+      makeAiTask({ id: a, projectId, ownerActorId: actor.actorId, parentTaskId: b }),
+    );
+    await services.aiTaskRepository.createIfAbsent(
+      makeAiTask({ id: b, projectId, ownerActorId: actor.actorId, parentTaskId: c }),
+    );
+    await services.aiTaskRepository.createIfAbsent(
+      makeAiTask({ id: c, projectId, ownerActorId: actor.actorId, parentTaskId: a }),
+    );
+    await expect(services.aiTaskService.listMyTaskTree(actor, projectId)).rejects.toBeInstanceOf(
+      AiTaskTreeCorruptError,
+    );
+  });
+
+  it('fails on cross-scope dirty data (parent belongs to another project) with a fixed sanitized error', async () => {
+    const services = setup();
+    const actor = makeActorContext();
+    const projectA = await makeProjectId(services);
+    const projectB = await makeProjectId(services);
+    // 项目 B 中有一条属于同一身份的任务，被项目 A 的任务跨项目引用为父（脏数据）。
+    const crossProjectParent = makeAiTask({
+      id: uuid(),
+      projectId: projectB,
+      ownerActorId: actor.actorId,
+    });
+    await services.aiTaskRepository.createIfAbsent(crossProjectParent);
+    await services.aiTaskRepository.createIfAbsent(
+      makeAiTask({
+        id: uuid(),
+        projectId: projectA,
+        ownerActorId: actor.actorId,
+        parentTaskId: crossProjectParent.id,
+      }),
+    );
+    // 查询 A：子任务的父引用（跨项目）不在当前作用域内 → 树不一致。
+    let error: unknown;
+    try {
+      await services.aiTaskService.listMyTaskTree(actor, projectA);
+    } catch (err) {
+      error = err;
+    }
+    expect(error).toBeInstanceOf(AiTaskTreeCorruptError);
+    // 固定脱敏消息：不含任何任务 / 项目 / Actor ID。
+    const message = (error as Error).message;
+    expect(message).not.toContain(crossProjectParent.id);
+    expect(message).not.toContain(projectA);
+    expect(message).not.toContain(projectB);
+    expect(message).not.toContain(actor.actorId);
+  });
+
+  it('fails when the repository returns a root task whose projectId is out of scope', async () => {
+    const services = setup();
+    const projectId = await makeProjectId(services);
+    const actor = makeActorContext();
+    // 受控假仓储：listByOwner 返回单条无父节点任务，其 projectId 属于另一项目（越界）。
+    const outOfScope = makeAiTask({ projectId: uuid(), ownerActorId: actor.actorId });
+    const aiTaskService = new AiTaskService(
+      stubAiTaskRepository({
+        listByOwner: async () => [structuredClone(outOfScope)],
+      }),
+      services.projectRepository,
+      services.taskRepository,
+      () => FIXED_NOW,
+    );
+    await expect(aiTaskService.listMyTaskTree(actor, projectId)).rejects.toBeInstanceOf(
+      AiTaskTreeCorruptError,
+    );
+  });
+
+  it('fails when the repository returns a root task whose ownerActorId is out of scope', async () => {
+    const services = setup();
+    const projectId = await makeProjectId(services);
+    const actor = makeActorContext();
+    // 受控假仓储：单条无父节点任务归属另一 owner（越界），即使 projectId 在当前项目内。
+    const outOfScope = makeAiTask({ projectId, ownerActorId: uuid() });
+    const aiTaskService = new AiTaskService(
+      stubAiTaskRepository({
+        listByOwner: async () => [structuredClone(outOfScope)],
+      }),
+      services.projectRepository,
+      services.taskRepository,
+      () => FIXED_NOW,
+    );
+    await expect(aiTaskService.listMyTaskTree(actor, projectId)).rejects.toBeInstanceOf(
+      AiTaskTreeCorruptError,
+    );
+  });
+
+  it('never exposes runtime extra fields smuggled by the repository into the returned tree', async () => {
+    const services = setup();
+    const projectId = await makeProjectId(services);
+    const actor = makeActorContext();
+    // 仓储对象夹带连接 / 权限 / 凭据 / 未知运行时字段（正常创建流程不可能产生）。
+    const smuggled = Object.assign(
+      {},
+      makeAiTask({ projectId, ownerActorId: actor.actorId, notes: ['备注1'] }),
+      { connectionId: 'conn-secret', permissionProfile: 'admin', token: 'TOKEN_SECRET', bogus: 1 },
+    );
+    const aiTaskService = new AiTaskService(
+      stubAiTaskRepository({
+        listByOwner: async () => [structuredClone(smuggled)],
+      }),
+      services.projectRepository,
+      services.taskRepository,
+      () => FIXED_NOW,
+    );
+    const { tasks } = await aiTaskService.listMyTaskTree(actor, projectId);
+    expect(tasks).toHaveLength(1);
+    const node = tasks[0]!;
+    // 白名单投影：夹带的运行时额外字段在返回树中全部不存在。
+    expect(node).not.toHaveProperty('connectionId');
+    expect(node).not.toHaveProperty('permissionProfile');
+    expect(node).not.toHaveProperty('token');
+    expect(node).not.toHaveProperty('bogus');
+    // 正常完整 18 个既定字段与递归 children 仍保留。
+    expect(node.id).toBe(smuggled.id);
+    expect(node.projectId).toBe(projectId);
+    expect(node.ownerActorId).toBe(actor.actorId);
+    expect(node.title).toBe(smuggled.title);
+    expect(node.notes).toEqual(['备注1']);
+    expect(node.children).toEqual([]);
   });
 });

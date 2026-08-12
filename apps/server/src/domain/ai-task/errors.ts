@@ -114,3 +114,16 @@ export class AiTaskRequesterInvalidError extends Error {
     this.name = 'AiTaskRequesterInvalidError';
   }
 }
+
+/**
+ * 任务树数据不一致：当前 owner 作用域内出现父引用不存在、自引用、任意长度循环、
+ * 父子跨项目 / 跨 owner，或最终访问节点数不等于输入节点数。只读查询不能把孤儿提升为
+ * 根、不能静默丢节点，因此直接失败。这是内部受控错误：消息为固定脱敏文本，不包含任何
+ * 任务 / 项目 / Actor ID；细节只由调用方（MCP 层）记入服务端日志。
+ */
+export class AiTaskTreeCorruptError extends Error {
+  constructor() {
+    super('AiTask tree data is inconsistent and cannot be read');
+    this.name = 'AiTaskTreeCorruptError';
+  }
+}
