@@ -24,6 +24,7 @@ function setup(logger?: AppDeps['logger']) {
   const services = makeServices();
   const app = buildApp({
     config,
+    aiTaskService: services.aiTaskService,
     projectService: services.projectService,
     stageService: services.stageService,
     taskService: services.taskService,
@@ -124,7 +125,7 @@ async function createProjectWithData(app: App): Promise<{ projectId: string; sta
 }
 
 describe('MCP Streamable HTTP via /mcp', () => {
-  it('initialize establishes a session; tools/list exposes six read-only tools plus two write tools', async () => {
+  it('initialize establishes a session; tools/list exposes six read-only tools plus three write tools', async () => {
     const { app } = setup();
     try {
       const { sessionId, protocolVersion } = await initialize(app);
@@ -151,6 +152,7 @@ describe('MCP Streamable HTTP via /mcp', () => {
         'study_append_report',
         'study_get_current_session',
         'study_get_session',
+        'task_create',
       ]);
       const READ_ONLY_TOOLS = new Set([
         'project_get_stage',
@@ -593,6 +595,7 @@ describe('MCP Streamable HTTP via /mcp', () => {
     } as unknown as ProjectStatusService;
     const app = buildApp({
       config,
+      aiTaskService: services.aiTaskService,
       projectService: services.projectService,
       stageService: services.stageService,
       taskService: services.taskService,
@@ -635,6 +638,7 @@ describe('MCP Streamable HTTP via /mcp', () => {
     const services = makeServices();
     const app = buildApp({
       config,
+      aiTaskService: services.aiTaskService,
       projectService: services.projectService,
       stageService: services.stageService,
       taskService: services.taskService,

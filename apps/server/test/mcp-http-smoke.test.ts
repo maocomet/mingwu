@@ -30,6 +30,7 @@ describe('MCP Streamable HTTP real-HTTP smoke (127.0.0.1, ephemeral port)', () =
     const services = makeServices();
     const app = buildApp({
       config,
+      aiTaskService: services.aiTaskService,
       projectService: services.projectService,
       stageService: services.stageService,
       taskService: services.taskService,
@@ -129,6 +130,7 @@ describe('MCP Streamable HTTP real-HTTP smoke (127.0.0.1, ephemeral port)', () =
         'study_append_report',
         'study_get_current_session',
         'study_get_session',
+        'task_create',
       ]);
 
       const statusResult = await a.client.callTool({
@@ -253,7 +255,7 @@ describe('MCP Streamable HTTP real-HTTP smoke (127.0.0.1, ephemeral port)', () =
 
       // B 可独立读取数据。
       const bList = await b.client.listTools();
-      expect(bList.tools).toHaveLength(8);
+      expect(bList.tools).toHaveLength(9);
 
       // DELETE 结束 A 的 session；A 立即失效，B 不受影响。
       await a.transport.terminateSession();
@@ -261,7 +263,7 @@ describe('MCP Streamable HTTP real-HTTP smoke (127.0.0.1, ephemeral port)', () =
       expect((app as unknown as { mcpSessions: { size: number } }).mcpSessions.size).toBe(1);
 
       const bAfter = await b.client.listTools();
-      expect(bAfter.tools).toHaveLength(8);
+      expect(bAfter.tools).toHaveLength(9);
 
       await b.client.close();
     } finally {

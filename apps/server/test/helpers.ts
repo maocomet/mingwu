@@ -1,5 +1,6 @@
 import type {
   AuthenticatedAiActorContext,
+  AiTask,
   Project,
   ProjectStage,
   ProjectTask,
@@ -10,6 +11,7 @@ import type {
   StudySession,
   StudySummary,
 } from '@mingwu/contracts';
+import { AiTaskService } from '../src/application/ai-task/ai-task-service.js';
 import { ProjectService } from '../src/application/project/project-service.js';
 import { StageService } from '../src/application/stage/stage-service.js';
 import { ProjectTaskService } from '../src/application/project-task/project-task-service.js';
@@ -21,6 +23,7 @@ import { StudySummaryService } from '../src/application/study-summary/study-summ
 import { StudyReportService } from '../src/application/study-report/study-report-service.js';
 import { StageUpdateRequestService } from '../src/application/stage-update-request/stage-update-request-service.js';
 import { ProjectWorkReportService } from '../src/application/project-work-report/project-work-report-service.js';
+import { InMemoryAiTaskRepository } from '../src/infrastructure/repositories/in-memory-ai-task-repository.js';
 import { InMemoryProjectRepository } from '../src/infrastructure/repositories/in-memory-project-repository.js';
 import { InMemoryStageRepository } from '../src/infrastructure/repositories/in-memory-stage-repository.js';
 import { InMemoryProjectTaskRepository } from '../src/infrastructure/repositories/in-memory-project-task-repository.js';
@@ -35,11 +38,12 @@ import { createInMemoryStore } from '../src/infrastructure/stores/in-memory-stor
 
 /** 共享同一组仓储，保证项目 / 关卡 / 任务 / 学习会话写入互相可见。 */
 export function makeServices() {
-  // Stage 普通写入与“批准更新申请”的原子路径共享同一底层状态，不产生双写数据源。
+  // Stage 普通写入与”批准更新申请”的原子路径共享同一底层状态，不产生双写数据源。
   const store = createInMemoryStore();
   const projectRepository = new InMemoryProjectRepository();
   const stageRepository = new InMemoryStageRepository(store);
   const taskRepository = new InMemoryProjectTaskRepository();
+  const aiTaskRepository = new InMemoryAiTaskRepository();
   const studySessionRepository = new InMemoryStudySessionRepository();
   const studySummaryRepository = new InMemoryStudySummaryRepository();
   const studyReportRepository = new InMemoryStudyReportRepository();
@@ -52,6 +56,7 @@ export function makeServices() {
   const projectService = new ProjectService(projectRepository);
   const stageService = new StageService(stageRepository, projectRepository);
   const taskService = new ProjectTaskService(taskRepository, stageRepository, projectRepository);
+  const aiTaskService = new AiTaskService(aiTaskRepository, projectRepository, taskRepository);
   const projectStatusService = new ProjectStatusService(
     projectRepository,
     stageRepository,
@@ -90,6 +95,7 @@ export function makeServices() {
     projectRepository,
     stageRepository,
     taskRepository,
+    aiTaskRepository,
     studySessionRepository,
     studySummaryRepository,
     studyReportRepository,
@@ -100,6 +106,7 @@ export function makeServices() {
     projectService,
     stageService,
     taskService,
+    aiTaskService,
     projectStatusService,
     studySessionService,
     studySessionDetailService,
@@ -167,6 +174,30 @@ export function makeTask(overrides: Partial<ProjectTask> = {}): ProjectTask {
     status: overrides.status ?? 'not_started',
     position: overrides.position ?? 1,
     assignedActorId: overrides.assignedActorId ?? null,
+    version: overrides.version ?? 1,
+    createdAt: overrides.createdAt ?? now,
+    updatedAt: overrides.updatedAt ?? now,
+    completedAt: overrides.completedAt ?? null,
+    archivedAt: overrides.archivedAt ?? null,
+  };
+}
+
+export function makeAiTask(overrides: Partial<AiTask> = {}): AiTask {
+  const now = new Date().toISOString();
+  return {
+    id: overrides.id ?? uuid(),
+    projectId: overrides.projectId ?? uuid(),
+    ownerActorId: overrides.ownerActorId ?? uuid(),
+    projectTaskId: overrides.projectTaskId ?? null,
+    parentTaskId: overrides.parentTaskId ?? null,
+    title: overrides.title ?? 'Test AiTask',
+    description: overrides.description ?? null,
+    status: overrides.status ?? 'not_started',
+    progressPercent: overrides.progressPercent ?? 0,
+    notes: overrides.notes ?? [],
+    blockerType: overrides.blockerType ?? null,
+    blockerReason: overrides.blockerReason ?? null,
+    position: overrides.position ?? 1,
     version: overrides.version ?? 1,
     createdAt: overrides.createdAt ?? now,
     updatedAt: overrides.updatedAt ?? now,

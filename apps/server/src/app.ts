@@ -4,6 +4,7 @@ import Fastify, {
   type FastifyServerOptions,
 } from 'fastify';
 import type { AppConfig } from './config.js';
+import type { AiTaskService } from './application/ai-task/ai-task-service.js';
 import type { ProjectService } from './application/project/project-service.js';
 import type { StageService } from './application/stage/stage-service.js';
 import type { ProjectTaskService } from './application/project-task/project-task-service.js';
@@ -81,6 +82,7 @@ import {
 
 export interface AppDeps {
   config: AppConfig;
+  aiTaskService: AiTaskService;
   projectService: ProjectService;
   stageService: StageService;
   taskService: ProjectTaskService;
@@ -165,6 +167,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   // session registry 在根实例上创建并装饰，便于测试/运维观察生命周期；
   // 仅进程内可见，不对外暴露任何路由或数据。MCP session 只是临时连接，绝非 AI Actor 身份。
   const mcpSessions = new McpSessionRegistry({
+    aiTaskService: deps.aiTaskService,
     projectStatusService: deps.projectStatusService,
     stageService: deps.stageService,
     studySessionDetailService: deps.studySessionDetailService,

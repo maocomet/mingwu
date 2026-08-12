@@ -17,6 +17,7 @@ function setup(
   const services = makeServices();
   const app = buildApp({
     config,
+    aiTaskService: services.aiTaskService,
     projectService: services.projectService,
     stageService: services.stageService,
     taskService: services.taskService,
@@ -617,6 +618,7 @@ describe('POST request-changes real-HTTP smoke (127.0.0.1, ephemeral port)', () 
     const services = makeServices();
     const app = buildApp({
       config,
+      aiTaskService: services.aiTaskService,
       projectService: services.projectService,
       stageService: services.stageService,
       taskService: services.taskService,

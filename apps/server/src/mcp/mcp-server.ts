@@ -1,11 +1,14 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import {
+  AI_TASK_DESCRIPTION_MAX_LENGTH,
+  AI_TASK_TITLE_MAX_LENGTH,
   countCodePoints,
   PROJECT_STAGE_STATUSES,
   STAGE_UPDATE_REASON_MAX_LENGTH,
   STUDY_REPORT_CONTENT_MAX_LENGTH,
 } from '@mingwu/contracts';
+import type { AiTaskService } from '../application/ai-task/ai-task-service.js';
 import type { ProjectStatusService } from '../application/project-status/project-status-service.js';
 import type { StageService } from '../application/stage/stage-service.js';
 import type { StageUpdateRequestService } from '../application/stage-update-request/stage-update-request-service.js';
@@ -13,6 +16,15 @@ import type { StudySessionCurrentService } from '../application/study-session-cu
 import type { StudySessionDetailService } from '../application/study-session-detail/study-session-detail-service.js';
 import type { StudyReportService } from '../application/study-report/study-report-service.js';
 import type { ProjectWorkReportService } from '../application/project-work-report/project-work-report-service.js';
+import {
+  AiTaskDescriptionInvalidError,
+  AiTaskIdempotencyConflictError,
+  AiTaskIdInvalidError,
+  AiTaskParentNotFoundError,
+  AiTaskProjectTaskInvalidError,
+  AiTaskScopeConflictError,
+  AiTaskTitleInvalidError,
+} from '../domain/ai-task/errors.js';
 import { ProjectNotFoundError } from '../domain/project/errors.js';
 import { StageNotFoundError, StageVersionConflictError } from '../domain/stage/errors.js';
 import { ProjectWorkReportScopeCorruptError } from '../domain/project-work-report/errors.js';
@@ -32,6 +44,7 @@ import {
 } from '../domain/study-report/errors.js';
 import { StudySessionNotFoundError } from '../domain/study-session/errors.js';
 import type { McpAuthContext } from '../domain/mcp-auth/mcp-auth-context.js';
+import { canCreateAiTask } from './ai-task-policy.js';
 import { canSubmitStageUpdate } from './stage-update-policy.js';
 import { canAppendStudyReport } from './study-report-policy.js';
 
@@ -43,6 +56,7 @@ export interface McpLogger {
 }
 
 export interface McpServerDeps {
+  aiTaskService: AiTaskService;
   projectStatusService: ProjectStatusService;
   stageService: StageService;
   studySessionDetailService: StudySessionDetailService;
@@ -137,6 +151,51 @@ const submitStageUpdateInputSchema = z
   })
   .strict();
 
+/**
+ * task_create 严格白名单：只允许 task_id / project_id / 可选 project_task_id /
+ * 可选 parent_task_id / title / 可选 description。.strict() 在运行时拒绝任何额外字段，
+ * 尤其拒绝 ownerActorId / actor_id / actorCode / status / progressPercent / notes /
+ * position / createdAt / updatedAt / version 等身份、状态或受保护字段——ownerActorId
+ * 只由该连接的服务端认证上下文注入，其余字段由服务端初始化。标题 / 描述长度上限与
+ * 服务层完全统一：先 trim 再按 Unicode code point 计数，不产生 JSON Schema 与服务层
+ * 长度语义分叉；空字符串 / 纯空白标题不在此拦截，交给 AiTaskService 的规范化与受控
+ * 业务错误（trim 后为空 → 任务标题不合法），保持单一校验来源。
+ */
+const taskCreateInputSchema = z
+  .object({
+    task_id: uuidField('任务幂等键（调用方生成的 UUID）'),
+    project_id: uuidField('项目 UUID'),
+    project_task_id: z
+      .string()
+      .uuid()
+      .optional()
+      .nullable()
+      .describe('可选：关联的正式主任务 UUID（必须属于同一项目）'),
+    parent_task_id: z
+      .string()
+      .uuid()
+      .optional()
+      .nullable()
+      .describe('可选：父 AI 任务 UUID（必须属于同一项目且同一 owner）'),
+    title: z
+      .string()
+      .refine(
+        (value) => countCodePoints(value.trim()) <= AI_TASK_TITLE_MAX_LENGTH,
+        '任务标题超长',
+      )
+      .describe('任务标题（trim 后必须非空，由服务层校验）'),
+    description: z
+      .string()
+      .refine(
+        (value) => countCodePoints(value.trim()) <= AI_TASK_DESCRIPTION_MAX_LENGTH,
+        '任务描述超长',
+      )
+      .optional()
+      .nullable()
+      .describe('任务描述（可空；trim 后为空规范化为 null）'),
+  })
+  .strict();
+
 /** 业务错误转换为稳定、不泄露堆栈/内部配置/请求头的 MCP 错误结果。 */
 function toolErrorResult(message: string) {
   return { content: [{ type: 'text' as const, text: message }], isError: true as const };
@@ -160,14 +219,14 @@ function textContent(value: unknown) {
 }
 
 /**
- * 构建一个全新的 MCP Server 实例：六个只读工具 + 两个写工具
- * （study_append_report / project_submit_stage_update）。
+ * 构建一个全新的 MCP Server 实例：六个只读工具 + 三个写工具
+ * （study_append_report / project_submit_stage_update / task_create）。
  * 每个 MCP session 都必须使用独立的 Server 实例（SDK 的 Server 一次只安全地
  * 连接一个 transport，不能跨 session 共享临时协议状态）；本工厂只依赖共享的
  * 只读应用服务与 Session 私有 authContext，不复制业务算法、不回调自身 HTTP 接口。
  * 写工具按服务端认证身份落账：authContext 为空（匿名只读模式）时工具可见但写入
- * fail-closed 拒绝；授权策略分别集中在 study-report-policy.ts 与
- * stage-update-policy.ts。
+ * fail-closed 拒绝；授权策略分别集中在 study-report-policy.ts、
+ * stage-update-policy.ts 与 ai-task-policy.ts。
  */
 export function buildMcpServer(deps: McpServerDeps): McpServer {
   const server = new McpServer({ name: deps.serviceName, version: deps.serviceVersion });
@@ -434,6 +493,77 @@ export function buildMcpServer(deps: McpServerDeps): McpServer {
         }
         if (err instanceof StageUpdateRequestIdempotencyConflictError) {
           return toolErrorResult('申请已存在且语义冲突，不覆盖旧申请');
+        }
+        return unexpectedError(deps, err);
+      }
+    },
+  );
+
+  server.registerTool(
+    'task_create',
+    {
+      title: 'Create own AI task',
+      description:
+        '写：以服务端认证身份创建自己的 AI 私人任务（AITask），与正式主进度任务完全独立，' +
+        '绝不修改任何 ProjectTask / Stage 正式进度。task_id 为调用方生成的 UUID 幂等键；' +
+        '同一 task_id + 同一项目 + 同一身份 + 同规范化标题 / 描述重试为幂等成功，不同语义' +
+        '为受控冲突，绝不覆盖。ownerActorId 只由服务端 Bearer 凭据决定，不接受任何身份字段；' +
+        'status / progressPercent / notes / position / version / 时间由服务端初始化，' +
+        '客户端不得提交。可选 project_task_id 必须属于同一项目，可选 parent_task_id 必须属于' +
+        '同一项目且同一身份。匿名连接或非 resident_ai 身份会被拒绝。',
+      inputSchema: taskCreateInputSchema,
+    },
+    async ({ task_id, project_id, project_task_id, parent_task_id, title, description }) => {
+      const authContext = deps.authContext;
+      // 匿名只读上下文 fail-closed：工具可见，但任何写入都拒绝，不创建任务。
+      if (authContext === null) {
+        deps.logger.error(
+          { errType: 'McpAuthContextMissing' },
+          'task_create denied: no bound identity',
+        );
+        return toolErrorResult('当前连接未授权写操作');
+      }
+      if (!canCreateAiTask(authContext)) {
+        deps.logger.error(
+          { errType: 'McpAiTaskPermissionDenied' },
+          'task_create denied: policy rejected',
+        );
+        return toolErrorResult('当前身份无权创建 AI 任务');
+      }
+      try {
+        const { task } = await deps.aiTaskService.create(authContext, {
+          id: task_id,
+          projectId: project_id,
+          projectTaskId: project_task_id ?? null,
+          parentTaskId: parent_task_id ?? null,
+          title,
+          description: description ?? null,
+        });
+        return textContent(task);
+      } catch (err) {
+        if (err instanceof AiTaskIdInvalidError) {
+          return toolErrorResult('任务 ID 不合法');
+        }
+        if (err instanceof AiTaskTitleInvalidError) {
+          return toolErrorResult('任务标题不合法');
+        }
+        if (err instanceof AiTaskDescriptionInvalidError) {
+          return toolErrorResult('任务描述不合法');
+        }
+        if (err instanceof ProjectNotFoundError) {
+          return toolErrorResult('项目不存在');
+        }
+        if (err instanceof AiTaskProjectTaskInvalidError) {
+          return toolErrorResult('关联的正式任务不合法');
+        }
+        if (err instanceof AiTaskParentNotFoundError) {
+          return toolErrorResult('父任务不存在');
+        }
+        if (err instanceof AiTaskScopeConflictError) {
+          return toolErrorResult('父任务必须属于同一项目和同一身份');
+        }
+        if (err instanceof AiTaskIdempotencyConflictError) {
+          return toolErrorResult('任务已存在且语义冲突，不覆盖旧任务');
         }
         return unexpectedError(deps, err);
       }

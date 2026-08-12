@@ -23,6 +23,7 @@ interface BuildOptions {
 function buildTestServer(opts: BuildOptions = {}) {
   const services = opts.services ?? makeServices();
   const server = buildMcpServer({
+    aiTaskService: services.aiTaskService,
     projectStatusService: services.projectStatusService,
     stageService: services.stageService,
     studySessionDetailService: services.studySessionDetailService,
@@ -367,6 +368,7 @@ describe('MCP project_list_reports over Streamable HTTP (/mcp)', () => {
     const services = makeServices();
     const app = buildApp({
       config,
+      aiTaskService: services.aiTaskService,
       projectService: services.projectService,
       stageService: services.stageService,
       taskService: services.taskService,

@@ -7,6 +7,7 @@ function setup() {
   const config = loadConfig({ NODE_ENV: 'test' });
   const {
     projectService,
+    aiTaskService,
     stageService,
     taskService,
     projectStatusService,
@@ -20,6 +21,7 @@ function setup() {
   } = makeServices();
   const app = buildApp({
     config,
+    aiTaskService,
     projectService,
     stageService,
     taskService,

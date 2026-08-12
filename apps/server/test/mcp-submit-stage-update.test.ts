@@ -42,6 +42,7 @@ interface BuildOptions {
 function buildTestServer(opts: BuildOptions = {}) {
   const services = opts.services ?? makeServices();
   const server = buildMcpServer({
+    aiTaskService: services.aiTaskService,
     projectStatusService: services.projectStatusService,
     stageService: services.stageService,
     studySessionDetailService: services.studySessionDetailService,

@@ -5900,30 +5900,6 @@ App API 严格输入、服务层 `pending -> needs_changes`、同语义重试、
 
 ---
 
-## 小喵审核结果 #31 · 通过 · 2026-08-11
-
-### 验收结论
-
-- MCP `project_list_reports` 已通过审核：工具严格只接收 `stage_id`，直接复用 `ProjectWorkReportService.listByStage`，没有复制排序、归属校验或报告读取逻辑。
-- 工具与 App API 的内容、顺序及空列表语义一致；未知关卡、范围腐败和未知异常均使用受控错误，内部 ID 与异常秘密不进入 MCP 响应。
-- 匿名本地只读连接可以调用；伪造身份、归属和其他未知字段均被严格拒绝。已有七个 MCP 工具的名称、输入、授权与行为保持不变。
-
-### 小喵独立复验
-
-- 根目录 typecheck：contracts 与 server 均通过。
-- 全量测试：**51 个测试文件、829/829 通过**。
-- tools/list、严格输入、稳定排序、未知关卡、范围腐败脱敏、双连接隔离及真实 Streamable HTTP 对拍均通过。
-- 源码、测试、契约与文档扫描：**NUL=0、BOM=0**。
-- `git diff --check`：通过，仅有 Windows LF→CRLF 提示，无空白错误。
-
-### 计划更新
-
-- 已将 `docs/project-plan-v0.1.md` 中 `- [ ] project_list_reports` 更新为 `- [x] project_list_reports`。
-
-本批验收通过，可以提交并推送到 `develop`；下一批任务由小喵在推送后单独追加。
-
----
-
 ## 小喵审核结果 #30 · 通过 · 2026-08-11
 
 ### 验收结论
@@ -6046,3 +6022,287 @@ App API 严格输入、服务层 `pending -> needs_changes`、同语义重试、
 - 报告提交 / 写入 API（写路径需补齐幂等与 Actor 身份服务端解析），或按小喵安排继续推进后续计划项；本批不作为任何复选框打勾依据。
 
 等待小喵审核。
+
+---
+
+## 小喵审核结果 #31 · 通过 · 2026-08-11
+
+### 验收结论
+
+- MCP `project_list_reports` 已通过审核：工具严格只接收 `stage_id`，直接复用 `ProjectWorkReportService.listByStage`，没有复制排序、归属校验或报告读取逻辑。
+- 工具与 App API 的内容、顺序及空列表语义一致；未知关卡、范围腐败和未知异常均使用受控错误，内部 ID 与异常秘密不进入 MCP 响应。
+- 匿名本地只读连接可以调用；伪造身份、归属和其他未知字段均被严格拒绝。已有七个 MCP 工具的名称、输入、授权与行为保持不变。
+
+### 小喵独立复验
+
+- 根目录 typecheck：contracts 与 server 均通过。
+- 全量测试：**51 个测试文件、829/829 通过**。
+- tools/list、严格输入、稳定排序、未知关卡、范围腐败脱敏、双连接隔离及真实 Streamable HTTP 对拍均通过。
+- 源码、测试、契约与文档扫描：**NUL=0、BOM=0**。
+- `git diff --check`：通过，仅有 Windows LF→CRLF 提示，无空白错误。
+
+### 计划更新
+
+- 已将 `docs/project-plan-v0.1.md` 中 `- [ ] project_list_reports` 更新为 `- [x] project_list_reports`。
+
+本批验收通过，可以提交并推送到 `develop`；下一批任务由小喵在推送后单独追加。
+
+---
+
+## 小喵任务 #32 · 创建自己的 AI Task + MCP `task_create` · 2026-08-11
+
+### 本批候选计划项
+
+- `- [ ] 创建 AI 任务`
+- `- [ ] task_create`
+
+这两项必须作为同一条纵向能力完成：建立独立 AITask 领域模型与安全创建服务，并通过已认证 MCP 工具开放。不要提供一个没有真实入口的“假完成”服务，也不要增加可伪造 owner 的 App API。
+
+### 必须完成
+
+1. 建立独立 `AiTask` 契约、领域仓储与内存实现，不能复用正式主进度的 `ProjectTask`。字段与第二关设计一致：`id`、`projectId`、`ownerActorId`、可选 `projectTaskId`、可选 `parentTaskId`、`title`、可空 `description`、`status`、`progressPercent`、`notes`、`blockerType`、`blockerReason`、`position`、`version`、`createdAt`、`updatedAt`、`completedAt`、`archivedAt`。
+2. 本批创建时固定服务端初始值：`status=not_started`、`progressPercent=0`、`notes=[]`（若决定采用可空文本，必须说明并保持后续可追加）、无阻塞、`version=1`、完成 / 归档时间为空；客户端不得提交这些受保护字段。
+3. `AiTaskService.create(authContext, input)` 必须：
+   - `ownerActorId` 只取受信 `authContext.actorId`，绝不接受客户端 Actor 字段；
+   - 校验 Project 存在；可选 `projectTaskId` 必须是同项目正式任务；可选父 AI Task 必须属于同一项目和当前 Actor，不能跨 Actor / 跨项目挂载；
+   - 自动分配同一 `projectId + ownerActorId + parentTaskId` 范围内的 `position`，并用仓储原子唯一性与有界重试保证并发创建不会撞位；PostgreSQL NULL 父节点唯一约束注意 `NULLS NOT DISTINCT` 或等价部分索引；
+   - 客户端 UUID 作为幂等键：同 ID、同 owner、同规范化内容重试返回既有任务；同 ID 不同语义绝不覆盖，返回受控冲突；
+   - 标题 / 描述 trim 后按 Unicode code point 统一校验，不产生 JSON Schema 与服务层长度语义分叉。
+4. 注册 MCP 写工具 `task_create`，严格输入只允许：`task_id`、`project_id`、可选 `project_task_id`、可选 `parent_task_id`、`title`、可选 `description`。必须拒绝 `ownerActorId`、`actor_id`、`actorCode`、`status`、`progressPercent`、`notes`、`position`、时间、version 与其他未知字段。
+5. 授权必须 fail-closed：仅绑定了服务端身份、`permissionProfile=default` 且 `actorType=resident_ai` 的连接可以创建长期 AI Task；匿名连接、`temporary_ai`、`reviewer`、未知 profile 全部拒绝。策略集中在独立 policy 函数，不把权限字符串散落在回调内。
+6. 工具返回新建或幂等重试得到的完整 AiTask；任何响应、错误与日志不得泄露 Token、连接凭据、其他 Actor 的任务内容或原始未知异常。AITask 完成绝不能改变 ProjectTask / Stage 正式进度。
+7. 测试至少覆盖：成功创建、服务端 owner 落账、严格拒绝伪造身份 / 受保护字段、四类授权拒绝、幂等成功 / 语义冲突、父子树、跨 Actor / 跨项目父任务拒绝、正式 ProjectTask 归属校验、20 并发自动 position 唯一连续、两个连接映射同一 Actor 时共享同一任务身份、不同 Actor 相互隔离，以及真实 Streamable HTTP 冒烟。
+
+### 边界与验收
+
+- 本批不实现查询、修改、完成、备注、进度或查看他人任务，不勾选对应项目；不实现数据库、AuditLog、前端或项目报告写入。
+- 运行契约 / 仓储 / 服务 / MCP 专项、根目录 typecheck、全量测试、真实 HTTP 冒烟、NUL / BOM 扫描与 `git diff --check`。
+- 完成后在本文件末尾追加检查点并暂停；不修改计划复选框，不执行 Git / GitHub / VPS 操作，不开始下一批，不读取或修改 `.claude/` 与 `ui素材mingwu/`。
+
+等待 DS 完成检查点后由小喵审核。
+
+---
+
+## 检查点 #32 · 创建自己的 AI Task + MCP `task_create` · 2026-08-12
+
+### 本批次目标
+
+候选完成计划项：
+
+- `- [ ] 创建 AI 任务`
+- `- [ ] task_create`
+
+这两项作为同一条纵向能力完成：建立独立 AiTask 契约、领域仓储、内存实现与安全创建服务，并通过已认证 MCP 写工具 `task_create` 开放；owner 只由服务端认证身份决定，绝不触碰正式 ProjectTask / Stage 进度。
+
+### 实际完成内容
+
+- `packages/contracts/src/ai-task.ts`：AiTask 契约（全部字段：id、projectId、ownerActorId、可选 projectTaskId、可选 parentTaskId、title、可空 description、status、progressPercent、notes、blockerType、blockerReason、position、version、createdAt、updatedAt、completedAt、archivedAt）+ `createAiTaskInputSchema` 严格白名单 + `aiTaskJsonSchema`；常量 `AI_TASK_STATUSES`、`AI_TASK_TITLE_MAX_LENGTH=200`、`AI_TASK_DESCRIPTION_MAX_LENGTH=2000`、`AI_TASK_NOTE_MAX_LENGTH=2000`、`AI_TASK_NOTES_MAX_ITEMS=100`。
+- 领域层 `apps/server/src/domain/ai-task/`：`AiTaskRepository` 接口（findById / listByOwner / createIfAbsent 原子插入并在仓储层保证 position 唯一）与 10 类领域错误。
+- 基础设施 `apps/server/src/infrastructure/repositories/in-memory-ai-task-repository.ts`：Map 内存实现；id 已存在不覆盖；同一 projectId + ownerActorId + parentTaskId 下 position 撞车抛 AiTaskPositionConflictError（NULL 父用 `__root__` 键）。
+- 应用层 `apps/server/src/application/ai-task/ai-task-service.ts`：`AiTaskService.create(authContext, input)`。ownerActorId 只取 authContext.actorId；幂等预检（同 id 同语义返回既有 / 异语义受控冲突）；项目存在校验；可选 projectTaskId 必须属同项目正式任务；可选父任务必须存在且同项目、同 owner；position 自动分配 + 有界重试（50 次）；服务端固定初始值（status=not_started、progressPercent=0、notes=[]、无阻塞、version=1、completedAt/archivedAt=null）。
+- MCP 层 `apps/server/src/mcp/ai-task-policy.ts`：`canCreateAiTask` fail-closed（permissionProfile=default 且 actorType=resident_ai）。
+- `apps/server/src/mcp/mcp-server.ts`：注册 `task_create`，Zod `.strict()` 白名单只允许 task_id / project_id / project_task_id? / parent_task_id? / title / description?；授权集中策略 + 稳定脱敏错误映射。
+- 装配：`app.ts`（AppDeps + McpSessionRegistry）、`index.ts`（主入口）、`helpers.ts`（makeServices 注入 aiTaskService / makeAiTask factory）、全部 buildApp / buildMcpServer 测试注入。
+
+### 新增、修改和删除的文件清单
+
+新增：
+
+- `packages/contracts/src/ai-task.ts`
+- `apps/server/src/domain/ai-task/errors.ts`
+- `apps/server/src/domain/ai-task/repository.ts`
+- `apps/server/src/infrastructure/repositories/in-memory-ai-task-repository.ts`
+- `apps/server/src/application/ai-task/ai-task-service.ts`
+- `apps/server/src/mcp/ai-task-policy.ts`
+- `apps/server/test/ai-task-repository.test.ts`
+- `apps/server/test/ai-task-service.test.ts`
+- `apps/server/test/mcp-task-create.test.ts`
+
+修改：
+
+- `packages/contracts/src/index.ts`（导出 ai-task）
+- `apps/server/src/app.ts`、`apps/server/src/index.ts`、`apps/server/src/mcp/mcp-server.ts`
+- 既有测试注入 aiTaskService / 更新工具清单与计数：health、helpers、mcp-append-report、mcp-http、mcp-http-auth、mcp-http-smoke、mcp-http-smoke-auth、mcp-http-smoke-stage-update、mcp-list-reports、mcp-protocol、mcp-session-registry、mcp-submit-stage-update、project-api、project-status-api、project-task-api、project-work-report-api、stage-api、stage-update-request-approval-api、stage-update-request-request-changes-api、study-session-api、study-session-detail-api、study-summary-api
+
+删除：无。
+
+### 关键设计决定及其依据
+
+- 独立 AiTask 模型，不复用 ProjectTask：AI 私人任务树与正式主进度完全隔离，创建 / 未来完成只代表该 AI 自己的工作，绝不改变 ProjectTask / Stage 正式进度（本服务只写 AITask 仓储）。
+- 身份防线：ownerActorId 只从受信 authContext.actorId 注入，公开输入契约不含任何身份字段，`.strict()` 拒绝 ownerActorId / actor_id / actorCode 等；服务层另做 `assertValidRequesterContext` 防守性校验（actorId 合法 UUID、actorCode 非空且 ≤ 64、actorType 在既定三种内），非法上下文不写入且不泄露身份值。
+- 幂等：客户端 UUID 作幂等键，采用 stage-update-request 风格的“幂等预检”（不依赖项目 / 正式任务 / 父任务外部状态）+ 仓储 createIfAbsent 原子落账竞争处理：同 id 同语义重试返回既有，异语义受控冲突绝不覆盖（含跨项目 / 跨身份复用同 id）。
+- position 唯一：仓储层原子保证 projectId + ownerActorId + parentTaskId 范围唯一；服务层自动 max+1 并有界重试。PostgreSQL 落地注意事项（`UNIQUE NULLS NOT DISTINCT` 或部分唯一索引处理 parent_task_id IS NULL 的根任务去重）已写入仓储接口与错误注释。
+- 授权 fail-closed 集中策略：与 study-report / stage-update（temporary_ai 也允许）不同，AI 私人任务是长期身份的工作，只允许 default profile + resident_ai；临时 AI 只读 / 有限写入。
+- 长度校验单一来源：schema 与服务层都先 trim 再按 Unicode code point 计数（共享契约常量），不产生 JSON Schema 与服务层长度语义分叉；空 / 纯空白标题交给服务层受控业务错误。
+- MCP 写工具与既有工具一致：匿名只读上下文 fail-closed；授权拒绝与业务错误均为稳定脱敏文案；未知异常只进日志、响应固定“内部错误”，绝不泄露 Token / 连接凭据 / 其他 Actor 内容。
+
+### 执行过的测试或检查、命令与真实结果
+
+- 专项测试：`npx vitest run test/ai-task-repository.test.ts test/ai-task-service.test.ts test/mcp-task-create.test.ts` → **3 个文件、36/36 通过**（仓储 10 + 服务 17 + MCP 9）。
+- 根目录 typecheck：`npm run typecheck` → **contracts 与 server 均通过**（`tsc --noEmit`，无错误）。
+- 全量测试：`npx vitest run` → **54 个测试文件、866/866 通过**。
+- 真实 Streamable HTTP 冒烟已纳入全量：mcp-http-smoke-auth.test.ts 新增 task_create 真实 socket 写入（Bearer 解析身份落账），既有冒烟覆盖 tools/list 计数与双连接隔离。
+- NUL / BOM 扫描：本次新增与修改文件 **NUL=0、BOM=0**。
+- `git diff --check`：通过，仅有 Windows LF→CRLF 提示，无空白错误。
+
+### 未完成内容、已知问题和风险
+
+- 边界外未实现（按任务 #32 边界）：查询 / 更新 / 完成 / 备注 / 进度 / 查看他人任务、数据库 / AuditLog / 前端、项目报告写入，留待后续批次。
+- MCP 层对非 UUID task_id、超长标题 / 描述由严格 schema 先行拒绝（输入校验错误）；服务层的 AiTaskIdInvalidError / AiTaskTitleInvalidError / AiTaskDescriptionInvalidError 为纵深防御，专项服务测试已覆盖。
+- AiTaskPositionConflictError 在 MCP 层未单独映射（自动分配正常不触发），会落到“内部错误”；后续若引入显式 position 提交再细化文案。
+- `McpServerDeps` 新增 aiTaskService 使既有测试全部同步注入，模式与既往批次一致，全量回归通过，风险低。
+
+### 是否涉及数据库、身份权限、密钥、外部服务或破坏性变化
+
+- 不涉及数据库 migration（仍为内存仓储；PostgreSQL 唯一约束注意事项已在注释记录）。
+- 涉及身份认证 / 权限逻辑：新增写工具授权策略（fail-closed，集中独立 policy 函数），未读取、输出或提交任何真实 Key / Token / 密码 / 凭据。
+- 不涉及 VPS / Cloudflare / GitHub 等外部服务操作；无删除文件等破坏性变更。
+
+### 建议下一批任务
+
+- 按小喵安排推进后续计划项（如 AI 任务只读查询、备注或进度更新，需保持服务端身份边界与幂等）。
+- 本批两项均为“候选完成”，不作为任何复选框打勾依据。
+
+等待小喵审核。
+
+---
+
+## 小喵审核结果 #32 · 需要返修契约完整性与 trim 长度语义 · 2026-08-12
+
+### 审核结论
+
+身份归属、授权 fail-closed、父任务 / 正式任务范围校验、幂等和并发 position 主逻辑均符合任务方向；根目录 typecheck 与全量 **54 个文件、866/866** 也通过。但小喵独立构造了两项现有测试未覆盖的反例，当前不能勾选 `创建 AI 任务` 与 `task_create`。
+
+### 必须修复 1：完整响应 Schema 没有要求完整字段
+
+`aiTaskJsonSchema.required` 当前只列出部分字段，缺少：
+
+- `projectTaskId`
+- `parentTaskId`
+- `description`
+- `blockerType`
+- `blockerReason`
+- `completedAt`
+- `archivedAt`
+
+这些字段的**值可以是 null**，但完整 AiTask 响应中字段本身不能缺失。小喵用 AJV 删除上述 7 个字段后，`aiTaskJsonSchema` 仍返回 `true`，与“工具返回完整 AiTask”和 TypeScript `AiTask` 接口不一致。
+
+返修要求：
+
+1. 把 AiTask 接口中的全部字段列入 `aiTaskJsonSchema.required`；值可空与字段可缺失必须严格区分。
+2. 新增独立契约测试文件，逐一删除每个完整响应字段并确认校验失败，同时覆盖额外字段拒绝、null 合法值和完整对象成功。
+
+### 必须修复 2：创建契约与服务层的 trim 后长度语义分叉
+
+任务要求和代码注释声明“标题 / 描述先 trim，再按 Unicode code point 计数”。但 `createAiTaskInputSchema` 直接使用原始字符串 `maxLength`。小喵复现：
+
+- 输入标题 = 一个前导空格 + **恰好 200 个 emoji** + 一个尾随空格；
+- trim 后为合法的 200 code points，`AiTaskService` 与 MCP Zod refine 都应接受；
+- `createAiTaskInputSchema` 却返回 `false`（`maxLength`），因此契约与真实入口语义不一致。
+
+返修要求：
+
+1. 不要在普通 JSON Schema 中假装能执行 trim。选择一个诚实且单一的边界：创建 JSON Schema 负责类型、UUID、nullable 与字段白名单；trim 后非空和 code point 上限由共享服务校验 / MCP refine 负责。若采用其他方案，也必须证明与服务层对所有首尾空白边界一致。
+2. 契约测试至少覆盖标题和描述：trim 后恰好上限（含 astral emoji、带首尾空白）允许；trim 后超 1 拒绝应由业务服务 / MCP 入口稳定执行；不得出现契约先错误拒绝服务本应接受的输入。
+3. 检查并保持 MCP `.strict()` 对 owner / status / progress / notes / position / version / 时间等受保护字段的拒绝，不因修复长度语义而放宽字段白名单。
+
+### 复验要求与边界
+
+- 增加真正的 `ai-task-contract.test.ts`，不要只依赖仓储、服务和 MCP 测试。
+- 重新运行契约 / 仓储 / 服务 / MCP 专项、根目录 typecheck、全量测试、真实 Streamable HTTP 冒烟、NUL / BOM 扫描与 `git diff --check`，把真实数字追加到本文件末尾。
+- 只返修上述契约和测试，不开始查询 / 修改 / 完成等下一批；不修改计划复选框，不执行 Git / GitHub / VPS 操作，不读取或修改 `.claude/` 与 `ui素材mingwu/`。
+
+等待 DS 返修后由小喵复验。
+
+---
+
+## 检查点 #32 返修 · 契约完整性与 trim 后长度语义 · 2026-08-12
+
+### 本批次目标
+
+响应小喵审核结果 #32 的两项返修要求：
+
+1. 完整 AiTask 响应 Schema 必须把接口全部字段列入 `required`（值可空 ≠ 字段可缺失）；
+2. 创建契约 schema 不再假装执行 trim，避免对 trim 后合法的带首尾空白输入产生先于服务的错误拒绝。
+
+### 返修内容
+
+1. `aiTaskJsonSchema.required` 补全 7 个缺失字段：`projectTaskId`、`parentTaskId`、`description`、`blockerType`、`blockerReason`、`completedAt`、`archivedAt`；`required` 现与 TypeScript `AiTask` 接口全部 18 个字段一一对应。
+2. `createAiTaskInputSchema` 的 `title` / `description` 移除 `minLength` / `maxLength`：schema 只负责类型、UUID、nullable 与字段白名单；trim 后非空与 Unicode code point 上限统一由共享服务校验 / MCP Zod refine 执行（两者都先 trim 再按 code point 计数）。字段白名单（拒绝 owner / status / progress / notes / position / version / 时间 / 未知字段）保持不变。
+3. 新增 `apps/server/test/ai-task-contract.test.ts`（AJV）：完整响应 18 个字段逐一删除均校验失败、额外字段拒绝、null 合法、完整对象成功；创建契约对“前导空格 + 恰好 200 个 emoji + 尾随空格”的标题与“首尾空白 + 恰好 2000 个中文字符”的描述均接受（不产生先于服务的错误拒绝）。
+4. 服务与 MCP 入口补上“trim 后恰好上限且带首尾空白”的显式接受断言，闭环证明服务本应接受的输入在真实入口同样被接受。
+
+### 新增、修改和删除的文件清单
+
+修改：
+
+- `packages/contracts/src/ai-task.ts`（`aiTaskJsonSchema.required` 补全 + `createAiTaskInputSchema` 移除长度伪校验并更新注释）
+
+新增：
+
+- `apps/server/test/ai-task-contract.test.ts`
+
+修改（补断言）：
+
+- `apps/server/test/ai-task-service.test.ts`（新增 padded 恰好上限接受测试）
+- `apps/server/test/mcp-task-create.test.ts`（新增 padded 恰好上限接受断言）
+
+删除：无。
+
+### 关键设计决定及其依据
+
+- `required` 覆盖全部字段但属性类型保留 nullable（`['string','null']`）：值可空与字段可缺失严格区分，完整响应不允许缺字段，与“工具返回完整 AiTask”和 TS `AiTask` 接口一致。
+- 创建 schema 不做长度校验（诚实单一）：普通 JSON Schema 无 trim 能力，设置 `minLength` / `maxLength` 会对带首尾空白的合法输入先于服务错误拒绝；长度边界收敛到共享服务校验与 MCP refine（同一 `countCodePoints` 逻辑），符合“契约不产生先于服务的错误拒绝”。
+- 响应 schema 的 `title` / `description` 保留 `maxLength`：响应值由服务保证已 trim 且 ≤ 上限，`maxLength` 按 JSON Schema 规范以 Unicode code point 计数（AJV 默认 unicode:true），契约测试已验证恰好 200 emoji 响应合法、201 拒绝。
+
+### 执行过的测试或检查、命令与真实结果
+
+- 契约专项：`npx vitest run test/ai-task-contract.test.ts` → **14/14 通过**。
+- AiTask 专项：`npx vitest run test/ai-task-repository.test.ts test/ai-task-service.test.ts test/mcp-task-create.test.ts test/ai-task-contract.test.ts` → **4 个文件、51/51 通过**（仓储 10 + 服务 18 + MCP 9 + 契约 14）。
+- 根目录 typecheck：`npm run typecheck` → **contracts 与 server 均通过**（`tsc --noEmit`，无错误）。
+- 全量测试：`npx vitest run` → **55 个测试文件、881/881 通过**。
+- NUL / BOM 扫描：本次新增与修改文件 **NUL=0、BOM=0**。
+- `git diff --check`：通过，仅有 Windows LF→CRLF 提示，无空白错误。
+
+### 未完成内容、已知问题和风险
+
+- 边界外仍按任务 #32 保留：查询 / 更新 / 完成 / 备注 / 进度 / 查看他人任务、数据库 / AuditLog / 前端、项目报告写入，留待后续批次。
+- `createAiTaskInputSchema` 仍为参考契约（不接 HTTP 路由），真实入口长度语义由服务 / MCP refine 保证；契约测试与专项测试已把两者对齐。
+- 本返修只改契约与测试，未触碰授权策略、仓储与创建服务主逻辑。
+
+### 是否涉及数据库、身份权限、密钥、外部服务或破坏性变化
+
+- 不涉及数据库 migration、外部服务或破坏性变更；未读取、输出或提交任何真实 Key / Token / 密码 / 凭据；授权策略与字段白名单未放宽。
+
+### 建议下一批任务
+
+- 按小喵安排推进后续计划项（如 AI 任务只读查询、备注或进度更新）。
+- 本批两项仍为“候选完成”，不作为任何复选框打勾依据。
+
+等待小喵复验。
+
+---
+
+## 小喵复验结果 #32 · 通过 · 2026-08-12
+
+### 验收结论
+
+- `创建 AI 任务` 与 MCP `task_create` 已通过复验：AITask 与正式 ProjectTask 独立，owner 只来自服务端认证身份，匿名、临时 AI、审核模型与未知权限配置均 fail-closed。
+- 项目、正式任务、父 AI Task 的归属校验，跨 Actor / 跨项目隔离，客户端 UUID 幂等、仓储原子插入与并发 position 分配均符合要求；创建 AITask 不改变正式任务或关卡进度。
+- 首轮发现的两项契约缺口已修复：完整响应 Schema 现强制包含全部 18 个字段；创建参考 Schema 不再错误模拟 trim 后长度校验，真实长度边界统一由服务与 MCP refine 执行。
+
+### 小喵独立复验
+
+- 逐一删除完整 AiTask 的 18 个字段：全部被响应 Schema 正确拒绝；完整对象与显式 null 字段正确通过。
+- 带首尾空格、trim 后恰好 **200 个 emoji** 的标题：创建参考契约、服务层与 MCP 入口均正确接受并规范化。
+- 根目录 typecheck：contracts 与 server 均通过。
+- 全量测试：**55 个测试文件、881/881 通过**。
+- 源码、测试、契约与文档扫描：**NUL=0、BOM=0**。
+- `git diff --check`：通过，仅有 Windows LF→CRLF 提示，无空白错误。
+
+### 计划更新
+
+- 已将 `- [ ] 创建 AI 任务` 更新为 `- [x] 创建 AI 任务`。
+- 已将 `- [ ] task_create` 更新为 `- [x] task_create`。
+
+本批验收通过，可以提交并推送到 `develop`；下一批任务由小喵在推送后单独追加。

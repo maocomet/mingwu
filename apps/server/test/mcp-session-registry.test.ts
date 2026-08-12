@@ -15,6 +15,7 @@ describe('McpSessionRegistry per-server private identity', () => {
   function makeRegistry(): McpSessionRegistry {
     const services = makeServices();
     return new McpSessionRegistry({
+      aiTaskService: services.aiTaskService,
       projectStatusService: services.projectStatusService,
       stageService: services.stageService,
       studySessionDetailService: services.studySessionDetailService,

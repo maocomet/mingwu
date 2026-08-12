@@ -1,5 +1,6 @@
 import { buildApp } from './app.js';
 import { loadConfig } from './config.js';
+import { AiTaskService } from './application/ai-task/ai-task-service.js';
 import { ProjectService } from './application/project/project-service.js';
 import { StageService } from './application/stage/stage-service.js';
 import { ProjectTaskService } from './application/project-task/project-task-service.js';
@@ -11,6 +12,7 @@ import { StudySummaryService } from './application/study-summary/study-summary-s
 import { StudyReportService } from './application/study-report/study-report-service.js';
 import { StageUpdateRequestService } from './application/stage-update-request/stage-update-request-service.js';
 import { ProjectWorkReportService } from './application/project-work-report/project-work-report-service.js';
+import { InMemoryAiTaskRepository } from './infrastructure/repositories/in-memory-ai-task-repository.js';
 import { InMemoryProjectRepository } from './infrastructure/repositories/in-memory-project-repository.js';
 import { InMemoryStageRepository } from './infrastructure/repositories/in-memory-stage-repository.js';
 import { InMemoryProjectTaskRepository } from './infrastructure/repositories/in-memory-project-task-repository.js';
@@ -30,6 +32,7 @@ async function main(): Promise<void> {
   const projectRepository = new InMemoryProjectRepository();
   const stageRepository = new InMemoryStageRepository(store);
   const taskRepository = new InMemoryProjectTaskRepository();
+  const aiTaskRepository = new InMemoryAiTaskRepository();
   const studySessionRepository = new InMemoryStudySessionRepository();
   const studySummaryRepository = new InMemoryStudySummaryRepository();
   const studyReportRepository = new InMemoryStudyReportRepository();
@@ -42,6 +45,7 @@ async function main(): Promise<void> {
   const projectService = new ProjectService(projectRepository);
   const stageService = new StageService(stageRepository, projectRepository);
   const taskService = new ProjectTaskService(taskRepository, stageRepository, projectRepository);
+  const aiTaskService = new AiTaskService(aiTaskRepository, projectRepository, taskRepository);
   const projectStatusService = new ProjectStatusService(
     projectRepository,
     stageRepository,
@@ -77,6 +81,7 @@ async function main(): Promise<void> {
   );
   const app = buildApp({
     config,
+    aiTaskService,
     projectService,
     stageService,
     taskService,

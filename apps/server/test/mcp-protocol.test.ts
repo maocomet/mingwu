@@ -17,6 +17,7 @@ import {
 function buildTestServer() {
   const services = makeServices();
   const server = buildMcpServer({
+    aiTaskService: services.aiTaskService,
     projectStatusService: services.projectStatusService,
     stageService: services.stageService,
     studySessionDetailService: services.studySessionDetailService,
@@ -54,7 +55,7 @@ function firstText(result: {
 }
 
 describe('MCP protocol (official Client + InMemoryTransport)', () => {
-  it('initialize succeeds and exposes the five read-only tools plus two write tools with strict schemas', async () => {
+  it('initialize succeeds and exposes the six read-only tools plus three write tools with strict schemas', async () => {
     const { server } = buildTestServer();
     const client = await connectClient(server);
     try {
@@ -68,9 +69,10 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
         'study_append_report',
         'study_get_current_session',
         'study_get_session',
+        'task_create',
       ]);
-      // 六个只读工具都明确只读；两个写工具（study_append_report /
-      // project_submit_stage_update）不得标“只读”。
+      // 六个只读工具都明确只读；三个写工具（study_append_report /
+      // project_submit_stage_update / task_create）不得标“只读”。
       const READ_ONLY_TOOLS = new Set([
         'project_get_stage',
         'project_get_status',
@@ -83,6 +85,7 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
       expect(writeTools.map((t) => t.name).sort()).toEqual([
         'project_submit_stage_update',
         'study_append_report',
+        'task_create',
       ]);
       for (const tool of tools.filter((t) => READ_ONLY_TOOLS.has(t.name))) {
         expect(tool.description).toContain('只读');
@@ -107,6 +110,10 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
           'proposed_status',
           'reason',
         ],
+        // task_create 只列必填字段：project_task_id / parent_task_id / description
+        // 为可选字段，不进 required；可选字段的严格拒绝与长度边界在
+        // mcp-task-create.test.ts 中单独覆盖。
+        task_create: ['task_id', 'project_id', 'title'],
       };
       // 各工具字段类型：uuid 字段为 string + format uuid；其余字段只断言存在。
       const UUID_FIELDS = new Set([
@@ -115,6 +122,9 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
         'session_id',
         'report_id',
         'request_id',
+        'task_id',
+        'project_task_id',
+        'parent_task_id',
       ]);
       for (const tool of tools) {
         expect(tool.inputSchema.type).toBe('object');
@@ -418,6 +428,7 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
       },
     } as unknown as StudySessionDetailService;
     const server = buildMcpServer({
+      aiTaskService: services.aiTaskService,
       projectStatusService: services.projectStatusService,
       stageService: services.stageService,
       studySessionDetailService: throwingDetail,
@@ -491,6 +502,7 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
       },
     } as unknown as ProjectStatusService;
     const server = buildMcpServer({
+      aiTaskService: services.aiTaskService,
       projectStatusService: throwingStatus,
       stageService: services.stageService,
       studySessionDetailService: services.studySessionDetailService,
@@ -708,6 +720,7 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
       }),
     );
     const server = buildMcpServer({
+      aiTaskService: services.aiTaskService,
       projectStatusService: services.projectStatusService,
       stageService: services.stageService,
       studySessionDetailService: services.studySessionDetailService,
@@ -754,6 +767,7 @@ describe('MCP protocol (official Client + InMemoryTransport)', () => {
       }),
     );
     const server = buildMcpServer({
+      aiTaskService: services.aiTaskService,
       projectStatusService: services.projectStatusService,
       stageService: services.stageService,
       studySessionDetailService: services.studySessionDetailService,

@@ -180,7 +180,7 @@ Windows App
 
 ### AI Task API
 
-- [ ] 创建 AI 任务
+- [x] 创建 AI 任务
 - [ ] 查询自己的任务
 - [ ] 修改自己的任务
 - [ ] 完成自己的任务
@@ -223,7 +223,7 @@ Windows App
 - [x] project_submit_stage_update
 - [x] project_list_reports
 - [ ] task_list_my_tasks
-- [ ] task_create
+- [x] task_create
 - [ ] task_update
 - [ ] task_complete
 - [x] study_get_current_session

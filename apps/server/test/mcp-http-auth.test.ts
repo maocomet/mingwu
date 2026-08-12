@@ -27,6 +27,7 @@ function setupAuth(
   const services = makeServices();
   const app = buildApp({
     config,
+    aiTaskService: services.aiTaskService,
     projectService: services.projectService,
     stageService: services.stageService,
     taskService: services.taskService,
